@@ -1,0 +1,17 @@
+[package]
+name = "twocents-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "TwoCents — Slint UI + plotters (migrates features from the web app)"
+default-run = "twocents-desktop"
+
+[dependencies]
+slint = { version = "1.8", default-features = true }
+plotters = { version = "0.3.5", default-features = false, features = [
+  "bitmap_backend",
+  "line_series",
+  "ttf",
+] }
+
+[build-dependencies]
+slint-build = "1.8"
