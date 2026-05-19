@@ -6,12 +6,13 @@ description = "TwoCents — Slint UI + plotters (migrates features from the web 
 default-run = "twocents-desktop"
 
 [dependencies]
-slint = { version = "1.8", default-features = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+csv = "1.3"
+rfd = "0.15"
 plotters = { version = "0.3.5", default-features = false, features = [
   "bitmap_backend",
   "line_series",
   "ttf",
 ] }
-
-[build-dependencies]
-slint-build = "1.8"
+eframe = "0.34.2"
+egui_extras = "0.34.2"
