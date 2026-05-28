@@ -1,92 +1,69 @@
 # TwoCents
 
-A finance and budgeting app for couples to track expenses, manage split expenses, work towards savings goals, and gain insights into their financial habits.
+A modern, high-performance finance and budgeting desktop application built in Rust, powered by `egui` and `eframe`. TwoCents helps couples track their shared household expenses, manage categories, assign members, review imported bank statements, and gain rich analytical insights into their spending habits—completely offline and backed by a local SQLite database.
 
-## Tech Stack
+## Technical Stack
 
-- **Frontend**: Next.js 14+ (Web/Desktop)
-- **Backend**: Supabase (PostgreSQL + Auth + Storage + Real-time)
-- **Monorepo**: Turborepo
+- **Graphics & GUI**: `egui` & `eframe` (High-performance immediate-mode desktop framework)
+- **Data Grid**: `egui_extras` (Striped, resizable, and virtualized custom spreadsheets)
+- **Local Database**: SQLite via `rusqlite` (with bundled static linking)
+- **Date & Time**: `chrono` & `jiff`
+- **Analytics Charts**: `plotters` (Vector-based chart generation with bitmap engines)
+- **Language**: Rust (Edition 2021)
+
+---
+
+## Core Features
+
+### 1. Unified Interactive Spreadsheet Grid
+Both the main **Expenses** panel and the **CSV Statement Import review** modal share a single, high-performance grid component that supports:
+- **Interactive Editors**: Custom inline date pickers, amount inputs with automatic numeric sanitization, and text fields.
+- **Smart Auto-Completion**: Typeahead candidates for Members, Categories, Vendors, and Descriptions, with group headers and interactive chevron dropdown menus.
+- **Advanced Multi-Row Selection**: Copy, paste, bulk edit, and drag-to-fill features.
+- **Smooth Navigation**: Arrow key navigation, Tab/Shift-Tab focus shifting, and Escape cancellation.
+- **Intuitive Gestures**: Drag selection and Shift + Drag-panning across large lists.
+
+### 2. Local Database Transaction Layer
+Uses an embedded SQLite database (`TwoCentsApp` manages connections statically) ensuring that data is persisted instantaneously and loaded instantly upon launching the app.
+
+### 3. Beautiful Financial Analytics
+Generates clean analytics and budget/expense breakdowns over time, rendered with modern font rendering and dynamic sizing layout engines.
+
+---
 
 ## Getting Started
 
 ### Prerequisites
+- [Rust toolchain](https://rustup.rs/) (Stable channel)
+- Visual Studio Build Tools (for C++ compilation on Windows / MSVC target)
 
-- Node.js 18+
-- npm 9+
-- Docker Desktop
-- Supabase CLI
+### Building and Running
+Two-click launch scripts are provided for local Windows environments:
 
-### Installation
+1. **Rebuild and Run**:
+   Double-click or execute the launcher batch script to rebuild the application from scratch and launch the executable:
+   ```powershell
+   .\restart_app.bat
+   ```
 
-- Install dependencies:
+2. **Manual Compilation**:
+   Or run the compiler tool directly:
+   ```powershell
+   cargo build --release
+   cargo run --release
+   ```
 
-  ```bash
-  npm install
-  ```
-
-- Set up environment variables (see `apps/web/.env.example`)
-
-- Start development server:
-
-  ```bash
-  npm run dev
-  ```
-
-### Local Supabase (Recommended)
-
-- Start local Supabase services:
-
-  ```bash
-  npm run supabase:start
-  ```
-
-- Reset/apply all local migrations and seed data:
-
-  ```bash
-  npm run supabase:reset
-  ```
-
-- Get local API URL and anon key:
-
-  ```bash
-  npm run supabase:status
-  ```
-
-- Update `apps/web/.env.local` with the local values, then run:
-
-  ```bash
-  npm run dev:web
-  ```
-
-### Standalone (local) mode
-
-**Default is on** (no sign-in screen): unless you set `NEXT_PUBLIC_STANDALONE_MODE=false`, the app skips the marketing page and `/auth/*` and uses a **single local Supabase user**; the server signs in with `STANDALONE_AUTH_EMAIL` / `STANDALONE_AUTH_PASSWORD` in `.env.local` (not sent to the browser).
-
-1. In Supabase Studio (local), open **Authentication → Users** and add a user with the same email and password as `STANDALONE_AUTH_EMAIL` and `STANDALONE_AUTH_PASSWORD` in `apps/web/.env.local` (see `apps/web/.env.example`).
-
-The database still uses Supabase Auth under the hood (JWT in cookies) so row-level security keeps working. For a hosted or multi-user deploy, set `NEXT_PUBLIC_STANDALONE_MODE=false` to enable `/auth/login` and `/auth/signup`.
-
-Private-mode defaults:
-
-- Supabase signup is disabled in `supabase/config.toml`.
-- Web signup UI is disabled unless `NEXT_PUBLIC_ENABLE_SIGNUP=true`.
+---
 
 ## Project Structure
 
-- `apps/web` - Next.js web application
-- `packages/shared` - Shared business logic and utilities
-- `packages/supabase` - Supabase client configuration and types
-- `supabase/` - Database migrations and configuration
-
-## Development
-
-- `npm run dev` - Start all configured dev tasks (web-focused)
-- `npm run dev:web` - Start only the web application
-- `npm run supabase:start` - Start local Supabase stack
-- `npm run supabase:stop` - Stop local Supabase stack
-- `npm run supabase:status` - Show local Supabase URLs and keys
-- `npm run supabase:reset` - Reset local DB with migrations and seed
-- `npm run build` - Build all apps
-- `npm run lint` - Lint all apps
-- `npm run format` - Format code with Prettier
+- `src/` - Entire Rust codebase of the application:
+  - `src/main.rs` - Application entry point, window configuration, and event hook managers.
+  - `src/models.rs` - Structs and the core `GridRow` trait.
+  - `src/db.rs` - SQLite schema definitions, loading queries, and database updates.
+  - `src/ui/` - Layout sections and panels:
+    - `src/ui/grid.rs` - The unified spreadsheet component.
+    - `src/ui/expenses.rs` - The main expenses manager view.
+    - `src/ui/import_modal.rs` - Staged CSV statement imports reviewer.
+    - `src/ui/popups.rs` - Decoupled context picker menus, colors, and dropdown frames.
+    - `src/ui/widgets.rs` - Custom cell layout builders.
