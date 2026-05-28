@@ -748,7 +748,7 @@ impl eframe::App for TwoCentsApp {
                 Tab::Budgets => {
                   placeholder(ui, "Budgets", "Not ported yet. Next after expense/category import workflow.")
                 }
-                Tab::Goals => placeholder(ui, "Goals", "Not ported yet. Existing web logic remains source."),
+                Tab::Goals => placeholder(ui, "Goals", "Not ported yet. Goal tracking logic will be added next."),
                 Tab::Settlements => {
                   placeholder(ui, "Settlements", "Not ported yet. Shared settlement math moves next.")
                 }
