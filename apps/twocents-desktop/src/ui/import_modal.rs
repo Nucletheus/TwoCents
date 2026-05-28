@@ -226,6 +226,16 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
                           );
                           if amount_response.changed() {
                             self.import_rows[idx].amount_input.retain(|c| c.is_ascii_digit() || c == '.' || c == ',' || c == '-');
+                            // Collapse any extra decimal points: keep only the first one
+                            let s = self.import_rows[idx].amount_input.clone();
+                            let mut seen_dot = false;
+                            self.import_rows[idx].amount_input = s.chars().filter(|&c| {
+                              if c == '.' {
+                                if seen_dot { return false; }
+                                seen_dot = true;
+                              }
+                              true
+                            }).collect();
                             pending_amount_updates.push(idx);
                           }
                           if grid_field_committed(&amount_response) {
@@ -307,17 +317,21 @@ ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                           cell.text.surrender_focus();
                         }
                         member_chevron_rect = cell.chevron.rect;
-                        let (picked_member, member_popup_rect) = if editing {
-                          category_autocomplete_popup(
-                          ui,
-                          &cell.text,
-                          &mut self.import_rows[idx].member,
-                          &member_candidates,
-                          &mut autocomplete_selection,
-                          )
-                        } else {
-                          (false, egui::Rect::NOTHING)
-                        };
+                        if editing {
+                          if let Some(picked) = show_cell_autocomplete_popup(
+                            ui,
+                            &cell.text,
+                            &self.import_rows[idx].member,
+                            &member_candidates,
+                            &mut autocomplete_selection,
+                          ) {
+                            let targets = self.import_commit_targets(column, idx);
+                            self.apply_import_member_value(&targets, &picked);
+                            pending_import_member_commits.extend(targets);
+                          }
+                        }
+                        let (picked_member_ac, member_popup_rect) = (false, egui::Rect::NOTHING);
+                        let _ = picked_member_ac;
                         let mut member_pick = false;
                         let mut picked_member_value: Option<String> = None;
                         let current_member = self.import_rows[idx].member.trim().to_string();
@@ -338,7 +352,7 @@ ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                         });
                         let field_committed =
                           grid_text_field_committed(ui, &cell.text, member_popup_rect);
-                        if picked_member || member_pick || field_committed {
+                        if member_pick || field_committed {
                           let targets = self.import_commit_targets(column, idx);
                           let value =
                             picked_member_value.unwrap_or_else(|| self.import_rows[idx].member.clone());
@@ -396,17 +410,29 @@ ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                           cell.text.surrender_focus();
                         }
                         category_chevron_rect = cell.chevron.rect;
-                        let (picked_category, category_popup_rect) = if editing {
-                          category_autocomplete_popup(
-                          ui,
-                          &cell.text,
-                          &mut self.import_rows[idx].category,
-                          &category_candidates,
-                          &mut autocomplete_selection,
-                          )
-                        } else {
-                          (false, egui::Rect::NOTHING)
-                        };
+                        if editing {
+                          if let Some(picked) = show_cell_autocomplete_popup(
+                            ui,
+                            &cell.text,
+                            &self.import_rows[idx].category,
+                            &category_candidates,
+                            &mut autocomplete_selection,
+                          ) {
+                            let targets = self.import_commit_targets(column, idx);
+                            let mut value = picked;
+                            if let Some(matched) = find_category_by_label(&self.categories, &value) {
+                              let parents = category_parent_map(&self.categories);
+                              value = matched.full_label(&parents);
+                            } else if !value.trim().is_empty() {
+                              value.clear();
+                              self.log("[import] category must exist in Settings");
+                            }
+                            self.apply_import_category_value(&targets, &value);
+                            self.register_categories_for_import_rows(&targets);
+                          }
+                        }
+                        let (picked_cat_ac, category_popup_rect) = (false, egui::Rect::NOTHING);
+                        let _ = picked_cat_ac;
                         let mut combobox_pick = false;
                         let mut picked_category_value: Option<String> = None;
                         grid_chevron_picker_popup(ui, &cell.chevron, category_menu_w, Some(280.0), |ui| {
@@ -415,9 +441,22 @@ ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                             combobox_pick = true;
                           }
                         });
+                        let category_name = self.import_rows[idx].category.trim().to_string();
+                        cell.text.context_menu(|ui| {
+                          if category_name.is_empty() {
+                            ui.label(RichText::new("Pick a category from the list").small().weak());
+                            return;
+                          }
+                          if let Some(category) = find_category_by_label(&self.categories, &category_name) {
+                            if ui.button("Edit color\u{2026}").clicked() {
+                              self.open_category_color_popup(category.id, category_name, cat_bg);
+                              ui.close();
+                            }
+                          }
+                        });
                         let field_committed =
                           grid_text_field_committed(ui, &cell.text, category_popup_rect);
-                        if picked_category || combobox_pick || field_committed {
+                        if combobox_pick || field_committed {
                           let targets = self.import_commit_targets(column, idx);
                           let mut value = picked_category_value
                             .unwrap_or_else(|| self.import_rows[idx].category.clone());
@@ -466,18 +505,25 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
                           import_cell_id(column, idx),
                           editing,
                         );
-                        let (picked_vendor, vendor_popup_rect) = if editing {
-                          autocomplete_with_popup(
-                          ui,
-                          &response,
-                          &mut self.import_rows[idx].vendor,
-                          &vendor_candidates,
-                          &mut autocomplete_selection,
-                          )
-                        } else {
-                          (false, egui::Rect::NOTHING)
-                        };
-                        if picked_vendor || grid_text_field_committed(ui, &response, vendor_popup_rect) {
+                        if editing {
+                          if let Some(picked) = show_cell_autocomplete_popup(
+                            ui,
+                            &response,
+                            &self.import_rows[idx].vendor,
+                            &vendor_candidates,
+                            &mut autocomplete_selection,
+                          ) {
+                            self.import_rows[idx].vendor = picked;
+                            let targets = self.import_commit_targets(column, idx);
+                            self.apply_import_field_value(&targets, "vendor", idx);
+                          }
+                        }
+                        let (picked_vendor_ac, vendor_popup_rect) = (false, egui::Rect::NOTHING);
+                        let _ = picked_vendor_ac;
+                        if response.changed() {
+                          pending_amount_updates.push(idx); // reuse for dirty tracking
+                        }
+                        if editing && grid_text_field_committed(ui, &response, vendor_popup_rect) {
                           let targets = self.import_commit_targets(column, idx);
                           self.apply_import_field_value(&targets, "vendor", idx);
                         }
@@ -516,20 +562,25 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
                           import_cell_id(column, idx),
                           editing,
                         );
-                        let (picked_description, description_popup_rect) = if editing {
-                          autocomplete_with_popup(
-                          ui,
-                          &response,
-                          &mut self.import_rows[idx].description,
-                          &description_candidates,
-                          &mut autocomplete_selection,
-                          )
-                        } else {
-                          (false, egui::Rect::NOTHING)
-                        };
-                        if picked_description
-                          || grid_text_field_committed(ui, &response, description_popup_rect)
-                        {
+                        if editing {
+                          if let Some(picked) = show_cell_autocomplete_popup(
+                            ui,
+                            &response,
+                            &self.import_rows[idx].description,
+                            &description_candidates,
+                            &mut autocomplete_selection,
+                          ) {
+                            self.import_rows[idx].description = picked;
+                            let targets = self.import_commit_targets(column, idx);
+                            self.apply_import_field_value(&targets, "description", idx);
+                          }
+                        }
+                        let (picked_desc_ac, description_popup_rect) = (false, egui::Rect::NOTHING);
+                        let _ = picked_desc_ac;
+                        if response.changed() {
+                          pending_amount_updates.push(idx);
+                        }
+                        if editing && grid_text_field_committed(ui, &response, description_popup_rect) {
                           let targets = self.import_commit_targets(column, idx);
                           self.apply_import_field_value(&targets, "description", idx);
                         }
@@ -558,15 +609,20 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
             );
             if let Some((column, idx)) = self.import_grid_edit_cell {
               if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                let multi = self
+                  .import_grid_selection
+                  .as_ref()
+                  .is_some_and(|sel| sel.column == column && sel.rows.len() > 1);
                 if self.import_autocomplete_active(column, idx) {
                   self.tab_fill_import_cell(column, idx, autocomplete_selection);
+                } else if multi {
+                  self.commit_import_grid_cell(
+                    column,
+                    idx,
+                    &mut pending_amount_updates,
+                    &mut pending_import_member_commits,
+                  );
                 }
-                self.commit_import_grid_cell(
-                  column,
-                  idx,
-                  &mut pending_amount_updates,
-                  &mut pending_import_member_commits,
-                );
               }
               request_import_cell_focus(ui, column, idx);
             }

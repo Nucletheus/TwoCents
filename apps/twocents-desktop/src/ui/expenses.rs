@@ -203,6 +203,16 @@ impl TwoCentsApp {
                   );
                   if amount_response.changed() {
                     self.expenses[idx].amount_input.retain(|c| c.is_ascii_digit() || c == '.' || c == ',' || c == '-');
+                    // Collapse any extra decimal points: keep only the first one
+                    let s = self.expenses[idx].amount_input.clone();
+                    let mut seen_dot = false;
+                    self.expenses[idx].amount_input = s.chars().filter(|&c| {
+                      if c == '.' {
+                        if seen_dot { return false; }
+                        seen_dot = true;
+                      }
+                      true
+                    }).collect();
                     pending_updates.push((idx, "amount"));
                   }
                   if expense_cell_has_focus(ui.ctx(), column, idx) {
