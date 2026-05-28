@@ -5,20 +5,76 @@ use crate::db::*;
 use crate::ui::widgets::*;
 use crate::TwoCentsApp;
 
-impl TwoCentsApp {
-  pub fn member_color(&self, name: &str) -> Color32 {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-      return Color32::TRANSPARENT;
-    }
-    self
-      .members
-      .iter()
-      .find(|member| member.name.eq_ignore_ascii_case(trimmed))
-      .map(|member| member.color)
-      .unwrap_or(Color32::TRANSPARENT)
-  }
+// ---------------------------------------------------------------------------
+// Free-function helpers — used by the shared grid renderer (no &self needed)
+// ---------------------------------------------------------------------------
 
+pub fn member_color_for(members: &[HouseholdMember], name: &str) -> Color32 {
+  let trimmed = name.trim();
+  if trimmed.is_empty() { return Color32::TRANSPARENT; }
+  members.iter()
+    .find(|m| m.name.eq_ignore_ascii_case(trimmed))
+    .map(|m| m.color)
+    .unwrap_or(Color32::TRANSPARENT)
+}
+
+pub fn category_color_for(categories: &[Category], label: &str) -> Color32 {
+  let trimmed = label.trim();
+  if trimmed.is_empty() { return Color32::TRANSPARENT; }
+  find_category_by_label(categories, trimmed)
+    .map(|c| c.color)
+    .unwrap_or(Color32::TRANSPARENT)
+}
+
+/// Renders the category picker dropdown menu and returns the picked label, if any.
+/// Extracted from TwoCentsApp::ui_category_picker_menu so it can be called without &self.
+pub fn category_picker_menu_ui(ui: &mut egui::Ui, categories: &[Category], current: &str) -> Option<String> {
+  let parents = category_parent_map(categories);
+  let mut parent_ids: Vec<i64> = categories.iter()
+    .filter(|c| c.parent_id.is_none())
+    .map(|c| c.id)
+    .collect();
+  parent_ids.sort_by(|a, b| {
+    let na = categories.iter().find(|c| c.id == *a).map(|c| c.name.as_str()).unwrap_or("");
+    let nb = categories.iter().find(|c| c.id == *b).map(|c| c.name.as_str()).unwrap_or("");
+    na.to_lowercase().cmp(&nb.to_lowercase())
+  });
+  let mut picked: Option<String> = None;
+  let mut parent_has_children = HashSet::new();
+  for category in categories {
+    if let Some(pid) = category.parent_id { parent_has_children.insert(pid); }
+  }
+  for parent_id in parent_ids {
+    let Some(parent) = categories.iter().find(|c| c.id == parent_id) else { continue; };
+    if !parent_has_children.contains(&parent.id) {
+      let label = parent.name.clone();
+      if category_picker_row(ui, &label, parent.color, current.eq_ignore_ascii_case(&label), 0.0) {
+        picked = Some(label); ui.close();
+      }
+    } else {
+      category_picker_header_row(ui, &parent.name, parent.color);
+      let mut sub_ids: Vec<i64> = categories.iter()
+        .filter(|c| c.parent_id == Some(parent_id))
+        .map(|c| c.id)
+        .collect();
+      sub_ids.sort_by(|a, b| {
+        let na = categories.iter().find(|c| c.id == *a).map(|c| c.name.as_str()).unwrap_or("");
+        let nb = categories.iter().find(|c| c.id == *b).map(|c| c.name.as_str()).unwrap_or("");
+        na.to_lowercase().cmp(&nb.to_lowercase())
+      });
+      for sub_id in sub_ids {
+        let Some(sub) = categories.iter().find(|c| c.id == sub_id) else { continue; };
+        let label = sub.full_label(&parents);
+        if category_sub_picker_row(ui, &sub.name, current.eq_ignore_ascii_case(&label), 16.0) {
+          picked = Some(label); ui.close();
+        }
+      }
+      ui.separator();
+    }
+  }
+  picked
+}
+impl TwoCentsApp {
   fn set_member_color(&mut self, member_id: i64, color: Color32) {
     match update_member_color_db(&self.conn, self.household_id, member_id, color) {
       Ok(()) => {
@@ -68,15 +124,6 @@ impl TwoCentsApp {
     self.member_color_popup = if open { popup_state } else { None };
   }
 
-  pub fn category_color(&self, label: &str) -> Color32 {
-    let trimmed = label.trim();
-    if trimmed.is_empty() {
-      return Color32::TRANSPARENT;
-    }
-    find_category_by_label(&self.categories, trimmed)
-      .map(|category| category.color)
-      .unwrap_or(Color32::TRANSPARENT)
-  }
 
   fn set_category_color(&mut self, category_id: i64, color: Color32) {
     let is_parent = self
@@ -402,71 +449,6 @@ impl TwoCentsApp {
     self.category_color_popup = if open { popup_state } else { None };
   }
 
-  pub fn ui_category_picker_menu(&self, ui: &mut egui::Ui, current: &str) -> Option<String> {
-    let categories = &self.categories;
-    let parents = category_parent_map(categories);
-    let mut parent_ids: Vec<i64> = categories
-      .iter()
-      .filter(|category| category.parent_id.is_none())
-      .map(|category| category.id)
-      .collect();
-    parent_ids.sort_by(|a, b| {
-      let name_a = categories.iter().find(|c| c.id == *a).map(|c| c.name.as_str()).unwrap_or("");
-      let name_b = categories.iter().find(|c| c.id == *b).map(|c| c.name.as_str()).unwrap_or("");
-      name_a.to_lowercase().cmp(&name_b.to_lowercase())
-    });
-
-    let mut picked: Option<String> = None;
-    let mut parent_has_children = HashSet::new();
-    for category in categories {
-      if let Some(parent_id) = category.parent_id {
-        parent_has_children.insert(parent_id);
-      }
-    }
-
-    for parent_id in parent_ids {
-      let Some(parent) = categories.iter().find(|category| category.id == parent_id) else {
-        continue;
-      };
-      if !parent_has_children.contains(&parent.id) {
-        let label = parent.name.clone();
-        if category_picker_row(
-          ui,
-          &label,
-          parent.color,
-          current.eq_ignore_ascii_case(&label),
-          0.0,
-        ) {
-          picked = Some(label);
-          ui.close();
-        }
-      } else {
-        category_picker_header_row(ui, &parent.name, parent.color);
-        let mut sub_ids: Vec<i64> = categories
-          .iter()
-          .filter(|category| category.parent_id == Some(parent_id))
-          .map(|category| category.id)
-          .collect();
-        sub_ids.sort_by(|a, b| {
-          let name_a = categories.iter().find(|c| c.id == *a).map(|c| c.name.as_str()).unwrap_or("");
-          let name_b = categories.iter().find(|c| c.id == *b).map(|c| c.name.as_str()).unwrap_or("");
-          name_a.to_lowercase().cmp(&name_b.to_lowercase())
-        });
-        for sub_id in sub_ids {
-          let Some(sub) = categories.iter().find(|category| category.id == sub_id) else {
-            continue;
-          };
-          let label = sub.full_label(&parents);
-          if category_sub_picker_row(ui, &sub.name, current.eq_ignore_ascii_case(&label), 16.0) {
-            picked = Some(label);
-            ui.close();
-          }
-        }
-        ui.separator();
-      }
-    }
-    picked
-  }
 
   pub fn ui_delete_confirmations(&mut self, ctx: &egui::Context) {
     if self.show_delete_expense_confirm {

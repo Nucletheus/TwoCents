@@ -48,12 +48,16 @@ struct TwoCentsApp {
   import_grid_selection: Option<GridSelection>,
   import_grid_drag: Option<GridSelectDrag>,
   import_grid_edit_cell: Option<(GridColumn, usize)>,
+  import_grid_edit_original: Option<String>,
   import_grid_typeahead: Option<char>,
   import_grid_scroll_offset: f32,
   startup_window_frames: u8,
   active_expense_cell: Option<(GridColumn, usize)>,
   pending_grid_keyboard: Option<GridPendingKeyboard>,
   pending_grid_focus_target: Option<(GridColumn, usize)>,
+  active_import_cell: Option<(GridColumn, usize)>,
+  pending_import_grid_keyboard: Option<GridPendingKeyboard>,
+  pending_import_grid_focus_target: Option<(GridColumn, usize)>,
   show_delete_expense_confirm: bool,
   delete_expense_indices: Vec<usize>,
   show_delete_import_confirm: bool,
@@ -133,12 +137,16 @@ impl TwoCentsApp {
       import_grid_selection: None,
       import_grid_drag: None,
       import_grid_edit_cell: None,
+      import_grid_edit_original: None,
       import_grid_typeahead: None,
       import_grid_scroll_offset: 0.0,
       startup_window_frames: 0,
       active_expense_cell: None,
       pending_grid_keyboard: None,
       pending_grid_focus_target: None,
+      active_import_cell: None,
+      pending_import_grid_keyboard: None,
+      pending_import_grid_focus_target: None,
       show_delete_expense_confirm: false,
       delete_expense_indices: Vec::new(),
       show_delete_import_confirm: false,
@@ -274,6 +282,123 @@ impl TwoCentsApp {
       grid_nav_target(sorted_indices, pending.expense_idx, pending.column, pending.action.to_nav());
   }
 
+  fn import_autocomplete_active(&self, column: GridColumn, import_idx: usize) -> bool {
+    let Some(row) = self.import_rows.get(import_idx) else {
+      return false;
+    };
+    let candidates = match column {
+      GridColumn::Member => self.cached_member_candidates.clone(),
+      GridColumn::Category => self.cached_category_candidates.clone(),
+      GridColumn::Vendor => self.cached_import_vendor_candidates.clone(),
+      GridColumn::Description => self.cached_import_description_candidates.clone(),
+      GridColumn::Date | GridColumn::Amount => Vec::new(),
+    };
+    let value = match column {
+      GridColumn::Member => &row.member,
+      GridColumn::Category => &row.category,
+      GridColumn::Vendor => &row.vendor,
+      GridColumn::Description => &row.description,
+      GridColumn::Date | GridColumn::Amount => return false,
+    };
+    !Self::autocomplete_suggestions(value, &candidates).is_empty()
+  }
+
+  fn tab_fill_import_cell(&mut self, column: GridColumn, import_idx: usize, selected_index: usize) {
+    let candidates = match column {
+      GridColumn::Member => self.cached_member_candidates.clone(),
+      GridColumn::Category => self.cached_category_candidates.clone(),
+      GridColumn::Vendor => self.cached_import_vendor_candidates.clone(),
+      GridColumn::Description => self.cached_import_description_candidates.clone(),
+      GridColumn::Date | GridColumn::Amount => Vec::new(),
+    };
+    let Some(row) = self.import_rows.get_mut(import_idx) else {
+      return;
+    };
+    let value = match column {
+      GridColumn::Member => &mut row.member,
+      GridColumn::Category => &mut row.category,
+      GridColumn::Vendor => &mut row.vendor,
+      GridColumn::Description => &mut row.description,
+      GridColumn::Date | GridColumn::Amount => return,
+    };
+    let suggestions = Self::autocomplete_suggestions(value, &candidates);
+    if let Some(suggestion) = suggestions.get(selected_index) {
+      *value = suggestion.clone();
+    }
+  }
+
+  fn commit_import_cell(
+    &mut self,
+    column: GridColumn,
+    import_idx: usize,
+    pending_updates: &mut Vec<(usize, &'static str)>,
+    pending_category_commits: &mut Vec<usize>,
+    pending_member_commits: &mut Vec<usize>,
+  ) {
+    self.import_grid_edit_original = None;
+    let targets = self.import_commit_targets(column, import_idx);
+    match column {
+      GridColumn::Date => {
+        self.apply_import_field_value(&targets, "date", import_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "date")));
+      }
+      GridColumn::Amount => {
+        self.apply_import_field_value(&targets, "amount", import_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "amount")));
+      }
+      GridColumn::Member => {
+        let value = self
+          .import_rows
+          .get(import_idx)
+          .map(|row| row.member.clone())
+          .unwrap_or_default();
+        self.apply_import_member_value(&targets, &value);
+        pending_member_commits.extend(targets);
+      }
+      GridColumn::Category => {
+        let value = self
+          .import_rows
+          .get(import_idx)
+          .map(|row| row.category.clone())
+          .unwrap_or_default();
+        self.apply_import_category_value(&targets, &value);
+        pending_category_commits.extend(targets);
+      }
+      GridColumn::Vendor => {
+        self.apply_import_field_value(&targets, "vendor", import_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "vendor")));
+      }
+      GridColumn::Description => {
+        self.apply_import_field_value(&targets, "description", import_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "description")));
+      }
+    }
+  }
+
+  fn apply_pending_import_grid_keyboard(
+    &mut self,
+    sorted_indices: &[usize],
+    pending_updates: &mut Vec<(usize, &'static str)>,
+    pending_category_commits: &mut Vec<usize>,
+    pending_member_commits: &mut Vec<usize>,
+  ) {
+    let Some(pending) = self.pending_import_grid_keyboard.take() else {
+      return;
+    };
+    if matches!(pending.action, GridKeyboardAction::Tab { .. }) {
+      self.tab_fill_import_cell(pending.column, pending.expense_idx, self.autocomplete_selection);
+    }
+    self.commit_import_cell(
+      pending.column,
+      pending.expense_idx,
+      pending_updates,
+      pending_category_commits,
+      pending_member_commits,
+    );
+    self.pending_import_grid_focus_target =
+      grid_nav_target(sorted_indices, pending.expense_idx, pending.column, pending.action.to_nav());
+  }
+
   fn reload(&mut self) {
     self.accounts = load_accounts(&self.conn, self.household_id).unwrap_or_else(|err| {
       self.log(format!("[error] accounts load failed: {err}"));
@@ -383,40 +508,7 @@ impl TwoCentsApp {
     self.expense_grid_typeahead = None;
   }
 
-  fn apply_expense_grid_typeahead(&mut self, column: GridColumn, row: usize) {
-    let Some(ch) = self.expense_grid_typeahead.take() else {
-      return;
-    };
-    let Some(expense) = self.expenses.get_mut(row) else {
-      return;
-    };
-    match column {
-      GridColumn::Date => {
-        expense.date.clear();
-        expense.date.push(ch);
-      }
-      GridColumn::Amount => {
-        expense.amount_input.clear();
-        expense.amount_input.push(ch);
-      }
-      GridColumn::Member => {
-        expense.member.clear();
-        expense.member.push(ch);
-      }
-      GridColumn::Category => {
-        expense.category.clear();
-        expense.category.push(ch);
-      }
-      GridColumn::Vendor => {
-        expense.vendor.clear();
-        expense.vendor.push(ch);
-      }
-      GridColumn::Description => {
-        expense.description.clear();
-        expense.description.push(ch);
-      }
-    }
-  }
+
 
   fn expense_commit_targets(&self, column: GridColumn, active_row: usize) -> Vec<usize> {
     grid_commit_targets(&self.expense_grid_selection, column, active_row)
@@ -468,7 +560,59 @@ impl eframe::App for TwoCentsApp {
   }
 
   fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-    if self.tab != Tab::Expenses || self.show_import_review {
+    if self.show_import_review {
+      let Some((column, import_idx)) = self.active_import_cell else {
+        return;
+      };
+
+      let mut keyboard_action = None;
+      raw_input.events.retain(|event| {
+        match event {
+          egui::Event::Key {
+            key: egui::Key::Enter,
+            pressed: true,
+            modifiers,
+            ..
+          } if !modifiers.any() => {
+            if self.import_autocomplete_active(column, import_idx) {
+              keyboard_action = Some(GridKeyboardAction::Tab { shift: false });
+              false
+            } else if self.import_grid_selection.as_ref().is_some_and(|selection| {
+              selection.column == column && selection.rows.len() > 1
+            }) {
+              true
+            } else {
+              keyboard_action = Some(GridKeyboardAction::Enter);
+              false
+            }
+          }
+          egui::Event::Key {
+            key: egui::Key::Tab,
+            pressed: true,
+            modifiers,
+            ..
+          } => {
+            keyboard_action = Some(GridKeyboardAction::Tab {
+              shift: modifiers.shift,
+            });
+            false
+          }
+          _ => true,
+        }
+      });
+
+      if let Some(action) = keyboard_action {
+        self.pending_import_grid_keyboard = Some(GridPendingKeyboard {
+          column,
+          expense_idx: import_idx,
+          action,
+        });
+        ctx.request_repaint();
+      }
+      return;
+    }
+
+    if self.tab != Tab::Expenses {
       self.active_expense_cell = None;
       return;
     }

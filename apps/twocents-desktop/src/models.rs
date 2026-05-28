@@ -1,6 +1,26 @@
 use eframe::egui::{Color32, Id};
 use std::collections::{HashMap, HashSet};
 
+// ---------------------------------------------------------------------------
+// GridRow trait — abstracts the editable fields shared by Expense & ImportRow
+// ---------------------------------------------------------------------------
+pub trait GridRow {
+  fn row_date(&self) -> &str;
+  fn row_date_mut(&mut self) -> &mut String;
+  fn row_amount_input(&self) -> &str;
+  fn row_amount_input_mut(&mut self) -> &mut String;
+  fn row_amount_cents(&self) -> i64;
+  fn set_row_amount_cents(&mut self, cents: i64);
+  fn row_member(&self) -> &str;
+  fn row_member_mut(&mut self) -> &mut String;
+  fn row_category(&self) -> &str;
+  fn row_category_mut(&mut self) -> &mut String;
+  fn row_vendor(&self) -> &str;
+  fn row_vendor_mut(&mut self) -> &mut String;
+  fn row_description(&self) -> &str;
+  fn row_description_mut(&mut self) -> &mut String;
+}
+
 pub const CATEGORY_LABEL_SEP: &str = " › ";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,6 +54,23 @@ pub struct Expense {
   pub description: String,
 }
 
+impl GridRow for Expense {
+  fn row_date(&self) -> &str { &self.date }
+  fn row_date_mut(&mut self) -> &mut String { &mut self.date }
+  fn row_amount_input(&self) -> &str { &self.amount_input }
+  fn row_amount_input_mut(&mut self) -> &mut String { &mut self.amount_input }
+  fn row_amount_cents(&self) -> i64 { self.amount_cents }
+  fn set_row_amount_cents(&mut self, cents: i64) { self.amount_cents = cents; }
+  fn row_member(&self) -> &str { &self.member }
+  fn row_member_mut(&mut self) -> &mut String { &mut self.member }
+  fn row_category(&self) -> &str { &self.category }
+  fn row_category_mut(&mut self) -> &mut String { &mut self.category }
+  fn row_vendor(&self) -> &str { &self.vendor }
+  fn row_vendor_mut(&mut self) -> &mut String { &mut self.vendor }
+  fn row_description(&self) -> &str { &self.description }
+  fn row_description_mut(&mut self) -> &mut String { &mut self.description }
+}
+
 #[derive(Clone)]
 pub struct ImportRow {
   pub date: String,
@@ -43,6 +80,23 @@ pub struct ImportRow {
   pub category: String,
   pub vendor: String,
   pub description: String,
+}
+
+impl GridRow for ImportRow {
+  fn row_date(&self) -> &str { &self.date }
+  fn row_date_mut(&mut self) -> &mut String { &mut self.date }
+  fn row_amount_input(&self) -> &str { &self.amount_input }
+  fn row_amount_input_mut(&mut self) -> &mut String { &mut self.amount_input }
+  fn row_amount_cents(&self) -> i64 { self.amount_cents }
+  fn set_row_amount_cents(&mut self, cents: i64) { self.amount_cents = cents; }
+  fn row_member(&self) -> &str { &self.member }
+  fn row_member_mut(&mut self) -> &mut String { &mut self.member }
+  fn row_category(&self) -> &str { &self.category }
+  fn row_category_mut(&mut self) -> &mut String { &mut self.category }
+  fn row_vendor(&self) -> &str { &self.vendor }
+  fn row_vendor_mut(&mut self) -> &mut String { &mut self.vendor }
+  fn row_description(&self) -> &str { &self.description }
+  fn row_description_mut(&mut self) -> &mut String { &mut self.description }
 }
 
 #[derive(Clone)]

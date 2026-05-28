@@ -1,5 +1,4 @@
-use eframe::egui::{self, Color32, Id, RichText};
-use egui_extras::TableBuilder;
+use eframe::egui::{self, Id, RichText};
 use crate::models::*;
 use crate::db::*;
 use crate::ui::widgets::*;
@@ -107,8 +106,26 @@ impl TwoCentsApp {
         let member_candidates = self.cached_member_candidates.clone();
         let vendor_candidates = self.cached_import_vendor_candidates.clone();
         let description_candidates = self.cached_import_description_candidates.clone();
-        let review_table_height = (ui.available_height() - 96.0).max(180.0);
         let mut autocomplete_selection = self.autocomplete_selection;
+
+        let mut pending_updates = Vec::new();
+        let mut pending_category_commits = Vec::new();
+        let mut pending_member_commits = Vec::new();
+        let mut pending_grid_focus = None;
+
+        let import_indices: Vec<usize> = (0..self.import_rows.len()).collect();
+
+        self.active_import_cell = None;
+        self.apply_pending_import_grid_keyboard(
+          &import_indices,
+          &mut pending_updates,
+          &mut pending_category_commits,
+          &mut pending_member_commits,
+        );
+        if let Some(target) = self.pending_import_grid_focus_target.take() {
+          pending_grid_focus = Some(target);
+        }
+
         egui::Frame::new()
           .fill(ui.visuals().window_fill)
           .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
@@ -118,525 +135,88 @@ impl TwoCentsApp {
             let old_spacing = ui.spacing().item_spacing;
             ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
             let import_columns = spreadsheet_columns(ui, 95.0, 85.0, 90.0, 180.0, 140.0);
-            let category_menu_w = category_picker_menu_width(ui, &self.categories, 180.0);
-            let member_menu_w = MEMBER_PICKER_MIN_WIDTH;
-            let member_count = self.members.len();
-            let member_scroll = if member_count > 10 {
-              Some(member_picker_max_height(member_count))
-            } else {
-              None
-            };
-            let import_indices: Vec<usize> = (0..self.import_rows.len()).collect();
-            let mut row_drag_bands: Vec<(usize, f32, f32)> = Vec::new();
-            
-            let _import_active_cell: Option<(GridColumn, usize)> = None;
             let mut import_scroll_y = self.import_grid_scroll_offset;
-            #[allow(deprecated)]
-            let import_scroll = egui::ScrollArea::vertical()
-              .id_salt("import_grid_scroll")
-              .max_height(review_table_height)
-              .auto_shrink([false, false])
-              .drag_to_scroll(false)
-              .scroll_offset(egui::vec2(0.0, import_scroll_y))
-              .show(ui, |ui| {
-                ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
-                TableBuilder::new(ui)
-              .striped(false)
-              .resizable(true)
-              .vscroll(false)
-              .min_scrolled_height(120.0)
-              .max_scroll_height(review_table_height)
-              .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-              .column(import_columns[0].clone())
-              .column(import_columns[1].clone())
-              .column(import_columns[2].clone())
-              .column(import_columns[3].clone())
-              .column(import_columns[4].clone())
-              .column(import_columns[5].clone())
-              .header(GRID_HEADER_HEIGHT, |mut header| {
-                header.col(|ui| { grid_header(ui, "Date"); });
-                header.col(|ui| { grid_header(ui, "Amount"); });
-                header.col(|ui| { grid_header(ui, "Member"); });
-                header.col(|ui| { grid_header(ui, "Category"); });
-                header.col(|ui| { grid_header(ui, "Vendor"); });
-                header.col(|ui| { grid_header(ui, "Description"); });
-              })
-              .body(|mut body| {
-                for idx in 0..self.import_rows.len() {
-                  body.row(GRID_ROW_HEIGHT, |mut row| {
-                    row.col(|ui| {
-                      let column = GridColumn::Date;
-              let row_rect = ui.max_rect();
-              row_drag_bands.push((idx, row_rect.top(), row_rect.bottom()));
-              process_grid_column_cell(
-                ui,
-                column,
-                idx,
-                &mut self.import_grid_selection,
-                &mut self.import_grid_drag,
-                &mut self.import_grid_edit_cell,
-              );
-                      let _selected = grid_row_selected(&self.import_grid_selection, column, idx);
-              ui.horizontal(|ui| {
-let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
-                        if editing {
-                          self.apply_import_grid_typeahead(column, idx);
-                        }
-                        let (_response, date_changed) = ui_grid_date_edit(
-                          ui,
-                          &mut self.import_rows[idx].date,
-                          &mut self.expense_grid_edit_original,
-                          &mut self.import_grid_edit_cell,
-                          import_cell_id(column, idx),
-                          editing,
-                        );
-                        let press_enter = editing && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if date_changed || press_enter {
-                          pending_amount_updates.push(idx);
-                          self.import_grid_edit_cell = None;
-                          self.expense_grid_edit_original = None;
-                          let targets = self.import_commit_targets(column, idx);
-                          self.apply_import_field_value(&targets, "date", idx);
-                        }
-                      });
-                    });
-                    row.col(|ui| {
-                      let column = GridColumn::Amount;
-              let _row_rect = ui.max_rect();
-              process_grid_column_cell(
-                ui,
-                column,
-                idx,
-                &mut self.import_grid_selection,
-                &mut self.import_grid_drag,
-                &mut self.import_grid_edit_cell,
-              );
-                      let _selected = grid_row_selected(&self.import_grid_selection, column, idx);
-              ui.horizontal(|ui| {
-let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
-                        if editing {
-                          self.apply_import_grid_typeahead(column, idx);
-                          let amount_response = ui_grid_text_edit(
-                            ui,
-                            &mut self.import_rows[idx].amount_input,
-                            &mut self.expense_grid_edit_original,
-                            &mut self.import_grid_edit_cell,
-                            import_cell_id(column, idx),
-                            true,
-                          );
-                          if amount_response.changed() {
-                            self.import_rows[idx].amount_input.retain(|c| c.is_ascii_digit() || c == '.' || c == ',' || c == '-');
-                            // Collapse any extra decimal points: keep only the first one
-                            let s = self.import_rows[idx].amount_input.clone();
-                            let mut seen_dot = false;
-                            self.import_rows[idx].amount_input = s.chars().filter(|&c| {
-                              if c == '.' {
-                                if seen_dot { return false; }
-                                seen_dot = true;
-                              }
-                              true
-                            }).collect();
-                            pending_amount_updates.push(idx);
-                          }
-                          if grid_field_committed(&amount_response) {
-                            let orig = self.expense_grid_edit_original.take().unwrap_or_default();
-                            if let Some(cents) = parse_amount_cents(&self.import_rows[idx].amount_input) {
-                                self.import_rows[idx].amount_input = money(cents).replace('$', "");
-                                self.import_grid_edit_cell = None;
-                                let targets = self.import_commit_targets(column, idx);
-                                self.apply_import_field_value(&targets, "amount", idx);
-                            } else {
-                                self.import_rows[idx].amount_input = orig;
-                                self.import_grid_edit_cell = None;
-                            }
-                          }
-                        } else {
-                          let display_value = if let Some(cents) = parse_amount_cents(&self.import_rows[idx].amount_input) {
-                            money(cents)
-                          } else {
-                            self.import_rows[idx].amount_input.clone()
-                          };
-                          let mut temp = display_value;
-                          ui_grid_text_edit(
-                            ui,
-                            &mut temp,
-                            &mut self.expense_grid_edit_original,
-                            &mut self.import_grid_edit_cell,
-                            import_cell_id(column, idx),
-                            false,
-                          );
-                        }
-                      });
-                      process_grid_column_cell(
-                      ui,
-                      column,
-                      idx,
-                      &mut self.import_grid_selection,
-                      &mut self.import_grid_drag,
-                      &mut self.import_grid_edit_cell,
-                    );
-                    });
-                    row.col(|ui| {
-                      let column = GridColumn::Member;
-                      let member_bg = self.member_color(&self.import_rows[idx].member);
-                      if member_bg.a() > 0 && member_bg != Color32::TRANSPARENT {
-                        ui.painter().rect_filled(ui.max_rect(), 0.0, member_bg);
-                      }
-                      process_grid_column_cell(
-                        ui,
-                        column,
-                        idx,
-                        &mut self.import_grid_selection,
-                        &mut self.import_grid_drag,
-                        &mut self.import_grid_edit_cell,
-                      );
-                      let _selected = grid_row_selected(&self.import_grid_selection, column, idx);
-                      let mut member_chevron_rect = egui::Rect::NOTHING;
-              ui.horizontal(|ui| {
-ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                        let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
-                        if editing {
-                          self.apply_import_grid_typeahead(column, idx);
-                        }
-                        if editing && self.expense_grid_edit_original.is_none() {
-                          self.expense_grid_edit_original = Some(self.import_rows[idx].member.clone());
-                        }
-                        let member_bg = self.member_color(&self.import_rows[idx].member);
-                        let cell = member_cell_ui(
-                          ui,
-                          &mut self.import_rows[idx].member,
-                          member_bg,
-                          import_cell_id(column, idx),
-                          editing,
-                        );
-                        if editing && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-                          if let Some(orig) = self.expense_grid_edit_original.take() {
-                            self.import_rows[idx].member = orig;
-                          }
-                          self.import_grid_edit_cell = None;
-                          cell.text.surrender_focus();
-                        }
-                        member_chevron_rect = cell.chevron.rect;
-                        if editing {
-                          if let Some(picked) = show_cell_autocomplete_popup(
-                            ui,
-                            &cell.text,
-                            &self.import_rows[idx].member,
-                            &member_candidates,
-                            &mut autocomplete_selection,
-                          ) {
-                            let targets = self.import_commit_targets(column, idx);
-                            self.apply_import_member_value(&targets, &picked);
-                            pending_import_member_commits.extend(targets);
-                          }
-                        }
-                        let (picked_member_ac, member_popup_rect) = (false, egui::Rect::NOTHING);
-                        let _ = picked_member_ac;
-                        let mut member_pick = false;
-                        let mut picked_member_value: Option<String> = None;
-                        let current_member = self.import_rows[idx].member.trim().to_string();
-                        grid_chevron_picker_popup(ui, &cell.chevron, member_menu_w, member_scroll, |ui| {
-                          if member_none_row_selectable(ui, current_member.is_empty()) {
-                            picked_member_value = Some(String::new());
-                            member_pick = true;
-                            ui.close();
-                          }
-                          ui.separator();
-                          for member in &self.members {
-                            if member_row_selectable(ui, member, member.name.eq_ignore_ascii_case(&current_member)) {
-                              picked_member_value = Some(member.name.clone());
-                              member_pick = true;
-                              ui.close();
-                            }
-                          }
-                        });
-                        let field_committed =
-                          grid_text_field_committed(ui, &cell.text, member_popup_rect);
-                        if member_pick || field_committed {
-                          let targets = self.import_commit_targets(column, idx);
-                          let value =
-                            picked_member_value.unwrap_or_else(|| self.import_rows[idx].member.clone());
-                          self.apply_import_member_value(&targets, &value);
-                          pending_import_member_commits.extend(targets);
-                        }
-                      });
-                      process_grid_column_cell(
-                      ui,
-                      column,
-                      idx,
-                      &mut self.import_grid_selection,
-                      &mut self.import_grid_drag,
-                      &mut self.import_grid_edit_cell,
-                    );
-                    });
-                    row.col(|ui| {
-                      let column = GridColumn::Category;
-                      let cat_bg = self.category_color(&self.import_rows[idx].category);
-                      if cat_bg.a() > 0 && cat_bg != Color32::TRANSPARENT {
-                        ui.painter().rect_filled(ui.max_rect(), 0.0, cat_bg);
-                      }
-                      process_grid_column_cell(
-                        ui,
-                        column,
-                        idx,
-                        &mut self.import_grid_selection,
-                        &mut self.import_grid_drag,
-                        &mut self.import_grid_edit_cell,
-                      );
-                      let _selected = grid_row_selected(&self.import_grid_selection, column, idx);
-                      let mut category_chevron_rect = egui::Rect::NOTHING;
-              ui.horizontal(|ui| {
-ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                        let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
-                        if editing {
-                          self.apply_import_grid_typeahead(column, idx);
-                        }
-                        if editing && self.expense_grid_edit_original.is_none() {
-                          self.expense_grid_edit_original = Some(self.import_rows[idx].category.clone());
-                        }
-                        let cat_bg = self.category_color(&self.import_rows[idx].category);
-                        let cell = category_cell_ui(
-                          ui,
-                          &mut self.import_rows[idx].category,
-                          cat_bg,
-                          import_cell_id(column, idx),
-                          editing,
-                        );
-                        if editing && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-                          if let Some(orig) = self.expense_grid_edit_original.take() {
-                            self.import_rows[idx].category = orig;
-                          }
-                          self.import_grid_edit_cell = None;
-                          cell.text.surrender_focus();
-                        }
-                        category_chevron_rect = cell.chevron.rect;
-                        if editing {
-                          if let Some(picked) = show_cell_autocomplete_popup(
-                            ui,
-                            &cell.text,
-                            &self.import_rows[idx].category,
-                            &category_candidates,
-                            &mut autocomplete_selection,
-                          ) {
-                            let targets = self.import_commit_targets(column, idx);
-                            let mut value = picked;
-                            if let Some(matched) = find_category_by_label(&self.categories, &value) {
-                              let parents = category_parent_map(&self.categories);
-                              value = matched.full_label(&parents);
-                            } else if !value.trim().is_empty() {
-                              value.clear();
-                              self.log("[import] category must exist in Settings");
-                            }
-                            self.apply_import_category_value(&targets, &value);
-                            self.register_categories_for_import_rows(&targets);
-                          }
-                        }
-                        let (picked_cat_ac, category_popup_rect) = (false, egui::Rect::NOTHING);
-                        let _ = picked_cat_ac;
-                        let mut combobox_pick = false;
-                        let mut picked_category_value: Option<String> = None;
-                        grid_chevron_picker_popup(ui, &cell.chevron, category_menu_w, Some(280.0), |ui| {
-                          if let Some(label) = self.ui_category_picker_menu(ui, &self.import_rows[idx].category) {
-                            picked_category_value = Some(label);
-                            combobox_pick = true;
-                          }
-                        });
-                        let category_name = self.import_rows[idx].category.trim().to_string();
-                        cell.text.context_menu(|ui| {
-                          if category_name.is_empty() {
-                            ui.label(RichText::new("Pick a category from the list").small().weak());
-                            return;
-                          }
-                          if let Some(category) = find_category_by_label(&self.categories, &category_name) {
-                            if ui.button("Edit color\u{2026}").clicked() {
-                              self.open_category_color_popup(category.id, category_name, cat_bg);
-                              ui.close();
-                            }
-                          }
-                        });
-                        let field_committed =
-                          grid_text_field_committed(ui, &cell.text, category_popup_rect);
-                        if combobox_pick || field_committed {
-                          let targets = self.import_commit_targets(column, idx);
-                          let mut value = picked_category_value
-                            .unwrap_or_else(|| self.import_rows[idx].category.clone());
-                          if let Some(matched) = find_category_by_label(&self.categories, &value) {
-                            let parents = category_parent_map(&self.categories);
-                            value = matched.full_label(&parents);
-                          } else if !value.trim().is_empty() {
-                            value.clear();
-                            self.log("[import] category must exist in Settings");
-                          }
-                          self.apply_import_category_value(&targets, &value);
-                          self.register_categories_for_import_rows(&targets);
-                        }
-                      });
-                      process_grid_column_cell(
-                      ui,
-                      column,
-                      idx,
-                      &mut self.import_grid_selection,
-                      &mut self.import_grid_drag,
-                      &mut self.import_grid_edit_cell,
-                    );
-                    });
-                    row.col(|ui| {
-                      let column = GridColumn::Vendor;
-              let _row_rect = ui.max_rect();
-              process_grid_column_cell(
-                ui,
-                column,
-                idx,
-                &mut self.import_grid_selection,
-                &mut self.import_grid_drag,
-                &mut self.import_grid_edit_cell,
-              );
-                      let _selected = grid_row_selected(&self.import_grid_selection, column, idx);
-              ui.horizontal(|ui| {
-let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
-                        if editing {
-                          self.apply_import_grid_typeahead(column, idx);
-                        }
-                        let response = ui_grid_text_edit(
-                          ui,
-                          &mut self.import_rows[idx].vendor,
-                          &mut self.expense_grid_edit_original,
-                          &mut self.import_grid_edit_cell,
-                          import_cell_id(column, idx),
-                          editing,
-                        );
-                        if editing {
-                          if let Some(picked) = show_cell_autocomplete_popup(
-                            ui,
-                            &response,
-                            &self.import_rows[idx].vendor,
-                            &vendor_candidates,
-                            &mut autocomplete_selection,
-                          ) {
-                            self.import_rows[idx].vendor = picked;
-                            let targets = self.import_commit_targets(column, idx);
-                            self.apply_import_field_value(&targets, "vendor", idx);
-                          }
-                        }
-                        let (picked_vendor_ac, vendor_popup_rect) = (false, egui::Rect::NOTHING);
-                        let _ = picked_vendor_ac;
-                        if response.changed() {
-                          pending_amount_updates.push(idx); // reuse for dirty tracking
-                        }
-                        if editing && grid_text_field_committed(ui, &response, vendor_popup_rect) {
-                          let targets = self.import_commit_targets(column, idx);
-                          self.apply_import_field_value(&targets, "vendor", idx);
-                        }
-                      });
-                      process_grid_column_cell(
-                      ui,
-                      column,
-                      idx,
-                      &mut self.import_grid_selection,
-                      &mut self.import_grid_drag,
-                      &mut self.import_grid_edit_cell,
-                    );
-                    });
-                    row.col(|ui| {
-                      let column = GridColumn::Description;
-              let _row_rect = ui.max_rect();
-              process_grid_column_cell(
-                ui,
-                column,
-                idx,
-                &mut self.import_grid_selection,
-                &mut self.import_grid_drag,
-                &mut self.import_grid_edit_cell,
-              );
-                      let _selected = grid_row_selected(&self.import_grid_selection, column, idx);
-              ui.horizontal(|ui| {
-let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
-                        if editing {
-                          self.apply_import_grid_typeahead(column, idx);
-                        }
-                        let response = ui_grid_text_edit(
-                          ui,
-                          &mut self.import_rows[idx].description,
-                          &mut self.expense_grid_edit_original,
-                          &mut self.import_grid_edit_cell,
-                          import_cell_id(column, idx),
-                          editing,
-                        );
-                        if editing {
-                          if let Some(picked) = show_cell_autocomplete_popup(
-                            ui,
-                            &response,
-                            &self.import_rows[idx].description,
-                            &description_candidates,
-                            &mut autocomplete_selection,
-                          ) {
-                            self.import_rows[idx].description = picked;
-                            let targets = self.import_commit_targets(column, idx);
-                            self.apply_import_field_value(&targets, "description", idx);
-                          }
-                        }
-                        let (picked_desc_ac, description_popup_rect) = (false, egui::Rect::NOTHING);
-                        let _ = picked_desc_ac;
-                        if response.changed() {
-                          pending_amount_updates.push(idx);
-                        }
-                        if editing && grid_text_field_committed(ui, &response, description_popup_rect) {
-                          let targets = self.import_commit_targets(column, idx);
-                          self.apply_import_field_value(&targets, "description", idx);
-                        }
-                      });
-                      process_grid_column_cell(
-                      ui,
-                      column,
-                      idx,
-                      &mut self.import_grid_selection,
-                      &mut self.import_grid_drag,
-                      &mut self.import_grid_edit_cell,
-                    );
-                    });
-                  });
-                }
-              });
-              });
-            import_scroll_y = import_scroll.state.offset.y;
-            grid_apply_shift_hand_pan(ui.ctx(), &mut import_scroll_y);
-            self.import_grid_scroll_offset = import_scroll_y;
-            let _ = grid_try_start_edit_from_typing(
+            
+            let grid_res = crate::ui::grid::render_shared_grid(
               ui,
-              &self.import_grid_selection,
+              &mut self.import_rows,
+              &import_indices,
+              &mut self.import_grid_selection,
+              &mut self.import_grid_drag,
               &mut self.import_grid_edit_cell,
+              &mut self.import_grid_edit_original,
               &mut self.import_grid_typeahead,
+              &mut import_scroll_y,
+              &mut autocomplete_selection,
+              &vendor_candidates,
+              &category_candidates,
+              &member_candidates,
+              &description_candidates,
+              &self.members,
+              &self.categories,
+              import_columns.to_vec(),
+              "import_cell",
+              false,
             );
-            if let Some((column, idx)) = self.import_grid_edit_cell {
-              if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
-                let multi = self
-                  .import_grid_selection
-                  .as_ref()
-                  .is_some_and(|sel| sel.column == column && sel.rows.len() > 1);
-                if self.import_autocomplete_active(column, idx) {
-                  self.tab_fill_import_cell(column, idx, autocomplete_selection);
-                } else if multi {
-                  self.commit_import_grid_cell(
-                    column,
-                    idx,
-                    &mut pending_amount_updates,
-                    &mut pending_import_member_commits,
-                  );
-                }
+
+            self.import_grid_scroll_offset = import_scroll_y;
+            self.active_import_cell = grid_res.active_cell;
+
+            if let Some((cat_id, name, color)) = grid_res.open_color_popup {
+              self.category_color_popup = Some(CategoryColorPopup {
+                id: cat_id,
+                name,
+                color,
+              });
+            }
+
+            pending_updates.extend(grid_res.pending_field_updates);
+            pending_category_commits.extend(grid_res.pending_category_commits);
+            pending_member_commits.extend(grid_res.pending_member_commits);
+
+            // Propagate any in-memory field commits made in the shared grid.
+            // Since commit target replication happens inside render_shared_grid, we just need to ensure
+            // the DB/staged changes are synced. In the import review modal, changes are kept in memory
+            // but bulk field syncs (`apply_import_field_value`, etc.) are triggered upon grid commit events.
+            for (idx, field) in pending_updates {
+              let col = match field {
+                "date" => GridColumn::Date,
+                "amount" => GridColumn::Amount,
+                "vendor" => GridColumn::Vendor,
+                "description" => GridColumn::Description,
+                _ => GridColumn::Vendor,
+              };
+              let targets = self.import_commit_targets(col, idx);
+              self.apply_import_field_value(&targets, field, idx);
+              if field == "amount" {
+                pending_amount_updates.extend(targets);
               }
+            }
+
+            for idx in pending_category_commits {
+              let targets = self.import_commit_targets(GridColumn::Category, idx);
+              let val = self.import_rows.get(idx).map(|r| r.category.clone()).unwrap_or_default();
+              self.apply_import_category_value(&targets, &val);
+              self.register_categories_for_import_rows(&targets);
+            }
+
+            for idx in pending_member_commits {
+              let targets = self.import_commit_targets(GridColumn::Member, idx);
+              let val = self.import_rows.get(idx).map(|r| r.member.clone()).unwrap_or_default();
+              self.apply_import_member_value(&targets, &val);
+              pending_import_member_commits.extend(targets);
+            }
+
+            if let Some((column, idx)) = pending_grid_focus {
+              self.import_grid_selection = Some(GridSelection {
+                column,
+                rows: vec![idx],
+              });
+              self.import_grid_edit_cell = Some((column, idx));
+              request_import_cell_focus(ui, column, idx);
+            } else if let Some((column, idx)) = self.import_grid_edit_cell {
               request_import_cell_focus(ui, column, idx);
             }
-            grid_snap_drag_to_pointer_y(
-              ui,
-              &row_drag_bands,
-              &import_indices,
-              &mut self.import_grid_drag,
-              &mut self.import_grid_selection,
-            );
-            if self.import_grid_drag.is_some() {
-              ui.ctx().request_repaint();
-            }
-            finish_grid_drag(&mut self.import_grid_drag, ui);
             ui.spacing_mut().item_spacing = old_spacing;
           });
         self.autocomplete_selection = autocomplete_selection;
@@ -676,101 +256,7 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
      }
   }
 
-  fn import_autocomplete_candidates_for_column(&self, column: GridColumn) -> Vec<String> {
-    match column {
-      GridColumn::Member => self.cached_member_candidates.clone(),
-      GridColumn::Category => self.cached_category_candidates.clone(),
-      GridColumn::Vendor => self.cached_import_vendor_candidates.clone(),
-      GridColumn::Description => self.cached_import_description_candidates.clone(),
-      GridColumn::Date | GridColumn::Amount => Vec::new(),
-    }
-  }
 
-  fn import_autocomplete_active(&self, column: GridColumn, row: usize) -> bool {
-    let Some(import_row) = self.import_rows.get(row) else {
-      return false;
-    };
-    let candidates = self.import_autocomplete_candidates_for_column(column);
-    let value = match column {
-      GridColumn::Member => &import_row.member,
-      GridColumn::Category => &import_row.category,
-      GridColumn::Vendor => &import_row.vendor,
-      GridColumn::Description => &import_row.description,
-      GridColumn::Date | GridColumn::Amount => return false,
-    };
-    !autocomplete_suggestions_list(value, &candidates).is_empty()
-  }
-
-  fn tab_fill_import_cell(&mut self, column: GridColumn, row: usize, selected_index: usize) {
-    let candidates = self.import_autocomplete_candidates_for_column(column);
-    let Some(import_row) = self.import_rows.get_mut(row) else {
-      return;
-    };
-    let value = match column {
-      GridColumn::Member => &mut import_row.member,
-      GridColumn::Category => &mut import_row.category,
-      GridColumn::Vendor => &mut import_row.vendor,
-      GridColumn::Description => &mut import_row.description,
-      GridColumn::Date | GridColumn::Amount => return,
-    };
-    let suggestions = autocomplete_suggestions_list(value, &candidates);
-    if let Some(suggestion) = suggestions.get(selected_index) {
-      *value = suggestion.clone();
-    }
-  }
-
-  fn commit_import_grid_cell(
-    &mut self,
-    column: GridColumn,
-    row: usize,
-    pending_amount_updates: &mut Vec<usize>,
-    pending_import_member_commits: &mut Vec<usize>,
-  ) {
-    self.expense_grid_edit_original = None;
-    let targets = self.import_commit_targets(column, row);
-    match column {
-      GridColumn::Date => {
-        self.apply_import_field_value(&targets, "date", row);
-      }
-      GridColumn::Amount => {
-        self.apply_import_field_value(&targets, "amount", row);
-        pending_amount_updates.extend(targets);
-      }
-      GridColumn::Member => {
-        let value = self
-          .import_rows
-          .get(row)
-          .map(|import_row| import_row.member.clone())
-          .unwrap_or_default();
-        self.apply_import_member_value(&targets, &value);
-        pending_import_member_commits.extend(targets);
-      }
-      GridColumn::Category => {
-        let mut value = self
-          .import_rows
-          .get(row)
-          .map(|import_row| import_row.category.clone())
-          .unwrap_or_default();
-        if let Some(matched) = find_category_by_label(&self.categories, &value) {
-          let parents = category_parent_map(&self.categories);
-          value = matched.full_label(&parents);
-        } else if !value.trim().is_empty() {
-          value.clear();
-          self.log("[import] category must exist in Settings");
-        }
-        self.apply_import_category_value(&targets, &value);
-        self.register_categories_for_import_rows(&targets);
-      }
-      GridColumn::Vendor => {
-        self.apply_import_field_value(&targets, "vendor", row);
-        self.rebuild_import_cached_candidates();
-      }
-      GridColumn::Description => {
-        self.apply_import_field_value(&targets, "description", row);
-        self.rebuild_import_cached_candidates();
-      }
-    }
-  }
 
   fn rebuild_import_cached_candidates(&mut self) {
     self.cached_import_vendor_candidates = unique_nonempty_values(self.import_rows.iter().map(|row| row.vendor.as_str()));
@@ -878,50 +364,16 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
     self.import_grid_drag = None;
     self.import_grid_edit_cell = None;
     self.import_grid_typeahead = None;
+    self.active_import_cell = None;
   }
 
-  fn apply_import_grid_typeahead(&mut self, column: GridColumn, row: usize) {
-    let Some(ch) = self.import_grid_typeahead.take() else {
-      return;
-    };
-    let Some(import_row) = self.import_rows.get_mut(row) else {
-      return;
-    };
-    match column {
-      GridColumn::Date => {
-        import_row.date.clear();
-        import_row.date.push(ch);
-      }
-      GridColumn::Amount => {
-        import_row.amount_input.clear();
-        import_row.amount_input.push(ch);
-      }
-      GridColumn::Member => {
-        import_row.member.clear();
-        import_row.member.push(ch);
-      }
-      GridColumn::Category => {
-        import_row.category.clear();
-        import_row.category.push(ch);
-      }
-      GridColumn::Vendor => {
-        import_row.vendor.clear();
-        import_row.vendor.push(ch);
-        self.rebuild_import_cached_candidates();
-      }
-      GridColumn::Description => {
-        import_row.description.clear();
-        import_row.description.push(ch);
-        self.rebuild_import_cached_candidates();
-      }
-    }
-  }
 
-  fn import_commit_targets(&self, column: GridColumn, active_row: usize) -> Vec<usize> {
+
+  pub(crate) fn import_commit_targets(&self, column: GridColumn, active_row: usize) -> Vec<usize> {
     grid_commit_targets(&self.import_grid_selection, column, active_row)
   }
 
-  fn apply_import_member_value(&mut self, indices: &[usize], value: &str) {
+  pub(crate) fn apply_import_member_value(&mut self, indices: &[usize], value: &str) {
     let value = value.trim().to_string();
     for &idx in indices {
       if let Some(row) = self.import_rows.get_mut(idx) {
@@ -930,7 +382,7 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
     }
   }
 
-  fn apply_import_category_value(&mut self, indices: &[usize], value: &str) {
+  pub(crate) fn apply_import_category_value(&mut self, indices: &[usize], value: &str) {
     let value = value.trim().to_string();
     for &idx in indices {
       if let Some(row) = self.import_rows.get_mut(idx) {
@@ -958,7 +410,7 @@ let editing = grid_cell_editing(&self.import_grid_edit_cell, column, idx);
     }
   }
 
-  fn apply_import_field_value(&mut self, indices: &[usize], field: &str, source_idx: usize) {
+  pub(crate) fn apply_import_field_value(&mut self, indices: &[usize], field: &str, source_idx: usize) {
     let Some(source) = self.import_rows.get(source_idx).cloned() else {
       return;
     };

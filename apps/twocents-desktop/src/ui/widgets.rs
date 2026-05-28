@@ -1,5 +1,4 @@
 use eframe::egui::{self, Color32, Id, Shape, pos2, RichText, color_picker::show_color_at};
-use egui::widgets::text_edit::TextEditState;
 use egui_extras::Column;
 
 use crate::models::*;
@@ -34,60 +33,6 @@ pub fn grid_header(ui: &mut egui::Ui, label: &str) {
   );
 }
 
-pub fn sortable_grid_header(
-  ui: &mut egui::Ui,
-  label: &str,
-  column: ExpenseSortColumn,
-  sort: &mut ExpenseSort,
-) {
-  let width = ui.available_width().max(1.0);
-  let (rect, response) = ui.allocate_exact_size(egui::vec2(width, GRID_HEADER_HEIGHT), egui::Sense::click());
-  if response.clicked() {
-    if sort.column == column {
-      sort.ascending = !sort.ascending;
-    } else {
-      sort.column = column;
-      sort.ascending = true;
-    }
-  }
-  ui.painter().rect_filled(rect, 0.0, if response.hovered() { ui.visuals().widgets.hovered.bg_fill } else { ui.visuals().window_fill });
-  ui.painter().rect_stroke(
-    rect,
-    0.0,
-    egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-    egui::StrokeKind::Inside,
-  );
-  ui.painter().text(
-    egui::pos2(rect.left() + 4.0, rect.center().y),
-    egui::Align2::LEFT_CENTER,
-    label,
-    egui::FontId::proportional(13.0),
-    ui.visuals().strong_text_color(),
-  );
-  if sort.column == column {
-    paint_sort_triangle(ui.painter(), rect, sort.ascending, ui.visuals().selection.bg_fill);
-  }
-}
-
-pub fn paint_sort_triangle(painter: &egui::Painter, header_rect: egui::Rect, ascending: bool, color: Color32) {
-  let size = 5.0;
-  let cx = header_rect.right() - 10.0;
-  let cy = header_rect.center().y;
-  let points = if ascending {
-    vec![
-      pos2(cx, cy - size),
-      pos2(cx - size, cy + size * 0.6),
-      pos2(cx + size, cy + size * 0.6),
-    ]
-  } else {
-    vec![
-      pos2(cx, cy + size),
-      pos2(cx - size, cy - size * 0.6),
-      pos2(cx + size, cy - size * 0.6),
-    ]
-  };
-  painter.add(Shape::convex_polygon(points, color, egui::Stroke::NONE));
-}
 
 pub fn grid_snap_drag_to_pointer_y(
   ui: &egui::Ui,
@@ -166,9 +111,6 @@ pub fn grid_commit_targets(
   vec![active_row]
 }
 
-pub fn grid_field_committed(response: &egui::Response) -> bool {
-  response.lost_focus()
-}
 
 pub fn grid_text_field_committed(ui: &egui::Ui, response: &egui::Response, blur_block_rect: egui::Rect) -> bool {
   if !response.lost_focus() {
@@ -395,10 +337,6 @@ pub fn request_expense_cell_focus(ui: &mut egui::Ui, column: GridColumn, expense
   request_grid_cell_focus(ui, expense_cell_id(column, expense_idx));
 }
 
-pub fn request_import_cell_focus(ui: &mut egui::Ui, column: GridColumn, row: usize) {
-  request_grid_cell_focus(ui, import_cell_id(column, row));
-}
-
 pub fn request_grid_cell_focus(ui: &mut egui::Ui, id: Id) {
   let chevron_id = id.with("chevron");
   ui.memory_mut(|mem| {
@@ -407,17 +345,8 @@ pub fn request_grid_cell_focus(ui: &mut egui::Ui, id: Id) {
   });
 }
 
-pub fn expense_cell_has_focus(ctx: &egui::Context, column: GridColumn, expense_idx: usize) -> bool {
-  let id = expense_cell_id(column, expense_idx);
-  ctx.memory(|mem| mem.has_focus(id))
-}
-
 pub fn expense_cell_id(column: GridColumn, expense_idx: usize) -> Id {
   Id::new(("expense_cell", format!("{column:?}"), expense_idx))
-}
-
-pub fn import_cell_id(column: GridColumn, row: usize) -> Id {
-  Id::new(("import_cell", format!("{column:?}"), row))
 }
 
 pub fn member_picker_max_height(member_count: usize) -> f32 {
@@ -487,12 +416,6 @@ pub fn grid_chevron_picker_popup(
     });
 }
 
-pub fn text_field_enter_pressed(ui: &egui::Ui, response: &egui::Response) -> bool {
-  if !grid_cell_active(response) {
-    return false;
-  }
-  ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-}
 
 pub fn grid_text_edit_cell(
   ui: &mut egui::Ui,
@@ -597,98 +520,8 @@ pub fn show_cell_autocomplete_popup(
   picked
 }
 
-pub fn category_autocomplete_popup(
-  ui: &mut egui::Ui,
-  response: &egui::Response,
-  value: &mut String,
-  candidates: &[String],
-  selected_index: &mut usize,
-) -> (bool, egui::Rect) {
-  let mut popup_rect = egui::Rect::NOTHING;
-  if !response.has_focus() && !response.lost_focus() {
-    return (false, popup_rect);
-  }
-  if value.trim().is_empty() {
-    *selected_index = 0;
-    return (false, popup_rect);
-  }
 
-  let prefix = value.trim().to_lowercase();
-  let suggestions: Vec<String> = candidates
-    .iter()
-    .filter(|candidate| {
-      let candidate_lower = candidate.to_lowercase();
-      candidate_lower.starts_with(&prefix) && candidate_lower != prefix
-    })
-    .take(6)
-    .cloned()
-    .collect();
 
-  if suggestions.is_empty() {
-    *selected_index = 0;
-    return (false, popup_rect);
-  }
-
-  if response.has_focus() {
-    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
-      *selected_index = (*selected_index + 1).min(suggestions.len() - 1);
-    }
-    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
-      *selected_index = (*selected_index).saturating_sub(1);
-    }
-  }
-  if *selected_index >= suggestions.len() {
-    *selected_index = 0;
-  }
-
-  if autocomplete_accept_key_pressed(ui, response) {
-    if let Some(suggestion) = suggestions.get(*selected_index) {
-      *value = suggestion.clone();
-      move_caret_to_end(ui.ctx(), response, value);
-      *selected_index = 0;
-    }
-  }
-
-  let mut picked = None;
-  let _ = egui::Area::new(response.id.with("category_suggestions"))
-    .order(egui::Order::Foreground)
-    .fixed_pos(response.rect.left_bottom() + egui::vec2(0.0, 2.0))
-    .show(ui.ctx(), |ui| {
-      picker_popup_frame(ui.style()).show(ui, |ui| {
-        ui.set_min_width(response.rect.width().max(120.0));
-        popup_rect = ui.min_rect();
-        for (idx, suggestion) in suggestions.iter().enumerate() {
-          let highlighted = idx == *selected_index;
-          let btn = autocomplete_suggestion_button(ui, suggestion, highlighted);
-          if btn.hovered() {
-            *selected_index = idx;
-          }
-          if btn.clicked() {
-            picked = Some(suggestion.clone());
-          }
-        }
-      });
-    });
-
-  if let Some(picked) = picked {
-    *value = picked;
-    move_caret_to_end(ui.ctx(), response, value);
-    *selected_index = 0;
-    return (true, popup_rect);
-  }
-
-  (false, popup_rect)
-}
-
-pub fn autocomplete_with_popup(
-  ui: &mut egui::Ui,
-  response: &egui::Response,
-  value: &mut String,
-  candidates: &[String],
-  selected_index: &mut usize,
-) -> (bool, egui::Rect) {
-  category_autocomplete_popup(ui, response, value, candidates, selected_index)
-}
 
 pub fn unique_nonempty_values<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
   let mut unique = Vec::new();
@@ -711,14 +544,6 @@ pub fn autocomplete_suggestion_button(ui: &mut egui::Ui, label: &str, highlighte
   )
 }
 
-pub fn move_caret_to_end(ctx: &egui::Context, response: &egui::Response, value: &str) {
-  if let Some(mut state) = TextEditState::load(ctx, response.id) {
-    let end = egui::text::CCursor::new(value.chars().count());
-    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
-    state.store(ctx, response.id);
-  }
-  response.request_focus();
-}
 
 pub struct CategoryCellUi {
   pub text: egui::Response,
@@ -1057,11 +882,6 @@ pub fn ui_grid_date_edit(
   }
 }
 
-pub fn tab_button(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
-  if ui.selectable_label(*current == tab, label).clicked() {
-    *current = tab;
-  }
-}
 
 pub fn resizable_column(initial: f32, minimum: f32, maximum: f32) -> Column {
   Column::initial(initial)
