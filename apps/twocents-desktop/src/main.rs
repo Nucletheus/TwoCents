@@ -1,75 +1,88 @@
-use eframe::egui::{self, Color32, RichText, TextureHandle};
-use egui_extras::{Column, TableBuilder};
-use plotters::prelude::*;
-use rusqlite::{params, Connection};
+use eframe::egui::{self, RichText, TextureHandle};
 use std::{env, fs, path::PathBuf};
+use rusqlite::Connection;
 
-const CELL_BG: Color32 = Color32::from_rgb(24, 33, 47);
-const CELL_TEXT: Color32 = Color32::from_rgb(226, 232, 240);
-const CELL_STROKE: Color32 = Color32::from_rgb(71, 85, 105);
-const MODAL_BG: Color32 = Color32::from_rgb(15, 23, 42);
-const MODAL_PANEL_BG: Color32 = Color32::from_rgb(20, 30, 48);
-const MODAL_ACCENT: Color32 = Color32::from_rgb(96, 165, 250);
-const GRID_HEADER_HEIGHT: f32 = 20.0;
-const GRID_ROW_HEIGHT: f32 = 20.0;
+mod models;
+mod db;
+mod ui;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-  Dashboard,
-  Accounts,
-  Expenses,
-  Budgets,
-  Goals,
-  Analytics,
-  Settlements,
-  Households,
-}
+use crate::models::*;
+use crate::db::*;
+use crate::ui::widgets::*;
+use crate::ui::placeholder;
 
-#[derive(Clone)]
-struct Account {
-  name: String,
-  kind: String,
-  balance_cents: i64,
-}
-
-#[derive(Clone)]
-struct Expense {
-  id: i32,
-  date: String,
-  amount_input: String,
-  amount_cents: i64,
-  category: String,
-  vendor: String,
-  description: String,
-}
-
-#[derive(Clone)]
-struct ImportRow {
-  date: String,
-  amount_input: String,
-  amount_cents: i64,
-  category: String,
-  vendor: String,
-  description: String,
-}
 
 struct TwoCentsApp {
   conn: Connection,
+  household_id: i64,
+  household_name: String,
   tab: Tab,
   accounts: Vec<Account>,
   expenses: Vec<Expense>,
-  categories: Vec<String>,
+  categories: Vec<Category>,
+  members: Vec<HouseholdMember>,
+  new_member_name: String,
+  editing_self_name: String,
   import_rows: Vec<ImportRow>,
-  show_import_review: bool,
-  bulk_category: String,
-  terminal: Vec<String>,
+  pub show_import_review: bool,
+  csv_import_rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+  pub bulk_category: String,
+  pub current_theme_is_dark: Option<bool>,
+  pub terminal: Vec<String>,
   chart: Option<TextureHandle>,
   chart_dirty: bool,
+  autocomplete_selection: usize,
+  expense_sort: ExpenseSort,
+  show_category_settings: bool,
+  new_parent_category_name: String,
+  new_subcategory_name: String,
+  new_subcategory_parent_id: Option<i64>,
+  category_color_popup: Option<CategoryColorPopup>,
+  member_color_popup: Option<MemberColorPopup>,
+  expense_grid_selection: Option<GridSelection>,
+  expense_grid_drag: Option<GridSelectDrag>,
+  expense_grid_edit_cell: Option<(GridColumn, usize)>,
+  expense_grid_edit_original: Option<String>,
+  expense_grid_typeahead: Option<char>,
+  expense_grid_scroll_offset: f32,
+  import_grid_selection: Option<GridSelection>,
+  import_grid_drag: Option<GridSelectDrag>,
+  import_grid_edit_cell: Option<(GridColumn, usize)>,
+  import_grid_typeahead: Option<char>,
+  import_grid_scroll_offset: f32,
+  startup_window_frames: u8,
+  active_expense_cell: Option<(GridColumn, usize)>,
+  pending_grid_keyboard: Option<GridPendingKeyboard>,
+  pending_grid_focus_target: Option<(GridColumn, usize)>,
+  show_delete_expense_confirm: bool,
+  delete_expense_indices: Vec<usize>,
+  show_delete_import_confirm: bool,
+  delete_import_indices: Vec<usize>,
+  cached_category_candidates: Vec<String>,
+  cached_member_candidates: Vec<String>,
+  cached_vendor_candidates: Vec<String>,
+  cached_description_candidates: Vec<String>,
+  cached_sorted_expense_indices: Vec<usize>,
+  cached_import_vendor_candidates: Vec<String>,
+  cached_import_description_candidates: Vec<String>,
 }
 
 fn main() -> eframe::Result<()> {
+  if env::var("TWOCENTS_RESET_WINDOW").as_deref() == Ok("1") {
+    if let Ok(appdata) = env::var("APPDATA") {
+      let path = PathBuf::from(appdata).join("egui").join("data").join("TwoCents");
+      let _ = fs::remove_dir_all(path);
+    }
+  }
+
   let options = eframe::NativeOptions {
-    viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 780.0]),
+    viewport: egui::ViewportBuilder::default()
+      .with_app_id("TwoCents")
+      .with_inner_size([1180.0, 780.0])
+      .with_min_inner_size([720.0, 560.0])
+      .with_active(true)
+      .with_visible(true),
+    centered: true,
     ..Default::default()
   };
 
@@ -81,40 +94,233 @@ fn main() -> eframe::Result<()> {
 }
 
 impl TwoCentsApp {
-  fn new(cc: &eframe::CreationContext<'_>) -> Self {
-    configure_theme(&cc.egui_ctx);
+  fn new(_cc: &eframe::CreationContext<'_>) -> Self {
     let conn = open_database().expect("open local SQLite database");
+    let (household_id, household_name) = load_active_household(&conn).expect("load default household");
     let mut app = Self {
       conn,
+      household_id,
+      household_name,
       tab: Tab::Expenses,
       accounts: Vec::new(),
       expenses: Vec::new(),
       categories: Vec::new(),
+      members: Vec::new(),
+      new_member_name: String::new(),
+      editing_self_name: String::new(),
       import_rows: Vec::new(),
+      csv_import_rx: None,
       show_import_review: false,
       bulk_category: String::new(),
+      current_theme_is_dark: None,
       terminal: vec!["[app] eframe UI loaded".to_string()],
       chart: None,
       chart_dirty: true,
+      autocomplete_selection: 0,
+      expense_sort: ExpenseSort::default(),
+      show_category_settings: false,
+      new_parent_category_name: String::new(),
+      new_subcategory_name: String::new(),
+      new_subcategory_parent_id: None,
+      category_color_popup: None,
+      member_color_popup: None,
+      expense_grid_selection: None,
+      expense_grid_drag: None,
+      expense_grid_edit_cell: None,
+      expense_grid_edit_original: None,
+      expense_grid_typeahead: None,
+      expense_grid_scroll_offset: 0.0,
+      import_grid_selection: None,
+      import_grid_drag: None,
+      import_grid_edit_cell: None,
+      import_grid_typeahead: None,
+      import_grid_scroll_offset: 0.0,
+      startup_window_frames: 0,
+      active_expense_cell: None,
+      pending_grid_keyboard: None,
+      pending_grid_focus_target: None,
+      show_delete_expense_confirm: false,
+      delete_expense_indices: Vec::new(),
+      show_delete_import_confirm: false,
+      delete_import_indices: Vec::new(),
+      cached_category_candidates: Vec::new(),
+      cached_member_candidates: Vec::new(),
+      cached_vendor_candidates: Vec::new(),
+      cached_description_candidates: Vec::new(),
+      cached_sorted_expense_indices: Vec::new(),
+      cached_import_vendor_candidates: Vec::new(),
+      cached_import_description_candidates: Vec::new(),
     };
     app.reload();
     app
   }
 
+  fn autocomplete_candidates_for_column(&self, column: GridColumn) -> Vec<String> {
+    match column {
+      GridColumn::Member => self.cached_member_candidates.clone(),
+      GridColumn::Category => self.cached_category_candidates.clone(),
+      GridColumn::Vendor => self.cached_vendor_candidates.clone(),
+      GridColumn::Description => self.cached_description_candidates.clone(),
+      GridColumn::Date | GridColumn::Amount => Vec::new(),
+    }
+  }
+
+  fn autocomplete_suggestions(value: &str, candidates: &[String]) -> Vec<String> {
+    autocomplete_suggestions_list(value, candidates)
+  }
+
+  fn expense_autocomplete_active(&self, column: GridColumn, expense_idx: usize) -> bool {
+    let Some(row) = self.expenses.get(expense_idx) else {
+      return false;
+    };
+    let candidates = self.autocomplete_candidates_for_column(column);
+    let value = match column {
+      GridColumn::Member => &row.member,
+      GridColumn::Category => &row.category,
+      GridColumn::Vendor => &row.vendor,
+      GridColumn::Description => &row.description,
+      GridColumn::Date | GridColumn::Amount => return false,
+    };
+    !Self::autocomplete_suggestions(value, &candidates).is_empty()
+  }
+
+  fn tab_fill_expense_cell(&mut self, column: GridColumn, expense_idx: usize, selected_index: usize) {
+    let candidates = self.autocomplete_candidates_for_column(column);
+    let Some(row) = self.expenses.get_mut(expense_idx) else {
+      return;
+    };
+    let value = match column {
+      GridColumn::Member => &mut row.member,
+      GridColumn::Category => &mut row.category,
+      GridColumn::Vendor => &mut row.vendor,
+      GridColumn::Description => &mut row.description,
+      GridColumn::Date | GridColumn::Amount => return,
+    };
+    let suggestions = Self::autocomplete_suggestions(value, &candidates);
+    if let Some(suggestion) = suggestions.get(selected_index) {
+      *value = suggestion.clone();
+    }
+  }
+
+  fn commit_expense_cell(
+    &mut self,
+    column: GridColumn,
+    expense_idx: usize,
+    pending_updates: &mut Vec<(usize, &'static str)>,
+    pending_category_commits: &mut Vec<usize>,
+    pending_member_commits: &mut Vec<usize>,
+  ) {
+    self.expense_grid_edit_original = None;
+    let targets = self.expense_commit_targets(column, expense_idx);
+    match column {
+      GridColumn::Date => {
+        self.apply_expense_field_value(&targets, "date", expense_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "date")));
+      }
+      GridColumn::Amount => {
+        self.apply_expense_field_value(&targets, "amount", expense_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "amount")));
+      }
+      GridColumn::Member => {
+        let value = self
+          .expenses
+          .get(expense_idx)
+          .map(|row| row.member.clone())
+          .unwrap_or_default();
+        self.apply_expense_member_value(&targets, &value);
+        pending_member_commits.extend(targets);
+      }
+      GridColumn::Category => {
+        let value = self
+          .expenses
+          .get(expense_idx)
+          .map(|row| row.category.clone())
+          .unwrap_or_default();
+        self.apply_expense_category_value(&targets, &value);
+        pending_category_commits.extend(targets);
+      }
+      GridColumn::Vendor => {
+        self.apply_expense_field_value(&targets, "vendor", expense_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "vendor")));
+      }
+      GridColumn::Description => {
+        self.apply_expense_field_value(&targets, "description", expense_idx);
+        pending_updates.extend(targets.into_iter().map(|row| (row, "description")));
+      }
+    }
+  }
+
+  fn apply_pending_grid_keyboard(
+    &mut self,
+    sorted_indices: &[usize],
+    pending_updates: &mut Vec<(usize, &'static str)>,
+    pending_category_commits: &mut Vec<usize>,
+    pending_member_commits: &mut Vec<usize>,
+  ) {
+    let Some(pending) = self.pending_grid_keyboard.take() else {
+      return;
+    };
+    if matches!(pending.action, GridKeyboardAction::Tab { .. }) {
+      self.tab_fill_expense_cell(pending.column, pending.expense_idx, self.autocomplete_selection);
+    }
+    self.commit_expense_cell(
+      pending.column,
+      pending.expense_idx,
+      pending_updates,
+      pending_category_commits,
+      pending_member_commits,
+    );
+    self.pending_grid_focus_target =
+      grid_nav_target(sorted_indices, pending.expense_idx, pending.column, pending.action.to_nav());
+  }
+
   fn reload(&mut self) {
-    self.accounts = load_accounts(&self.conn).unwrap_or_else(|err| {
+    self.accounts = load_accounts(&self.conn, self.household_id).unwrap_or_else(|err| {
       self.log(format!("[error] accounts load failed: {err}"));
       Vec::new()
     });
-    self.expenses = load_expenses(&self.conn).unwrap_or_else(|err| {
+    self.expenses = load_expenses(&self.conn, self.household_id).unwrap_or_else(|err| {
       self.log(format!("[error] expenses load failed: {err}"));
       Vec::new()
     });
-    self.categories = load_categories(&self.conn).unwrap_or_else(|err| {
+    let _ = seed_default_categories(&self.conn, self.household_id);
+    self.categories = load_categories(&self.conn, self.household_id).unwrap_or_else(|err| {
       self.log(format!("[error] categories load failed: {err}"));
-      vec!["Uncategorized".to_string()]
+      Vec::new()
     });
+    self.members = load_household_members(&self.conn, self.household_id).unwrap_or_else(|err| {
+      self.log(format!("[error] members load failed: {err}"));
+      Vec::new()
+    });
+    self.editing_self_name = self
+      .members
+      .iter()
+      .find(|member| member.is_self)
+      .map(|member| member.name.clone())
+      .unwrap_or_else(|| "Me".to_string());
     self.chart_dirty = true;
+    self.rebuild_cached_candidates();
+    self.rebuild_sorted_expense_indices();
+  }
+
+  fn rebuild_sorted_expense_indices(&mut self) {
+    self.cached_sorted_expense_indices = sorted_expense_indices(
+      &self.expenses,
+      self.expense_sort,
+      self.expense_grid_edit_cell,
+      self.expense_grid_edit_original.as_deref(),
+    );
+  }
+
+  fn rebuild_cached_candidates(&mut self) {
+    self.cached_category_candidates = category_assignable_labels(&self.categories);
+    self.cached_member_candidates = self.members.iter().map(|member| member.name.clone()).collect();
+    self.cached_vendor_candidates = unique_nonempty_values(self.expenses.iter().map(|expense| expense.vendor.as_str()));
+    self.cached_description_candidates = unique_nonempty_values(self.expenses.iter().map(|expense| expense.description.as_str()));
+  }
+
+  fn reload_categories(&mut self) {
+    self.categories = load_categories(&self.conn, self.household_id).unwrap_or_default();
   }
 
   fn log(&mut self, line: impl Into<String>) {
@@ -128,120 +334,235 @@ impl TwoCentsApp {
     self.terminal.join("\n")
   }
 
-  fn import_csv(&mut self) {
-    match import_csv_statement(&self.conn) {
-      Ok(rows) if rows.is_empty() => self.log("[import] cancelled or no valid rows"),
-      Ok(rows) => {
-        let duplicates = duplicate_import_count(&self.conn, &rows);
-        let ready = rows.iter().filter(|row| import_row_status(row) == "ready").count();
-        self.import_rows = rows;
-        self.show_import_review = true;
-        self.log(format!(
-          "[import] loaded {} rows ready={} possible_duplicates={}",
-          self.import_rows.len(),
-          ready,
-          duplicates
-        ));
+  fn delete_expenses_by_indices(&mut self, indices: &[usize]) {
+    let mut sorted_indices = indices.to_vec();
+    sorted_indices.sort_by(|a, b| b.cmp(a)); // sort descending
+    let mut logs = Vec::new();
+    let mut db_deleted = false;
+    
+    if let Ok(tx) = self.conn.transaction() {
+      let mut success = true;
+      for &idx in &sorted_indices {
+        if let Some(expense) = self.expenses.get(idx) {
+          let res = tx.execute(
+            "DELETE FROM expenses WHERE id = ?1 AND household_id = ?2",
+            rusqlite::params![expense.id, self.household_id],
+          );
+          if let Err(err) = res {
+            logs.push(format!("[error] db delete failed for idx {idx}: {err}"));
+            success = false;
+            break;
+          }
+        }
       }
-      Err(err) => self.log(format!("[error] import failed: {err}")),
-    }
-  }
-
-  fn save_import(&mut self) {
-    if self.import_rows.is_empty() {
-      self.log("[import] nothing to save");
-      return;
-    }
-
-    self.sync_import_amounts();
-    let rows = self.import_rows.clone();
-    match save_import_rows(&self.conn, &rows) {
-      Ok(count) => {
-        self.import_rows.clear();
-        self.show_import_review = false;
-        self.reload();
-        self.log(format!("[import] saved {count} rows"));
+      if success {
+        if let Err(err) = tx.commit() {
+          logs.push(format!("[error] transaction commit failed: {err}"));
+        } else {
+          db_deleted = true;
+        }
       }
-      Err(err) => self.log(format!("[error] import save failed: {err}")),
+    } else {
+      logs.push("[error] could not start db transaction".to_string());
     }
+
+    for log_msg in logs {
+      self.log(log_msg);
+    }
+    if db_deleted {
+      self.log(format!("[expenses] deleted {} row(s)", sorted_indices.len()));
+    }
+    self.expense_grid_selection = None;
+    self.reload();
   }
 
-  fn apply_bulk_category(&mut self) {
-    let category = self.bulk_category.trim().to_string();
-    if category.is_empty() {
-      self.log("[bulk] no category entered");
-      return;
-    }
-    for row in &mut self.import_rows {
-      row.category = category.clone();
-    }
-    if ensure_category(&self.conn, &category).is_ok() {
-      self.reload();
-    }
-    self.log(format!(
-      "[bulk] applied category '{}' to {} import rows",
-      category,
-      self.import_rows.len()
-    ));
+  fn clear_expense_grid_selection(&mut self) {
+    self.expense_grid_selection = None;
+    self.expense_grid_drag = None;
+    self.expense_grid_edit_cell = None;
+    self.expense_grid_typeahead = None;
   }
 
-  fn sync_import_amounts(&mut self) {
-    for row in &mut self.import_rows {
-      if let Some(cents) = parse_amount_cents(&row.amount_input) {
-        row.amount_cents = cents;
-      }
-    }
-  }
-
-  fn update_expense_field(&mut self, row_index: usize, field: &str) {
-    let Some(row) = self.expenses.get_mut(row_index) else {
+  fn apply_expense_grid_typeahead(&mut self, column: GridColumn, row: usize) {
+    let Some(ch) = self.expense_grid_typeahead.take() else {
       return;
     };
-    if field == "amount" {
-      if let Some(cents) = parse_amount_cents(&row.amount_input) {
-        row.amount_cents = cents;
+    let Some(expense) = self.expenses.get_mut(row) else {
+      return;
+    };
+    match column {
+      GridColumn::Date => {
+        expense.date.clear();
+        expense.date.push(ch);
       }
-    }
-    let id = row.id;
-    match update_expense_row(&self.conn, row, field) {
-      Ok(()) => {
-        if field == "category" {
-          let _ = ensure_category(&self.conn, &row.category);
-          self.categories = load_categories(&self.conn).unwrap_or_default();
-        }
-        self.chart_dirty = true;
-        self.log(format!("[edit] saved expense {} {}", id, field));
+      GridColumn::Amount => {
+        expense.amount_input.clear();
+        expense.amount_input.push(ch);
       }
-      Err(err) => self.log(format!("[error] save failed: {err}")),
+      GridColumn::Member => {
+        expense.member.clear();
+        expense.member.push(ch);
+      }
+      GridColumn::Category => {
+        expense.category.clear();
+        expense.category.push(ch);
+      }
+      GridColumn::Vendor => {
+        expense.vendor.clear();
+        expense.vendor.push(ch);
+      }
+      GridColumn::Description => {
+        expense.description.clear();
+        expense.description.push(ch);
+      }
     }
   }
 
-  fn dashboard_summary(&self) -> String {
-    let account_total: i64 = self.accounts.iter().map(|account| account.balance_cents).sum();
-    let expense_total: i64 = self.expenses.iter().map(|expense| expense.amount_cents).sum();
-    format!(
-      "Accounts: {}\nTotal balance: {}\nExpenses loaded: {}\nThis month spend: {}\n\nSQLite: {}",
-      self.accounts.len(),
-      money(account_total),
-      self.expenses.len(),
-      money(expense_total),
-      db_path().display()
-    )
+  fn expense_commit_targets(&self, column: GridColumn, active_row: usize) -> Vec<usize> {
+    grid_commit_targets(&self.expense_grid_selection, column, active_row)
+  }
+
+  fn apply_expense_member_value(&mut self, indices: &[usize], value: &str) {
+    let value = value.trim().to_string();
+    for &idx in indices {
+      if let Some(row) = self.expenses.get_mut(idx) {
+        row.member = value.clone();
+      }
+    }
+  }
+
+  fn apply_expense_category_value(&mut self, indices: &[usize], value: &str) {
+    let value = value.trim().to_string();
+    for &idx in indices {
+      if let Some(row) = self.expenses.get_mut(idx) {
+        row.category = value.clone();
+      }
+    }
+  }
+
+  fn apply_expense_field_value(&mut self, indices: &[usize], field: &str, source_idx: usize) {
+    let Some(source) = self.expenses.get(source_idx).cloned() else {
+      return;
+    };
+    for &idx in indices {
+      let Some(row) = self.expenses.get_mut(idx) else {
+        continue;
+      };
+      match field {
+        "date" => row.date = source.date.clone(),
+        "amount" => {
+          row.amount_input = source.amount_input.clone();
+          row.amount_cents = source.amount_cents;
+        }
+        "vendor" => row.vendor = source.vendor.clone(),
+        "description" => row.description = source.description.clone(),
+        _ => {}
+      }
+    }
   }
 }
 
 impl eframe::App for TwoCentsApp {
+  fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+    visuals.panel_fill.to_normalized_gamma_f32()
+  }
+
+  fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    if self.tab != Tab::Expenses || self.show_import_review {
+      self.active_expense_cell = None;
+      return;
+    }
+    let Some((column, expense_idx)) = self.active_expense_cell else {
+      return;
+    };
+
+    let mut keyboard_action = None;
+    raw_input.events.retain(|event| {
+      match event {
+        egui::Event::Key {
+          key: egui::Key::Enter,
+          pressed: true,
+          modifiers,
+          ..
+        } if !modifiers.any() => {
+          if self.expense_autocomplete_active(column, expense_idx) {
+            keyboard_action = Some(GridKeyboardAction::Tab { shift: false });
+            false
+          } else if self.expense_grid_selection.as_ref().is_some_and(|selection| {
+            selection.column == column && selection.rows.len() > 1
+          }) {
+            true
+          } else {
+            keyboard_action = Some(GridKeyboardAction::Enter);
+            false
+          }
+        }
+        egui::Event::Key {
+          key: egui::Key::Tab,
+          pressed: true,
+          modifiers,
+          ..
+        } => {
+          keyboard_action = Some(GridKeyboardAction::Tab {
+            shift: modifiers.shift,
+          });
+          false
+        }
+        _ => true,
+      }
+    });
+
+    if let Some(action) = keyboard_action {
+      self.pending_grid_keyboard = Some(GridPendingKeyboard {
+        column,
+        expense_idx,
+        action,
+      });
+      ctx.request_repaint();
+    }
+  }
+
+  fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    if let Some(rx) = &self.csv_import_rx {
+      if let Ok(path_opt) = rx.try_recv() {
+        self.csv_import_rx = None;
+        if let Some(path) = path_opt {
+          self.process_csv_file(&path);
+        } else {
+          self.log("[import] cancelled");
+        }
+      }
+      ctx.request_repaint();
+    }
+
+    let is_dark = ctx.global_style().visuals.dark_mode;
+    if self.current_theme_is_dark != Some(is_dark) {
+      self.current_theme_is_dark = Some(is_dark);
+      configure_theme(ctx, is_dark);
+    }
+
+    if self.startup_window_frames < 4 {
+      ensure_root_window_visible(ctx, self.startup_window_frames == 0);
+      self.startup_window_frames += 1;
+      ctx.request_repaint();
+    }
+  }
+
   fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     let ctx = ui.ctx().clone();
 
+    let header_width = ui.available_width();
     egui::Frame::default()
-      .fill(Color32::from_rgb(23, 32, 51))
+      .fill(ui.visuals().window_fill)
       .corner_radius(12.0)
       .inner_margin(12.0)
       .show(ui, |ui| {
+        ui.set_width(header_width);
         ui.horizontal(|ui| {
-          ui.heading(RichText::new("TwoCents").color(Color32::WHITE));
-          ui.label(RichText::new("Rust-only local finance app").color(Color32::from_rgb(190, 208, 247)));
+          ui.heading(RichText::new("TwoCents").color(ui.visuals().strong_text_color()));
+          ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new("Couples focused finance app").color(ui.visuals().selection.bg_fill));
+          });
         });
       });
 
@@ -258,302 +579,79 @@ impl eframe::App for TwoCentsApp {
     });
     ui.separator();
 
-    match self.tab {
-      Tab::Dashboard => self.ui_dashboard(ui),
-      Tab::Accounts => self.ui_accounts(ui),
-      Tab::Expenses => self.ui_expenses(ui),
-      Tab::Analytics => self.ui_analytics(ui, &ctx),
-      Tab::Budgets => placeholder(ui, "Budgets", "Not ported yet. Next after expense/category import workflow."),
-      Tab::Goals => placeholder(ui, "Goals", "Not ported yet. Existing web logic remains source."),
-      Tab::Settlements => placeholder(ui, "Settlements", "Not ported yet. Shared settlement math moves next."),
-      Tab::Households => placeholder(ui, "Households", "Single local household for now. Membership/invites later."),
-    }
+    const TERMINAL_LOG_HEIGHT: f32 = 120.0;
+    const TERMINAL_RESERVED: f32 = TERMINAL_LOG_HEIGHT + 34.0;
+    const CONTENT_TERMINAL_GAP: f32 = 4.0;
+    let content_height =
+      (ui.available_height() - TERMINAL_RESERVED - CONTENT_TERMINAL_GAP).max(200.0);
+    ui.allocate_ui_with_layout(
+      egui::vec2(ui.available_width(), content_height),
+      egui::Layout::top_down(egui::Align::LEFT),
+      |ui| {
+        ui.set_min_height(content_height);
+        ui.set_height(content_height);
+        if self.tab == Tab::Expenses {
+          self.ui_expenses(ui);
+        } else {
+          egui::ScrollArea::vertical()
+            .id_salt(("tab_content", format!("{:?}", self.tab)))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+              match self.tab {
+                Tab::Dashboard => self.ui_dashboard(ui),
+                Tab::Accounts => self.ui_accounts(ui),
+                Tab::Analytics => self.ui_analytics(ui, &ctx),
+                Tab::Budgets => {
+                  placeholder(ui, "Budgets", "Not ported yet. Next after expense/category import workflow.")
+                }
+                Tab::Goals => placeholder(ui, "Goals", "Not ported yet. Existing web logic remains source."),
+                Tab::Settlements => {
+                  placeholder(ui, "Settlements", "Not ported yet. Shared settlement math moves next.")
+                }
+                Tab::Households => self.ui_households(ui),
+                Tab::Expenses => unreachable!("expenses tab uses dedicated layout"),
+              }
+            });
+        }
+      },
+    );
 
+    ui.add_space(CONTENT_TERMINAL_GAP);
+    self.ui_terminal(ui);
     self.ui_import_modal(&ctx);
+    self.ui_category_settings_window(&ctx);
+    self.ui_category_color_popup(&ctx);
+    self.ui_member_color_popup(&ctx);
+    self.ui_delete_confirmations(&ctx);
   }
 }
 
 impl TwoCentsApp {
-  fn ui_dashboard(&self, ui: &mut egui::Ui) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
-      ui.heading("Dashboard");
-      ui.separator();
-      ui.monospace(self.dashboard_summary());
-    });
-  }
-
-  fn ui_accounts(&self, ui: &mut egui::Ui) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
-      ui.heading("Accounts");
-      ui.separator();
-      for account in &self.accounts {
-        ui.horizontal(|ui| {
-          ui.label(RichText::new(&account.name).strong());
-          ui.label(&account.kind);
-          ui.monospace(money(account.balance_cents));
-        });
-      }
-    });
-  }
-
-  fn ui_expenses(&mut self, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-      ui.heading("Household Expense Spreadsheet");
-      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.button("Import CSV Statement").clicked() {
-          self.import_csv();
-        }
-      });
-    });
-    ui.label("Click any cell and type. Changes save without stealing focus. Tab / Shift+Tab moves across cells.");
-
-    ui.add_space(6.0);
-    let mut pending_updates: Vec<(usize, &'static str)> = Vec::new();
-    let category_candidates = unique_nonempty_values(self.expenses.iter().map(|expense| expense.category.as_str()));
-    let table_height = (ui.available_height() - 190.0).max(220.0);
-
-    let old_spacing = ui.spacing().item_spacing;
-    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    TableBuilder::new(ui)
-      .striped(false)
-      .resizable(true)
-      .vscroll(true)
-      .min_scrolled_height(120.0)
-      .max_scroll_height(table_height)
-      .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-      .column(Column::exact(110.0))
-      .column(Column::exact(100.0))
-      .column(Column::exact(170.0))
-      .column(Column::exact(190.0))
-      .column(Column::remainder())
-      .header(GRID_HEADER_HEIGHT, |mut header| {
-        header.col(|ui| { ui.strong("Date"); });
-        header.col(|ui| { ui.strong("Amount"); });
-        header.col(|ui| { ui.strong("Category"); });
-        header.col(|ui| { ui.strong("Vendor"); });
-        header.col(|ui| { ui.strong("Description"); });
-      })
-      .body(|mut body| {
-        for idx in 0..self.expenses.len() {
-          body.row(GRID_ROW_HEIGHT, |mut row| {
-            row.col(|ui| {
-              if dark_text_edit(ui, &mut self.expenses[idx].date).changed() {
-                pending_updates.push((idx, "date"));
-              }
-            });
-            row.col(|ui| {
-              if dark_text_edit(ui, &mut self.expenses[idx].amount_input).changed() {
-                pending_updates.push((idx, "amount"));
-              }
-            });
-            row.col(|ui| {
-              ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                let response = dark_text_edit(ui, &mut self.expenses[idx].category);
-                if response.changed()
-                  || autocomplete_on_tab(ui, &response, &mut self.expenses[idx].category, &category_candidates)
-                {
-                  pending_updates.push((idx, "category"));
-                }
-                egui::ComboBox::from_id_salt(("expense-cat", self.expenses[idx].id))
-                  .selected_text("▾")
-                  .show_ui(ui, |ui| {
-                    for category in self.categories.clone() {
-                      if ui.selectable_label(false, &category).clicked() {
-                        self.expenses[idx].category = category;
-                        pending_updates.push((idx, "category"));
-                        ui.close();
-                      }
-                    }
-                  });
-              });
-            });
-            row.col(|ui| {
-              if dark_text_edit(ui, &mut self.expenses[idx].vendor).changed() {
-                pending_updates.push((idx, "vendor"));
-              }
-            });
-            row.col(|ui| {
-              if dark_text_edit(ui, &mut self.expenses[idx].description).changed() {
-                pending_updates.push((idx, "description"));
-              }
-            });
-          });
-        }
-      });
-    ui.spacing_mut().item_spacing = old_spacing;
-
-    for (idx, field) in pending_updates {
-      self.update_expense_field(idx, field);
-    }
-
-    ui.add_space(8.0);
-    ui.label(RichText::new("Terminal").strong());
+  fn ui_terminal(&self, ui: &mut egui::Ui) {
+    ui.label(RichText::new("Terminal").strong().color(ui.visuals().selection.bg_fill));
     egui::Frame::default()
-      .fill(Color32::from_rgb(13, 17, 23))
-      .corner_radius(8.0)
+      .fill(ui.visuals().panel_fill)
+      .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_fill))
+      .corner_radius(6.0)
       .inner_margin(8.0)
       .show(ui, |ui| {
-        egui::ScrollArea::vertical().max_height(150.0).stick_to_bottom(true).show(ui, |ui| {
-          ui.monospace(RichText::new(self.terminal_text()).color(Color32::from_rgb(216, 255, 224)));
-        });
-      });
-  }
+        let text = self.terminal_text();
+        egui::ScrollArea::vertical()
+          .id_salt("terminal_scroll")
+          .max_height(120.0)
+          .stick_to_bottom(true)
 
-  fn ui_import_modal(&mut self, ctx: &egui::Context) {
-    if !self.show_import_review {
-      return;
-    }
-    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-      self.show_import_review = false;
-      return;
-    }
-
-    let mut open = self.show_import_review;
-    egui::Window::new("Review Statement Import")
-      .open(&mut open)
-      .resizable(true)
-      .default_size([1060.0, 620.0])
-      .frame(
-        egui::Frame::window(&ctx.global_style())
-          .fill(MODAL_BG)
-          .stroke(egui::Stroke::new(2.0, MODAL_ACCENT))
-          .corner_radius(10.0)
-          .inner_margin(egui::Margin::symmetric(14, 12)),
-      )
-      .show(ctx, |ui| {
-        egui::Frame::new()
-          .fill(Color32::from_rgb(30, 41, 70))
-          .stroke(egui::Stroke::new(1.0, Color32::from_rgb(59, 130, 246)))
-          .corner_radius(6.0)
-          .inner_margin(egui::Margin::symmetric(10, 6))
           .show(ui, |ui| {
-            ui.horizontal(|ui| {
-              ui.label(RichText::new("Import Review").strong().color(Color32::WHITE));
-              ui.separator();
-              ui.label(RichText::new("Edits here are staged until Save Reviewed Import.").color(CELL_TEXT));
-              ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Cancel Review").clicked() {
-                  self.show_import_review = false;
-                }
-                if ui.add(egui::Button::new("Submit Import").fill(Color32::from_rgb(37, 99, 235))).clicked() {
-                  self.save_import();
-                }
-              });
-            });
+            ui.add(
+              egui::TextEdit::multiline(&mut text.as_str())
+                .font(egui::TextStyle::Monospace)
+                .desired_rows(6)
+                .desired_width(ui.available_width())
+                .text_color(ui.visuals().text_color())
+                .interactive(false),
+            );
           });
-        ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-          ui.label("Bulk category:");
-          dark_text_edit(ui, &mut self.bulk_category);
-          if ui.button("Apply").clicked() {
-            self.apply_bulk_category();
-          }
-          for category in self.categories.clone() {
-            if ui.small_button(&category).clicked() {
-              self.bulk_category = category;
-              self.apply_bulk_category();
-            }
-          }
-        });
-        ui.label("Edit import rows. Free-type category or pick chip above. Save loads rows into main spreadsheet.");
-
-        let mut pending_amount_updates = Vec::new();
-        let category_candidates = unique_nonempty_values(self.import_rows.iter().map(|row| row.category.as_str()));
-        let review_table_height = (ui.available_height() - 96.0).max(180.0);
-        egui::Frame::new()
-          .fill(MODAL_PANEL_BG)
-          .stroke(egui::Stroke::new(1.0, CELL_STROKE))
-          .corner_radius(6.0)
-          .inner_margin(egui::Margin::same(6))
-          .show(ui, |ui| {
-            let old_spacing = ui.spacing().item_spacing;
-            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            TableBuilder::new(ui)
-              .striped(false)
-              .resizable(true)
-              .vscroll(true)
-              .min_scrolled_height(120.0)
-              .max_scroll_height(review_table_height)
-              .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-              .column(Column::exact(105.0))
-              .column(Column::exact(105.0))
-              .column(Column::exact(150.0))
-              .column(Column::exact(180.0))
-              .column(Column::remainder())
-              .header(GRID_HEADER_HEIGHT, |mut header| {
-                header.col(|ui| { ui.strong("Date"); });
-                header.col(|ui| { ui.strong("Amount"); });
-                header.col(|ui| { ui.strong("Category"); });
-                header.col(|ui| { ui.strong("Vendor"); });
-                header.col(|ui| { ui.strong("Description"); });
-              })
-              .body(|mut body| {
-                for idx in 0..self.import_rows.len() {
-                  body.row(GRID_ROW_HEIGHT, |mut row| {
-                    row.col(|ui| { dark_text_edit(ui, &mut self.import_rows[idx].date); });
-                    row.col(|ui| {
-                      if dark_text_edit(ui, &mut self.import_rows[idx].amount_input).changed() {
-                        pending_amount_updates.push(idx);
-                      }
-                    });
-                    row.col(|ui| {
-                      ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                        let response = dark_text_edit(ui, &mut self.import_rows[idx].category);
-                        autocomplete_on_tab(ui, &response, &mut self.import_rows[idx].category, &category_candidates);
-                        egui::ComboBox::from_id_salt(("import-cat", idx))
-                          .selected_text("▾")
-                          .show_ui(ui, |ui| {
-                            for category in self.categories.clone() {
-                              if ui.selectable_label(false, &category).clicked() {
-                                self.import_rows[idx].category = category;
-                                ui.close();
-                              }
-                            }
-                          });
-                      });
-                    });
-                    row.col(|ui| { dark_text_edit(ui, &mut self.import_rows[idx].vendor); });
-                    row.col(|ui| { dark_text_edit(ui, &mut self.import_rows[idx].description); });
-                  });
-                }
-              });
-            ui.spacing_mut().item_spacing = old_spacing;
-          });
-
-        for idx in pending_amount_updates {
-          if let Some(row) = self.import_rows.get_mut(idx) {
-            if let Some(cents) = parse_amount_cents(&row.amount_input) {
-              row.amount_cents = cents;
-            }
-          }
-        }
-
-        ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-          if ui.button("Cancel").clicked() {
-            self.show_import_review = false;
-          }
-          if ui.add(egui::Button::new("Save Reviewed Import").fill(Color32::from_rgb(37, 99, 235))).clicked() {
-            self.save_import();
-          }
-        });
       });
-    self.show_import_review = open && self.show_import_review;
-  }
-
-  fn ui_analytics(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-    ui.heading("Analytics");
-    ui.label("Plotters chart rendered into egui texture.");
-    if self.chart_dirty || self.chart.is_none() {
-      self.chart = Some(render_plot_texture(ctx, &self.expenses));
-      self.chart_dirty = false;
-    }
-    if let Some(chart) = &self.chart {
-      ui.image(chart);
-    }
   }
 }
 
@@ -561,443 +659,4 @@ fn tab_button(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
   if ui.selectable_label(*current == tab, label).clicked() {
     *current = tab;
   }
-}
-
-fn dark_text_edit(ui: &mut egui::Ui, value: &mut String) -> egui::Response {
-  let response = egui::Frame::new()
-    .fill(CELL_BG)
-    .stroke(egui::Stroke::new(1.0, CELL_STROKE))
-    .corner_radius(0.0)
-    .inner_margin(egui::Margin::symmetric(2, 0))
-    .show(ui, |ui| {
-      ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-      ui.add(
-        egui::TextEdit::singleline(value)
-          .desired_width(f32::INFINITY)
-          .frame(
-            egui::Frame::new()
-              .fill(CELL_BG)
-              .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
-              .inner_margin(egui::Margin::same(0)),
-          )
-          .margin(egui::Margin::same(0))
-          .text_color(CELL_TEXT)
-          .background_color(CELL_BG),
-      )
-    })
-    .inner;
-  response
-}
-
-fn autocomplete_on_tab(
-  ui: &mut egui::Ui,
-  response: &egui::Response,
-  value: &mut String,
-  candidates: &[String],
-) -> bool {
-  if !response.has_focus() || value.trim().is_empty() {
-    return false;
-  }
-
-  let prefix = value.trim().to_lowercase();
-  let match_value = candidates
-    .iter()
-    .find(|candidate| {
-      let candidate_lower = candidate.to_lowercase();
-      candidate_lower.starts_with(&prefix) && candidate_lower != prefix
-    })
-    .cloned();
-
-  if let Some(match_value) = match_value {
-    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
-      *value = match_value;
-      return true;
-    }
-  }
-
-  false
-}
-
-fn unique_nonempty_values<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
-  let mut unique = Vec::new();
-  for value in values {
-    let trimmed = value.trim();
-    if !trimmed.is_empty() && !unique.iter().any(|existing: &String| existing.eq_ignore_ascii_case(trimmed)) {
-      unique.push(trimmed.to_owned());
-    }
-  }
-  unique
-}
-
-fn configure_theme(ctx: &egui::Context) {
-  let mut visuals = egui::Visuals::dark();
-  visuals.panel_fill = Color32::from_rgb(17, 24, 39);
-  visuals.window_fill = Color32::from_rgb(24, 32, 46);
-  visuals.extreme_bg_color = Color32::from_rgb(12, 17, 27);
-  visuals.faint_bg_color = Color32::from_rgb(30, 41, 59);
-  visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(24, 32, 46);
-  visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 41, 55);
-  visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(31, 41, 55);
-  visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 58, 82);
-  visuals.widgets.active.bg_fill = Color32::from_rgb(59, 82, 124);
-  visuals.widgets.open.bg_fill = Color32::from_rgb(38, 50, 72);
-  visuals.widgets.noninteractive.fg_stroke.color = Color32::from_rgb(226, 232, 240);
-  visuals.widgets.inactive.fg_stroke.color = Color32::from_rgb(226, 232, 240);
-  visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
-  visuals.widgets.active.fg_stroke.color = Color32::WHITE;
-  visuals.selection.bg_fill = Color32::from_rgb(57, 102, 184);
-  visuals.hyperlink_color = Color32::from_rgb(125, 175, 255);
-  visuals.override_text_color = Some(Color32::from_rgb(226, 232, 240));
-  ctx.set_visuals(visuals);
-
-  let mut style = (*ctx.global_style()).clone();
-  style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-  style.spacing.button_padding = egui::vec2(8.0, 4.0);
-  style.visuals.widgets.inactive.corner_radius = 3.0.into();
-  style.visuals.widgets.hovered.corner_radius = 3.0.into();
-  style.visuals.widgets.active.corner_radius = 3.0.into();
-  ctx.set_global_style(style);
-}
-
-fn placeholder(ui: &mut egui::Ui, title: &str, body: &str) {
-  egui::ScrollArea::vertical().show(ui, |ui| {
-    ui.heading(title);
-    ui.separator();
-    ui.label(body);
-  });
-}
-
-fn db_path() -> PathBuf {
-  let base = env::var_os("APPDATA")
-    .map(PathBuf::from)
-    .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-  base.join("TwoCents").join("twocents.sqlite")
-}
-
-fn open_database() -> rusqlite::Result<Connection> {
-  let path = db_path();
-  if let Some(parent) = path.parent() {
-    fs::create_dir_all(parent).map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
-  }
-
-  let conn = Connection::open(path)?;
-  conn.execute_batch(
-    "
-    CREATE TABLE IF NOT EXISTS accounts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      balance_cents INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS expenses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_id INTEGER REFERENCES accounts(id),
-      description TEXT NOT NULL,
-      vendor TEXT,
-      category TEXT NOT NULL,
-      amount_cents INTEGER NOT NULL,
-      date TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS categories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL UNIQUE
-    );
-    CREATE TABLE IF NOT EXISTS vendor_category_rules (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      vendor_pattern TEXT NOT NULL UNIQUE,
-      category TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    ",
-  )?;
-  let _ = conn.execute("ALTER TABLE expenses ADD COLUMN vendor TEXT", []);
-
-  let account_count: i64 = conn.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?;
-  if account_count == 0 {
-    conn.execute("INSERT INTO accounts (name, kind, balance_cents) VALUES (?1, ?2, ?3)", params!["Household Checking", "checking", 426_550])?;
-    conn.execute("INSERT INTO accounts (name, kind, balance_cents) VALUES (?1, ?2, ?3)", params!["Shared Savings", "savings", 1_240_000])?;
-  }
-
-  let expense_count: i64 = conn.query_row("SELECT COUNT(*) FROM expenses", [], |row| row.get(0))?;
-  if expense_count == 0 {
-    for (account_id, description, vendor, category, amount_cents, date) in [
-      (1, "Groceries", "Groceries", "Food", 18_642, "2026-05-01"),
-      (1, "Electric bill", "Electric Company", "Utilities", 14_280, "2026-05-03"),
-      (1, "Date night", "Restaurant", "Dining", 9_875, "2026-05-09"),
-      (1, "Gas", "Gas Station", "Transport", 6_122, "2026-05-12"),
-      (1, "Internet", "Internet Provider", "Utilities", 7_999, "2026-05-15"),
-    ] {
-      conn.execute(
-        "INSERT INTO expenses (account_id, description, vendor, category, amount_cents, date) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![account_id, description, vendor, category, amount_cents, date],
-      )?;
-    }
-  }
-
-  for category in ["Food", "Utilities", "Dining", "Transport", "Uncategorized"] {
-    ensure_category(&conn, category)?;
-  }
-  for (pattern, category) in [("grocery", "Food"), ("market", "Food"), ("electric", "Utilities"), ("internet", "Utilities"), ("restaurant", "Dining"), ("gas", "Transport")] {
-    conn.execute("INSERT OR IGNORE INTO vendor_category_rules (vendor_pattern, category) VALUES (?1, ?2)", params![pattern, category])?;
-  }
-  Ok(conn)
-}
-
-fn load_accounts(conn: &Connection) -> rusqlite::Result<Vec<Account>> {
-  let mut stmt = conn.prepare("SELECT name, kind, balance_cents FROM accounts ORDER BY id")?;
-  let rows = stmt
-    .query_map([], |row| {
-      Ok(Account {
-        name: row.get(0)?,
-        kind: row.get(1)?,
-        balance_cents: row.get(2)?,
-      })
-    })?
-    .collect();
-  rows
-}
-
-fn load_expenses(conn: &Connection) -> rusqlite::Result<Vec<Expense>> {
-  let mut stmt = conn.prepare(
-    "SELECT id, date, amount_cents, category, COALESCE(vendor, ''), description FROM expenses ORDER BY date DESC, id DESC",
-  )?;
-  let rows = stmt
-    .query_map([], |row| {
-      let amount_cents = row.get(2)?;
-      Ok(Expense {
-        id: row.get(0)?,
-        date: row.get(1)?,
-        amount_input: money(amount_cents),
-        amount_cents,
-        category: row.get(3)?,
-        vendor: row.get(4)?,
-        description: row.get(5)?,
-      })
-    })?
-    .collect();
-  rows
-}
-
-fn load_categories(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-  let mut stmt = conn.prepare("SELECT name FROM categories ORDER BY name")?;
-  let rows = stmt.query_map([], |row| row.get(0))?.collect();
-  rows
-}
-
-fn ensure_category(conn: &Connection, category: &str) -> rusqlite::Result<()> {
-  let category = category.trim();
-  if !category.is_empty() {
-    conn.execute("INSERT OR IGNORE INTO categories (name) VALUES (?1)", params![category])?;
-  }
-  Ok(())
-}
-
-fn update_expense_row(conn: &Connection, row: &Expense, field: &str) -> rusqlite::Result<()> {
-  match field {
-    "date" => { conn.execute("UPDATE expenses SET date = ?1 WHERE id = ?2", params![row.date, row.id])?; }
-    "amount" => { conn.execute("UPDATE expenses SET amount_cents = ?1 WHERE id = ?2", params![row.amount_cents, row.id])?; }
-    "category" => {
-      ensure_category(conn, &row.category)?;
-      conn.execute("UPDATE expenses SET category = ?1 WHERE id = ?2", params![row.category, row.id])?;
-    }
-    "vendor" => { conn.execute("UPDATE expenses SET vendor = ?1 WHERE id = ?2", params![row.vendor, row.id])?; }
-    "description" => { conn.execute("UPDATE expenses SET description = ?1 WHERE id = ?2", params![row.description, row.id])?; }
-    _ => {}
-  }
-  Ok(())
-}
-
-fn save_import_rows(conn: &Connection, rows: &[ImportRow]) -> rusqlite::Result<usize> {
-  for row in rows {
-    ensure_category(conn, &row.category)?;
-    conn.execute(
-      "INSERT INTO expenses (account_id, description, vendor, category, amount_cents, date) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-      params![row.description, row.vendor, row.category, row.amount_cents, row.date],
-    )?;
-    if row.category != "Uncategorized" {
-      conn.execute(
-        "INSERT OR IGNORE INTO vendor_category_rules (vendor_pattern, category) VALUES (?1, ?2)",
-        params![row.vendor.to_lowercase(), row.category],
-      )?;
-    }
-  }
-  Ok(rows.len())
-}
-
-fn money(cents: i64) -> String {
-  let sign = if cents < 0 { "-" } else { "" };
-  let cents = cents.abs();
-  format!("{sign}${}.{:02}", cents / 100, cents % 100)
-}
-
-fn parse_amount_cents(raw: &str) -> Option<i64> {
-  let trimmed = raw.trim();
-  if trimmed.is_empty() {
-    return None;
-  }
-  let negative = trimmed.starts_with('-') || (trimmed.starts_with('(') && trimmed.ends_with(')'));
-  let cleaned = trimmed
-    .replace(['$', ',', '(', ')', ' '], "")
-    .trim_start_matches('-')
-    .to_string();
-  let amount = cleaned.parse::<f64>().ok()?;
-  let cents = (amount * 100.0).round() as i64;
-  Some(if negative { -cents } else { cents }.abs())
-}
-
-fn normalize_date(raw: &str) -> String {
-  let trimmed = raw.trim();
-  let parts: Vec<&str> = trimmed.split(['/', '-']).collect();
-  if parts.len() == 3 && parts[0].len() == 4 {
-    return format!("{:0>4}-{:0>2}-{:0>2}", parts[0], parts[1], parts[2]);
-  }
-  if parts.len() == 3 {
-    return format!("{:0>4}-{:0>2}-{:0>2}", parts[2], parts[0], parts[1]);
-  }
-  trimmed.to_string()
-}
-
-fn normalize_vendor(description: &str) -> String {
-  description
-    .split(['*', '-', '#'])
-    .next()
-    .unwrap_or(description)
-    .trim()
-    .to_string()
-}
-
-fn normalize_header(header: &str) -> String {
-  header.trim().to_lowercase().replace([' ', '_', '-'], "")
-}
-
-fn find_column(headers: &[String], candidates: &[&str]) -> Option<usize> {
-  headers.iter().position(|header| {
-    let normalized = normalize_header(header);
-    candidates.iter().any(|candidate| normalized.contains(candidate))
-  })
-}
-
-fn category_for_vendor(conn: &Connection, vendor: &str) -> String {
-  let normalized = vendor.to_lowercase();
-  let mut stmt = match conn.prepare("SELECT vendor_pattern, category FROM vendor_category_rules ORDER BY id") {
-    Ok(stmt) => stmt,
-    Err(_) => return "Uncategorized".to_string(),
-  };
-  let rules = stmt
-    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
-    .unwrap_or_default();
-  rules
-    .into_iter()
-    .find_map(|(pattern, category)| normalized.contains(&pattern.to_lowercase()).then_some(category))
-    .unwrap_or_else(|| "Uncategorized".to_string())
-}
-
-fn import_csv_statement(conn: &Connection) -> Result<Vec<ImportRow>, String> {
-  let Some(path) = rfd::FileDialog::new()
-    .set_title("Import statement CSV")
-    .add_filter("CSV statements", &["csv"])
-    .pick_file()
-  else {
-    return Ok(Vec::new());
-  };
-
-  let mut reader = csv::ReaderBuilder::new()
-    .flexible(true)
-    .from_path(&path)
-    .map_err(|err| format!("Could not open CSV: {err}"))?;
-  let headers = reader
-    .headers()
-    .map_err(|err| format!("Could not read CSV headers: {err}"))?
-    .iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-  let date_idx = find_column(&headers, &["date", "posted"]);
-  let amount_idx = find_column(&headers, &["amount", "debit", "withdrawal", "charge"]);
-  let description_idx = find_column(&headers, &["description", "memo", "details", "transaction", "payee", "merchant"]);
-  let category_idx = find_column(&headers, &["category"]);
-
-  let mut rows = Vec::new();
-  for record in reader.records() {
-    let record = record.map_err(|err| format!("Bad CSV row: {err}"))?;
-    let date = date_idx.and_then(|idx| record.get(idx)).map(normalize_date).unwrap_or_else(|| "2026-01-01".to_string());
-    let description = description_idx.and_then(|idx| record.get(idx)).unwrap_or("").trim().to_string();
-    let amount_cents = amount_idx.and_then(|idx| record.get(idx)).and_then(parse_amount_cents).unwrap_or(0);
-    if description.is_empty() || amount_cents == 0 {
-      continue;
-    }
-    let vendor = normalize_vendor(&description);
-    let category = category_idx
-      .and_then(|idx| record.get(idx))
-      .map(str::trim)
-      .filter(|value| !value.is_empty())
-      .map(str::to_string)
-      .unwrap_or_else(|| category_for_vendor(conn, &vendor));
-    rows.push(ImportRow {
-      date,
-      amount_input: money(amount_cents),
-      amount_cents,
-      category,
-      vendor,
-      description,
-    });
-  }
-  Ok(rows)
-}
-
-fn import_row_status(row: &ImportRow) -> &'static str {
-  if row.date.trim().is_empty() || row.amount_cents == 0 || row.description.trim().is_empty() {
-    "needs edit"
-  } else if row.category.trim().is_empty() || row.category == "Uncategorized" {
-    "needs category"
-  } else {
-    "ready"
-  }
-}
-
-fn duplicate_import_count(conn: &Connection, rows: &[ImportRow]) -> usize {
-  rows
-    .iter()
-    .filter(|row| {
-      conn
-        .query_row(
-          "SELECT COUNT(*) FROM expenses WHERE date = ?1 AND amount_cents = ?2 AND lower(COALESCE(vendor, '')) = lower(?3) AND lower(description) = lower(?4)",
-          params![row.date, row.amount_cents, row.vendor, row.description],
-          |count_row| count_row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0
-    })
-    .count()
-}
-
-fn render_plot_texture(ctx: &egui::Context, expenses: &[Expense]) -> TextureHandle {
-  const W: usize = 760;
-  const H: usize = 430;
-  let mut buffer = vec![255u8; W * H * 3];
-  {
-    let root = BitMapBackend::with_buffer(&mut buffer, (W as u32, H as u32)).into_drawing_area();
-    root.fill(&RGBColor(16, 22, 34)).ok();
-    let max = expenses.iter().map(|e| e.amount_cents).max().unwrap_or(25_000) as f64 / 100.0;
-    let x_max = expenses.len().max(6) as f64;
-    let y_max = (max * 1.2).max(100.0);
-    let mut chart = ChartBuilder::on(&root)
-      .margin(12)
-      .caption("Local spending", ("sans-serif", 20, FontStyle::Normal, &RGBColor(230, 235, 245)).into_text_style(&root))
-      .x_label_area_size(36)
-      .y_label_area_size(56)
-      .build_cartesian_2d(0.0..x_max, 0.0..y_max)
-      .expect("chart");
-    chart.configure_mesh().light_line_style(RGBColor(50, 58, 70)).draw().ok();
-    let line = expenses
-      .iter()
-      .rev()
-      .enumerate()
-      .map(|(idx, expense)| (idx as f64 + 1.0, expense.amount_cents as f64 / 100.0))
-      .collect::<Vec<_>>();
-    chart.draw_series(LineSeries::new(line, RGBColor(90, 160, 255).stroke_width(2))).ok();
-    root.present().ok();
-  }
-  let image = egui::ColorImage::from_rgb([W, H], &buffer);
-  ctx.load_texture("spending-chart", image, Default::default())
 }
