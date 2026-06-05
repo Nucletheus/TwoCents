@@ -22,7 +22,7 @@ impl TwoCentsApp {
       .inner_margin(egui::Margin::symmetric(20, 14))
       .show(ui, |ui| {
         ui.set_max_width(560.0);
-        ui.heading(RichText::new("Households").color(ui.visuals().strong_text_color()));
+        ui.heading(RichText::new("Households").color(ui.visuals().text_color()));
         ui.label(
           RichText::new("Manage your household, members, and member colors.")
             .small()

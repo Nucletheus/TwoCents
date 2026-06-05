@@ -8,7 +8,7 @@ impl TwoCentsApp {
     ui.separator();
     for account in &self.accounts {
       ui.horizontal(|ui| {
-        ui.label(RichText::new(&account.name).strong());
+        ui.label(RichText::new(&account.name));
         ui.label(&account.kind);
         ui.monospace(money(account.balance_cents));
       });

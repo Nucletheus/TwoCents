@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use crate::models::*;
 use crate::db::*;
 use crate::ui::widgets::*;
+use crate::ui::theme;
 use crate::TwoCentsApp;
 
 // ---------------------------------------------------------------------------
@@ -328,7 +329,7 @@ impl TwoCentsApp {
       .default_width(400.0)
       .frame(themed_modal_frame(ctx))
       .show(ctx, |ui| {
-        ui.label(RichText::new("Settings").strong().color(ui.visuals().strong_text_color()));
+        ui.label(RichText::new("Settings").color(ui.visuals().text_color()));
         ui.label(
           RichText::new("Create and delete categories here. The expense grid only uses these.")
             .small()
@@ -368,11 +369,9 @@ impl TwoCentsApp {
                       let Some(parent) = parents.iter().find(|category| category.id == parent_id) else {
                         continue;
                       };
+                      let sel = self.new_subcategory_parent_id == Some(parent.id);
                       if ui
-                        .selectable_label(
-                          self.new_subcategory_parent_id == Some(parent.id),
-                          &parent.name,
-                        )
+                        .selectable_label(sel, crate::ui::theme::sel_text(ui, sel, &parent.name))
                         .clicked()
                       {
                         self.new_subcategory_parent_id = Some(parent.id);
@@ -464,7 +463,7 @@ impl TwoCentsApp {
         .frame(
           egui::Frame::window(&ctx.global_style())
             .fill(ctx.global_style().visuals.panel_fill)
-            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(239, 68, 68)))
+            .stroke(egui::Stroke::new(2.0, theme::current_error()))
             .corner_radius(10.0)
             .inner_margin(egui::Margin::symmetric(16, 16)),
         )
@@ -474,7 +473,7 @@ impl TwoCentsApp {
               RichText::new("⚠ Warning")
                 .font(egui::FontId::proportional(18.0))
                 .strong()
-                .color(egui::Color32::from_rgb(239, 68, 68)),
+                .color(theme::current_error()),
             );
             ui.add_space(8.0);
             ui.label(
@@ -502,12 +501,12 @@ impl TwoCentsApp {
                   }
                 });
                 cols[1].vertical_centered(|ui| {
-                  let confirm_btn = egui::Button::new(
-                    RichText::new("Delete")
-                      .strong()
-                      .color(egui::Color32::WHITE),
-                  )
-                  .fill(egui::Color32::from_rgb(239, 68, 68));
+              let err = theme::current_error();
+              let on_err = if err.r() > 180 && err.g() > 180 && err.b() > 180 { Color32::BLACK } else { Color32::WHITE };
+              let confirm_btn = egui::Button::new(
+                RichText::new("Delete").strong().color(on_err),
+              )
+              .fill(err);
                   if ui.add(confirm_btn).clicked() {
                     self.show_delete_expense_confirm = false;
                     let targets = std::mem::take(&mut self.delete_expense_indices);
@@ -518,7 +517,7 @@ impl TwoCentsApp {
             });
           });
         });
-      self.show_delete_expense_confirm = open;
+      self.show_delete_expense_confirm = open && self.show_delete_expense_confirm;
     }
 
     if self.show_delete_import_confirm {
@@ -572,12 +571,12 @@ impl TwoCentsApp {
                   }
                 });
                 cols[1].vertical_centered(|ui| {
+                  let sel_bg = ui.visuals().selection.bg_fill;
+                  let on_sel = if sel_bg.r() > 180 && sel_bg.g() > 180 && sel_bg.b() > 180 { Color32::BLACK } else { Color32::WHITE };
                   let confirm_btn = egui::Button::new(
-                    RichText::new("Remove")
-                      .strong()
-                      .color(egui::Color32::WHITE),
+                    RichText::new("Remove").strong().color(on_sel),
                   )
-                  .fill(ui.visuals().selection.bg_fill);
+                  .fill(sel_bg);
                   if ui.add(confirm_btn).clicked() {
                     self.show_delete_import_confirm = false;
                     let targets = std::mem::take(&mut self.delete_import_indices);
@@ -588,7 +587,7 @@ impl TwoCentsApp {
             });
           });
         });
-      self.show_delete_import_confirm = open;
+      self.show_delete_import_confirm = open && self.show_delete_import_confirm;
     }
   }
 }

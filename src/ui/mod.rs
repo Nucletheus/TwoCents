@@ -8,10 +8,13 @@ pub mod expenses;
 pub mod analytics;
 pub mod households;
 pub mod import_modal;
+pub mod duplicates_modal;
 pub mod popups;
 
+pub mod budgets;
+pub mod theme;
+
 // Future slots:
-// pub mod budgets;
 // pub mod goals;
 // pub mod settlements;
 

@@ -4,7 +4,7 @@
 /// The only differences between the two call sites are:
 ///   - which row slice they pass (Expense vs ImportRow — both implement GridRow)
 ///   - which cell-ID prefix they use (avoids egui ID collisions)
-///   - how they process the returned `SharedGridResult` (DB commit vs in-memory update)
+///   - how they process the returned `GridResult` (DB commit vs in-memory update)
 use eframe::egui::{self, Color32, RichText};
 use egui_extras::TableBuilder;
 use crate::models::*;
@@ -17,7 +17,7 @@ use crate::ui::popups::{member_color_for, category_color_for, category_picker_me
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-pub struct SharedGridResult {
+pub struct GridResult {
   /// (row_index, field_name) pairs for simple field writes
   pub pending_field_updates: Vec<(usize, &'static str)>,
   /// Row indices whose category field needs validated & committed
@@ -28,6 +28,12 @@ pub struct SharedGridResult {
   pub open_color_popup: Option<(i64, String, Color32)>,
   /// The cell that currently has keyboard focus (for status-bar display)
   pub active_cell: Option<(GridColumn, usize)>,
+  /// Selected indices requested for deletion
+  pub delete_rows: Option<Vec<usize>>,
+  /// Selected indices requested for forced deletion (bypassing confirmation)
+  pub force_delete_rows: Option<Vec<usize>>,
+  /// If Some, the user clicked a column header to trigger sorting
+  pub clicked_sort_column: Option<ExpenseSortColumn>,
 }
 
 // ---------------------------------------------------------------------------
@@ -35,17 +41,11 @@ pub struct SharedGridResult {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_shared_grid<R: GridRow>(
+pub fn render_grid<R: GridRow>(
   ui: &mut egui::Ui,
   rows: &mut Vec<R>,
   sorted_indices: &[usize],
-  // --- Grid state (mutable refs to existing app fields; no layout change) ---
-  selection: &mut Option<GridSelection>,
-  drag: &mut Option<GridSelectDrag>,
-  edit_cell: &mut Option<(GridColumn, usize)>,
-  edit_original: &mut Option<String>,
-  typeahead: &mut Option<char>,
-  scroll_offset: &mut f32,
+  state: &mut GridState,
   autocomplete_selection: &mut usize,
   // --- Candidate lists for autocomplete ---
   vendor_candidates: &[String],
@@ -55,14 +55,86 @@ pub fn render_shared_grid<R: GridRow>(
   // --- People / category data ---
   members: &[HouseholdMember],
   categories: &[Category],
-  // --- Column sizing ---
-  columns: Vec<egui_extras::Column>,
+
   // --- Unique string prefix so expense vs import cells don't share egui IDs ---
   cell_id_prefix: &'static str,
   // --- Whether to draw per-row separator lines (expense grid has them) ---
   show_row_separator: bool,
-) -> SharedGridResult {
-  let mut result = SharedGridResult::default();
+) -> GridResult {
+  let mut result = GridResult::default();
+
+  // ── KEYBOARD INTERACTION HOOKS ───────────────────────────────────────────
+  // Only handle Escape at the grid level when NOT editing a cell.
+  // When editing, the per-cell Escape handlers restore the original value and
+  // cancel the edit — clearing selection here would preempt that logic.
+  if state.edit_cell.is_none() {
+    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+      state.clear_selection();
+    }
+  }
+  if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
+    if let Some(sel) = &state.selection {
+      if let Some(&row) = sel.rows.first() {
+        state.edit_cell = Some((sel.column, row));
+      }
+    }
+  }
+  if state.edit_cell.is_none() && state.selection.is_some() {
+    let is_ctrl_del = ui.input_mut(|input| {
+      input.consume_key(egui::Modifiers::COMMAND, egui::Key::Delete)
+        || input.consume_key(egui::Modifiers::CTRL, egui::Key::Delete)
+    });
+    if is_ctrl_del {
+      if let Some(sel) = &state.selection {
+        result.force_delete_rows = Some(sel.rows.clone());
+      }
+    } else {
+      let is_del = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
+      if is_del {
+        if let Some(sel) = &state.selection {
+          result.delete_rows = Some(sel.rows.clone());
+        }
+      }
+    }
+  }
+
+  // ── PENDING KEYBOARD EVENTS COMMITMENTS ──────────────────────────────────
+  let cached_members = member_candidates.to_vec();
+  let cached_categories = category_candidates.to_vec();
+  let cached_vendors = vendor_candidates.to_vec();
+  let cached_descriptions = description_candidates.to_vec();
+  let candidates_fn = move |col| match col {
+    GridColumn::Member => cached_members.clone(),
+    GridColumn::Category => cached_categories.clone(),
+    GridColumn::Vendor => cached_vendors.clone(),
+    GridColumn::Description => cached_descriptions.clone(),
+    _ => Vec::new(),
+  };
+
+  let indices_to_use = sorted_indices;
+
+  if let Some((column, _, targets)) = state.apply_pending_keyboard(
+    rows,
+    indices_to_use,
+    *autocomplete_selection,
+    candidates_fn,
+  ) {
+    match column {
+      GridColumn::Date => result.pending_field_updates.extend(targets.into_iter().map(|t| (t, "date"))),
+      GridColumn::Amount => result.pending_field_updates.extend(targets.into_iter().map(|t| (t, "amount"))),
+      GridColumn::Member => result.pending_member_commits.extend(targets),
+      GridColumn::Category => result.pending_category_commits.extend(targets),
+      GridColumn::Vendor => result.pending_field_updates.extend(targets.into_iter().map(|t| (t, "vendor"))),
+      GridColumn::Description => result.pending_field_updates.extend(targets.into_iter().map(|t| (t, "description"))),
+    }
+  }
+
+  let selection = &mut state.selection;
+  let drag = &mut state.drag;
+  let edit_cell = &mut state.edit_cell;
+  let edit_original = &mut state.edit_original;
+  let typeahead = &mut state.typeahead;
+  let scroll_offset = &mut state.scroll_offset;
 
   // Apply any pending typeahead character before rendering so the first frame
   // shows the typed character in the correct cell.
@@ -88,14 +160,56 @@ pub fn render_shared_grid<R: GridRow>(
   let mut row_drag_bands: Vec<(usize, f32, f32)> = Vec::new();
   let mut scroll_y = *scroll_offset;
 
-  // Helper closure to make a cell egui::Id
-  let cell_id = |col: GridColumn, idx: usize| -> egui::Id {
-    egui::Id::new((cell_id_prefix, format!("{col:?}"), idx))
+  // Helper closures to make cell egui::Id stable based on visual row positions
+  let cell_id_by_visual = |col: GridColumn, visual_row: usize| -> egui::Id {
+    egui::Id::new((cell_id_prefix, format!("{col:?}"), visual_row))
   };
-  let cell_has_focus = |ctx: &egui::Context, col: GridColumn, idx: usize| -> bool {
-    ctx.memory(|m| m.has_focus(cell_id(col, idx)))
+  let get_cell_id_for_raw_row = |col: GridColumn, raw_idx: usize| -> Option<egui::Id> {
+    sorted_indices.iter().position(|&i| i == raw_idx)
+      .map(|vis_row| cell_id_by_visual(col, vis_row))
+  };
+  let cell_id = |col: GridColumn, idx: usize| -> egui::Id {
+    get_cell_id_for_raw_row(col, idx).unwrap_or_else(|| cell_id_by_visual(col, idx))
+  };
+  let cell_has_focus = |ctx: &egui::Context, col: GridColumn, raw_idx: usize| -> bool {
+    get_cell_id_for_raw_row(col, raw_idx)
+      .is_some_and(|id| ctx.memory(|m| m.has_focus(id)))
   };
 
+  let w = ui.available_width();
+  let fractions = [0.12, 0.10, 0.10, 0.18, 0.15, 0.35];
+  let labels: [(GridColumn, &str); 6] = [
+    (GridColumn::Date, "Date"),
+    (GridColumn::Amount, "Amount"),
+    (GridColumn::Member, "Member"),
+    (GridColumn::Category, "Category"),
+    (GridColumn::Vendor, "Vendor"),
+    (GridColumn::Description, "Description"),
+  ];
+  let sort_cols: [ExpenseSortColumn; 6] = [
+    ExpenseSortColumn::Date, ExpenseSortColumn::Amount,
+    ExpenseSortColumn::Member, ExpenseSortColumn::Category,
+    ExpenseSortColumn::Vendor, ExpenseSortColumn::Description,
+  ];
+
+  // Frozen header row
+  ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
+  ui.horizontal(|ui| {
+    ui.spacing_mut().item_spacing.x = 0.0;
+    for (i, (_, label)) in labels.iter().enumerate() {
+      ui.allocate_ui_with_layout(
+        egui::vec2(w * fractions[i], GRID_HEADER_HEIGHT),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+          if grid_header(ui, label).clicked() {
+            result.clicked_sort_column = Some(sort_cols[i]);
+          }
+        },
+      );
+    }
+  });
+
+  // Scrollable body
   #[allow(deprecated)]
   let scroll_response = egui::ScrollArea::vertical()
     .id_salt(format!("{cell_id_prefix}_scroll"))
@@ -106,25 +220,16 @@ pub fn render_shared_grid<R: GridRow>(
       ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
       let mut builder = TableBuilder::new(ui)
         .striped(true)
-        .resizable(true)
         .vscroll(false)
         .min_scrolled_height(120.0)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-      for col in columns {
-        builder = builder.column(col);
+      for &f in &fractions {
+        builder = builder.column(egui_extras::Column::initial(w * f).clip(true));
       }
 
       builder
-        .header(GRID_HEADER_HEIGHT, |mut header| {
-          header.col(|ui| { grid_header(ui, "Date"); });
-          header.col(|ui| { grid_header(ui, "Amount"); });
-          header.col(|ui| { grid_header(ui, "Member"); });
-          header.col(|ui| { grid_header(ui, "Category"); });
-          header.col(|ui| { grid_header(ui, "Vendor"); });
-          header.col(|ui| { grid_header(ui, "Description"); });
-        })
         .body(|mut body| {
-          for &idx in sorted_indices {
+          for (visual_row_index, &idx) in sorted_indices.iter().enumerate() {
             body.row(GRID_ROW_HEIGHT, |mut row_ui| {
 
               // ── DATE ────────────────────────────────────────────────────
@@ -133,12 +238,20 @@ pub fn render_shared_grid<R: GridRow>(
                 let cell_rect = ui.max_rect();
                 if show_row_separator {
                   ui.painter().line_segment(
-                    [cell_rect.left_bottom(), egui::pos2(cell_rect.right() + 2000.0, cell_rect.bottom())],
-                    egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                    [cell_rect.left_bottom(), egui::pos2(cell_rect.right(), cell_rect.bottom())],
+                    egui::Stroke::new(1.5, ui.visuals().widgets.noninteractive.bg_stroke.color),
                   );
                 }
                 row_drag_bands.push((idx, cell_rect.top(), cell_rect.bottom()));
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
+                process_grid_column_cell(
+                  ui,
+                  column,
+                  idx,
+                  cell_id_by_visual(column, visual_row_index).with("bg"),
+                  selection,
+                  drag,
+                  edit_cell,
+                );
                 let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
@@ -147,14 +260,16 @@ pub fn render_shared_grid<R: GridRow>(
                     rows[idx].row_date_mut(),
                     edit_original,
                     edit_cell,
-                    cell_id(column, idx),
+                    cell_id_by_visual(column, visual_row_index),
                     editing,
                   );
                   let press_enter = editing && ui.input(|i| i.key_pressed(egui::Key::Enter));
                   if date_changed || press_enter {
                     result.pending_field_updates.push((idx, "date"));
-                    *edit_cell = None;
-                    *edit_original = None;
+                    if press_enter {
+                      *edit_cell = None;
+                      *edit_original = None;
+                    }
                     // propagate to selected rows
                     let targets = grid_commit_targets(selection, column, idx);
                     let value = rows[idx].row_date().to_string();
@@ -169,13 +284,20 @@ pub fn render_shared_grid<R: GridRow>(
                     result.active_cell = Some((column, idx));
                   }
                 });
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
               });
 
               // ── AMOUNT ──────────────────────────────────────────────────
               row_ui.col(|ui| {
                 let column = GridColumn::Amount;
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
+                process_grid_column_cell(
+                  ui,
+                  column,
+                  idx,
+                  cell_id_by_visual(column, visual_row_index).with("bg"),
+                  selection,
+                  drag,
+                  edit_cell,
+                );
                 let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
@@ -185,7 +307,7 @@ pub fn render_shared_grid<R: GridRow>(
                       rows[idx].row_amount_input_mut(),
                       edit_original,
                       edit_cell,
-                      cell_id(column, idx),
+                      cell_id_by_visual(column, visual_row_index),
                       true,
                     );
                     if amount_resp.changed() {
@@ -229,10 +351,9 @@ pub fn render_shared_grid<R: GridRow>(
                       rows[idx].row_amount_input().to_string()
                     };
                     let mut temp = display;
-                    ui_grid_text_edit(ui, &mut temp, edit_original, edit_cell, cell_id(column, idx), false);
+                    ui_grid_text_edit(ui, &mut temp, edit_original, edit_cell, cell_id_by_visual(column, visual_row_index), false);
                   }
                 });
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
               });
 
               // ── MEMBER ──────────────────────────────────────────────────
@@ -240,9 +361,18 @@ pub fn render_shared_grid<R: GridRow>(
                 let column = GridColumn::Member;
                 let member_bg = member_color_for(members, rows[idx].row_member());
                 if member_bg.a() > 0 && member_bg != Color32::TRANSPARENT {
-                  ui.painter().rect_filled(ui.max_rect(), 0.0, member_bg);
+                  let muted = Color32::from_rgba_unmultiplied(member_bg.r(), member_bg.g(), member_bg.b(), 60);
+                  ui.painter().rect_filled(ui.max_rect(), 0.0, muted);
                 }
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
+                process_grid_column_cell(
+                  ui,
+                  column,
+                  idx,
+                  cell_id_by_visual(column, visual_row_index).with("bg"),
+                  selection,
+                  drag,
+                  edit_cell,
+                );
                 let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -251,7 +381,7 @@ pub fn render_shared_grid<R: GridRow>(
                     *edit_original = Some(rows[idx].row_member().to_string());
                   }
                   let member_bg = member_color_for(members, rows[idx].row_member());
-                  let cell = member_cell_ui(ui, rows[idx].row_member_mut(), member_bg, cell_id(column, idx), editing);
+                  let cell = member_cell_ui(ui, rows[idx].row_member_mut(), member_bg, cell_id_by_visual(column, visual_row_index), editing);
                   if editing && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                     if let Some(orig) = edit_original.take() { *rows[idx].row_member_mut() = orig; }
                     *edit_cell = None;
@@ -308,7 +438,6 @@ pub fn render_shared_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
               });
 
               // ── CATEGORY ────────────────────────────────────────────────
@@ -316,9 +445,18 @@ pub fn render_shared_grid<R: GridRow>(
                 let column = GridColumn::Category;
                 let cat_bg = category_color_for(categories, rows[idx].row_category());
                 if cat_bg.a() > 0 && cat_bg != Color32::TRANSPARENT {
-                  ui.painter().rect_filled(ui.max_rect(), 0.0, cat_bg);
+                  let muted = Color32::from_rgba_unmultiplied(cat_bg.r(), cat_bg.g(), cat_bg.b(), 60);
+                  ui.painter().rect_filled(ui.max_rect(), 0.0, muted);
                 }
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
+                process_grid_column_cell(
+                  ui,
+                  column,
+                  idx,
+                  cell_id_by_visual(column, visual_row_index).with("bg"),
+                  selection,
+                  drag,
+                  edit_cell,
+                );
                 let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -327,7 +465,7 @@ pub fn render_shared_grid<R: GridRow>(
                     *edit_original = Some(rows[idx].row_category().to_string());
                   }
                   let cat_bg = category_color_for(categories, rows[idx].row_category());
-                  let cell = category_cell_ui(ui, rows[idx].row_category_mut(), cat_bg, cell_id(column, idx), editing);
+                  let cell = category_cell_ui(ui, rows[idx].row_category_mut(), cat_bg, cell_id_by_visual(column, visual_row_index), editing);
                   if editing && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                     if let Some(orig) = edit_original.take() { *rows[idx].row_category_mut() = orig; }
                     *edit_cell = None;
@@ -396,19 +534,26 @@ pub fn render_shared_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
               });
 
               // ── VENDOR ──────────────────────────────────────────────────
               row_ui.col(|ui| {
                 let column = GridColumn::Vendor;
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
+                process_grid_column_cell(
+                  ui,
+                  column,
+                  idx,
+                  cell_id_by_visual(column, visual_row_index).with("bg"),
+                  selection,
+                  drag,
+                  edit_cell,
+                );
                 let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
                   let response = ui_grid_text_edit(
                     ui, rows[idx].row_vendor_mut(), edit_original, edit_cell,
-                    cell_id(column, idx), editing,
+                    cell_id_by_visual(column, visual_row_index), editing,
                   );
                   if editing && cell_has_focus(ui.ctx(), column, idx) {
                     result.active_cell = Some((column, idx));
@@ -440,19 +585,26 @@ pub fn render_shared_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
               });
 
               // ── DESCRIPTION ─────────────────────────────────────────────
               row_ui.col(|ui| {
                 let column = GridColumn::Description;
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
+                process_grid_column_cell(
+                  ui,
+                  column,
+                  idx,
+                  cell_id_by_visual(column, visual_row_index).with("bg"),
+                  selection,
+                  drag,
+                  edit_cell,
+                );
                 let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
                   let response = ui_grid_text_edit(
                     ui, rows[idx].row_description_mut(), edit_original, edit_cell,
-                    cell_id(column, idx), editing,
+                    cell_id_by_visual(column, visual_row_index), editing,
                   );
                   if editing && cell_has_focus(ui.ctx(), column, idx) {
                     result.active_cell = Some((column, idx));
@@ -484,7 +636,6 @@ pub fn render_shared_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
-                process_grid_column_cell(ui, column, idx, selection, drag, edit_cell);
               });
 
             }); // body row
@@ -496,8 +647,21 @@ pub fn render_shared_grid<R: GridRow>(
   grid_apply_shift_hand_pan(ui.ctx(), &mut scroll_y);
   *scroll_offset = scroll_y;
 
-  // Type-to-start-edit
-  let _ = grid_try_start_edit_from_typing(ui, selection, edit_cell, typeahead);
+  // Type-to-start-edit.
+  // We inline the focus check here instead of using grid_try_start_edit_from_typing's
+  // broad `mem.focused().is_some()` guard — that guard blocks typeahead whenever ANY
+  // widget has focus (including the Window close button), breaking the import grid.
+  // Instead we only block typeahead if one of OUR grid TextEdit cells has focus.
+  if edit_cell.is_none() {
+    let grid_cell_has_focus = selection.as_ref().is_some_and(|sel| {
+      sel.rows.iter().any(|&r| {
+        ui.ctx().memory(|m| m.has_focus(cell_id(sel.column, r)))
+      })
+    });
+    if !grid_cell_has_focus {
+      let _ = grid_try_start_edit_from_typing(ui, selection, edit_cell, typeahead);
+    }
+  }
 
   // Enter key: if multi-row selection, commit the active cell to all rows
   if let Some((column, idx)) = *edit_cell {
@@ -554,17 +718,38 @@ pub fn render_shared_grid<R: GridRow>(
     }
   }
 
-  // Focus cell
-  if let Some((col, idx)) = *edit_cell {
-    let id = cell_id(col, idx);
-    let chevron_id = id.with("chevron");
-    ui.memory_mut(|mem| { mem.surrender_focus(chevron_id); mem.request_focus(id); });
-  }
-
   // Drag
   grid_snap_drag_to_pointer_y(ui, &row_drag_bands, sorted_indices, drag, selection);
   if drag.is_some() { ui.ctx().request_repaint(); }
   finish_grid_drag(drag, ui);
+
+  // Handle double-click edit activation FIRST so that the focus request below
+  // fires in the same frame the edit_cell is set (instead of one frame late).
+  let pending_edit = ui.ctx().data_mut(|d| {
+    d.remove_temp::<Option<(GridColumn, usize)>>(egui::Id::new("pending_edit_cell"))
+  });
+  if let Some(Some(cell)) = pending_edit {
+    *edit_cell = Some(cell);
+    ui.ctx().request_repaint();
+  }
+
+  // Focus cell — runs after pending_edit_cell is resolved so the request_focus
+  // call covers double-click activations in the same frame.
+  if let Some(target) = state.pending_focus_target.take() {
+    *selection = Some(GridSelection {
+      column: target.0,
+      rows: vec![target.1],
+    });
+    *edit_cell = Some(target);
+    if let Some(id) = get_cell_id_for_raw_row(target.0, target.1) {
+      request_grid_cell_focus(ui, id);
+    }
+  } else if let Some((col, idx)) = *edit_cell {
+    if let Some(id) = get_cell_id_for_raw_row(col, idx) {
+      let chevron_id = id.with("chevron");
+      ui.memory_mut(|mem| { mem.surrender_focus(chevron_id); mem.request_focus(id); });
+    }
+  }
 
   result
 }

@@ -1,12 +1,10 @@
 use eframe::egui::{self, Color32, Id, Shape, pos2, RichText, color_picker::show_color_at};
-use egui_extras::Column;
 
 use crate::models::*;
 use crate::db::*;
 
 pub const GRID_HEADER_HEIGHT: f32 = 24.0;
 pub const GRID_ROW_HEIGHT: f32 = 24.0;
-pub const DESCRIPTION_MIN_WIDTH: f32 = 160.0;
 pub const GRID_SELECTION_STATUS_HEIGHT: f32 = 18.0;
 
 pub const PICKER_ROW_HEIGHT: f32 = 24.0;
@@ -14,23 +12,30 @@ pub const CATEGORY_PICKER_MIN_WIDTH: f32 = 200.0;
 pub const CATEGORY_PICKER_MAX_WIDTH: f32 = 320.0;
 pub const MEMBER_PICKER_MIN_WIDTH: f32 = 140.0;
 
-pub fn grid_header(ui: &mut egui::Ui, label: &str) {
+pub fn grid_header(ui: &mut egui::Ui, label: &str) -> egui::Response {
   let width = ui.available_width().max(1.0);
-  let (rect, _) = ui.allocate_exact_size(egui::vec2(width, GRID_HEADER_HEIGHT), egui::Sense::hover());
-  ui.painter().rect_filled(rect, 0.0, ui.visuals().window_fill);
+  let (rect, response) = ui.allocate_exact_size(egui::vec2(width, GRID_HEADER_HEIGHT), egui::Sense::click());
+  
+  let fill_color = ui.visuals().widgets.noninteractive.bg_fill.gamma_multiply(0.5);
+  
+  ui.painter().rect_filled(rect, 0.0, fill_color);
   ui.painter().rect_stroke(
     rect,
     0.0,
-    egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    egui::Stroke::new(1.5, ui.visuals().widgets.noninteractive.bg_stroke.color),
     egui::StrokeKind::Inside,
   );
+  
+  let text_color = ui.visuals().text_color();
+  
   ui.painter().text(
     egui::pos2(rect.left() + 4.0, rect.center().y),
     egui::Align2::LEFT_CENTER,
     label,
     egui::FontId::proportional(13.0),
-    ui.visuals().strong_text_color(),
+    text_color,
   );
+  response
 }
 
 
@@ -134,6 +139,12 @@ pub fn grid_row_selected(selection: &Option<GridSelection>, column: GridColumn, 
     .is_some_and(|sel| sel.column == column && sel.rows.contains(&row))
 }
 
+pub fn grid_row_has_any_selection(selection: &Option<GridSelection>, row: usize) -> bool {
+  selection
+    .as_ref()
+    .is_some_and(|sel| sel.rows.contains(&row))
+}
+
 pub fn grid_selection_anchor(selection: &Option<GridSelection>) -> Option<(GridColumn, usize)> {
   selection.as_ref().and_then(|sel| sel.rows.first().copied().map(|row| (sel.column, row)))
 }
@@ -170,13 +181,14 @@ pub fn grid_try_start_edit_from_typing(
   if edit_cell.is_some() {
     return false;
   }
-  if ui.ctx().memory(|mem| mem.focused().is_some()) {
-    return false;
-  }
-  let Some(ch) = grid_consume_printable_char(ui) else {
+  // Check selection BEFORE consuming the character. If we consumed first and then
+  // found no selection, the character would be silently dropped — a particular
+  // problem when a second grid (e.g. the expense grid) renders before this one and
+  // has no selection: it would eat every keystroke meant for the active grid.
+  let Some((column, row)) = grid_selection_anchor(selection) else {
     return false;
   };
-  let Some((column, row)) = grid_selection_anchor(selection) else {
+  let Some(ch) = grid_consume_printable_char(ui) else {
     return false;
   };
   *typeahead = Some(ch);
@@ -195,6 +207,7 @@ pub fn paint_grid_cell_highlight(
   ui: &mut egui::Ui,
   cell_rect: egui::Rect,
   selected: bool,
+  row_has_selection: bool,
   dragging: bool,
   editing: bool,
 ) {
@@ -205,6 +218,10 @@ pub fn paint_grid_cell_highlight(
     ui.painter().rect_filled(cell_rect, 0.0, Color32::from_rgba_unmultiplied(ui.visuals().selection.bg_fill.r(), ui.visuals().selection.bg_fill.g(), ui.visuals().selection.bg_fill.b(), 40));
   } else if selected {
     ui.painter().rect_filled(cell_rect, 0.0, Color32::from_rgba_unmultiplied(ui.visuals().selection.bg_fill.r(), ui.visuals().selection.bg_fill.g(), ui.visuals().selection.bg_fill.b(), 15));
+  } else if row_has_selection {
+    // Subtle "grayed out" highlight for non-selected columns in a selected row
+    let ghost = ui.visuals().widgets.noninteractive.bg_fill.linear_multiply(0.08);
+    ui.painter().rect_filled(cell_rect, 0.0, ghost);
   }
   if editing {
     ui.painter().rect_stroke(
@@ -217,7 +234,7 @@ pub fn paint_grid_cell_highlight(
     ui.painter().rect_stroke(
       cell_rect,
       0.0,
-      egui::Stroke::new(1.0, ui.visuals().selection.bg_fill),
+      egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
       egui::StrokeKind::Inside,
     );
   }
@@ -227,36 +244,44 @@ pub fn process_grid_column_cell(
   ui: &mut egui::Ui,
   column: GridColumn,
   row: usize,
+  cell_id: egui::Id,
   selection: &mut Option<GridSelection>,
   drag: &mut Option<GridSelectDrag>,
   edit_cell: &mut Option<(GridColumn, usize)>,
 ) {
   let cell_rect = ui.max_rect();
   let selected = grid_row_selected(selection, column, row);
+  let row_has_selection = grid_row_has_any_selection(selection, row);
   let dragging = drag.as_ref().is_some_and(|active| active.column == column);
   let editing = grid_cell_editing(edit_cell, column, row);
-  paint_grid_cell_highlight(ui, cell_rect, selected, dragging, editing);
+  paint_grid_cell_highlight(ui, cell_rect, selected, row_has_selection, dragging, editing);
 
-  let cell_id = ui.id().with("cell").with(column).with(row);
   let response = ui.interact(cell_rect, cell_id, egui::Sense::click_and_drag());
 
   if response.clicked() {
-    *selection = Some(GridSelection {
-      column,
-      rows: vec![row],
-    });
+    let already_selected = selection.as_ref().map_or(false, |s| s.column == column && s.rows.contains(&row));
+    if !already_selected {
+      *selection = Some(GridSelection {
+        column,
+        rows: vec![row],
+      });
+    }
     *edit_cell = None;
+    // Surrender focus from any other widget (e.g. Window buttons, bulk_category
+    // field) so keyboard input routes to the grid immediately.
+    surrender_focused_widget(ui.ctx());
   }
 
   if response.double_clicked() {
-    *selection = Some(GridSelection {
-      column,
-      rows: vec![row],
-    });
-    let is_import = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("is_rendering_import_grid")).unwrap_or(false));
-    let pending_key = if is_import { "pending_import_edit_cell" } else { "pending_edit_cell" };
+    let already_selected = selection.as_ref().map_or(false, |s| s.column == column && s.rows.contains(&row));
+    if !already_selected {
+      *selection = Some(GridSelection {
+        column,
+        rows: vec![row],
+      });
+    }
     ui.ctx().data_mut(|d| {
-      d.insert_temp(egui::Id::new(pending_key), Some((column, row)));
+      d.insert_temp(egui::Id::new("pending_edit_cell"), Some((column, row)));
     });
     ui.ctx().request_repaint();
   }
@@ -333,20 +358,12 @@ pub fn grid_apply_shift_hand_pan(ctx: &egui::Context, scroll_offset_y: &mut f32)
   }
 }
 
-pub fn request_expense_cell_focus(ui: &mut egui::Ui, column: GridColumn, expense_idx: usize) {
-  request_grid_cell_focus(ui, expense_cell_id(column, expense_idx));
-}
-
 pub fn request_grid_cell_focus(ui: &mut egui::Ui, id: Id) {
   let chevron_id = id.with("chevron");
   ui.memory_mut(|mem| {
     mem.surrender_focus(chevron_id);
     mem.request_focus(id);
   });
-}
-
-pub fn expense_cell_id(column: GridColumn, expense_idx: usize) -> Id {
-  Id::new(("expense_cell", format!("{column:?}"), expense_idx))
 }
 
 pub fn member_picker_max_height(member_count: usize) -> f32 {
@@ -573,24 +590,30 @@ pub fn category_cell_ui(
   cell_id: Id,
   editing: bool,
 ) -> CategoryCellUi {
+  let mut display_val = if !editing && !value.is_empty() {
+    value.rsplit(": ").next().unwrap_or(value).to_string()
+  } else {
+    value.clone()
+  };
   ui.push_id(cell_id, |ui| {
     let cell_rect = ui.max_rect();
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
 
-    let text_w = if ui.max_rect().width() > 16.0 { ui.max_rect().width() - 16.0 } else { 0.0 };
-    let chevron_w = if ui.max_rect().width() > 16.0 { 16.0 } else { 0.0 };
+    let chevron_w = if cell_rect.width() > 16.0 { 16.0 } else { 0.0 };
 
-    let text_color = text_on_bg(bg);
-
-    let text_output = egui::TextEdit::singleline(value)
+    let text_output = egui::TextEdit::singleline(&mut display_val)
       .id(cell_id)
       .interactive(editing)
-      .desired_width(text_w)
+      .desired_width((cell_rect.width() - chevron_w).max(0.0))
       .frame(egui::Frame::NONE)
       .margin(egui::Margin { left: 3, right: 3, top: 0, bottom: 0 })
-      .text_color(text_color)
+      .text_color(ui.visuals().text_color())
       .background_color(Color32::TRANSPARENT)
       .show(ui);
+
+    if editing {
+      *value = display_val;
+    }
 
     let text = text_output.response.response.clone();
 
@@ -601,19 +624,19 @@ pub fn category_cell_ui(
     let chevron_resp = ui.interact(chevron_rect, cell_id.with("chevron"), egui::Sense::click());
 
     if ui.is_rect_visible(chevron_rect) {
-      let accent = text_on_bg(bg);
-      let divider = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 22);
+      let divider = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 22);
       ui.painter().line_segment(
         [chevron_rect.left_top(), chevron_rect.left_bottom()],
         egui::Stroke::new(0.5, divider),
       );
       if chevron_resp.hovered() {
-        ui.painter().rect_filled(chevron_rect, 0.0, Color32::from_black_alpha(30));
+        let hover = ui.visuals().selection.bg_fill.linear_multiply(0.12);
+        ui.painter().rect_filled(chevron_rect, 0.0, hover);
       }
       let chevron_color = if chevron_resp.hovered() {
         ui.visuals().selection.bg_fill
       } else {
-        accent
+        bg
       };
       let chevron_paint =
         egui::Rect::from_center_size(chevron_rect.center(), egui::vec2(14.0, 10.0));
@@ -685,14 +708,25 @@ pub fn member_row_selectable(ui: &mut egui::Ui, member: &HouseholdMember, select
   response.clicked()
 }
 
+fn contrast_on_accent(ui: &egui::Ui, selected: bool) -> Option<Color32> {
+  if selected {
+    let bg = ui.visuals().selection.bg_fill;
+    let lum = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
+    Some(if lum > 150.0 { Color32::BLACK } else { Color32::WHITE })
+  } else { None }
+}
+
 pub fn category_sub_picker_row(ui: &mut egui::Ui, label: &str, selected: bool, indent_px: f32) -> bool {
   ui.horizontal(|ui| {
     ui.add_space(indent_px);
     ui.set_width(ui.available_width().max(1.0));
-    ui.selectable_label(selected, RichText::new(label).color(ui.visuals().text_color()))
-      .clicked()
-  })
-  .inner
+    let text = if let Some(c) = contrast_on_accent(ui, selected) {
+      RichText::new(label).color(c)
+    } else {
+      RichText::new(label)
+    };
+    ui.selectable_label(selected, text).clicked()
+  }).inner
 }
 
 pub fn category_picker_header_row(ui: &mut egui::Ui, label: &str, bg: Color32) {
@@ -716,7 +750,8 @@ pub fn category_picker_row(ui: &mut egui::Ui, label: &str, bg: Color32, selected
   if ui.is_rect_visible(rect) {
     ui.painter().rect_filled(rect, 0.0, bg);
     if response.hovered() || selected {
-      ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(35));
+      let overlay = ui.visuals().selection.bg_fill.linear_multiply(0.14);
+      ui.painter().rect_filled(rect, 0.0, overlay);
     }
     ui.painter().text(
       egui::pos2(rect.left() + indent_px + 8.0, rect.center().y),
@@ -737,7 +772,7 @@ pub fn household_panel<R>(ui: &mut egui::Ui, title: &str, add_contents: impl FnO
     .corner_radius(8.0)
     .inner_margin(egui::Margin::symmetric(14, 10))
     .show(ui, |ui| {
-      ui.label(RichText::new(title).strong().color(ui.visuals().selection.bg_fill));
+      ui.label(RichText::new(title).strong().color(ui.visuals().text_color()));
       ui.add_space(8.0);
       add_contents(ui)
     })
@@ -759,41 +794,19 @@ pub fn color_swatch_button(ui: &mut egui::Ui, color: Color32) -> egui::Response 
   response.on_hover_text("Click to edit color")
 }
 
-pub fn sorted_expense_indices(
-  expenses: &[Expense],
+pub fn sorted_grid_indices<R: GridRow>(
+  rows: &[R],
   sort: ExpenseSort,
-  edit_cell: Option<(GridColumn, usize)>,
-  edit_original: Option<&str>,
 ) -> Vec<usize> {
-  let mut indices: Vec<usize> = (0..expenses.len()).collect();
+  let mut indices: Vec<usize> = (0..rows.len()).collect();
   indices.sort_by(|&a, &b| {
     let cmp = match sort.column {
-      ExpenseSortColumn::Date => {
-          let val_a = if edit_cell == Some((GridColumn::Date, a)) { edit_original.unwrap_or(&expenses[a].date) } else { &expenses[a].date };
-          let val_b = if edit_cell == Some((GridColumn::Date, b)) { edit_original.unwrap_or(&expenses[b].date) } else { &expenses[b].date };
-          val_a.cmp(val_b)
-      }
-      ExpenseSortColumn::Amount => expenses[a].amount_cents.cmp(&expenses[b].amount_cents),
-      ExpenseSortColumn::Member => {
-          let val_a = if edit_cell == Some((GridColumn::Member, a)) { edit_original.unwrap_or(&expenses[a].member) } else { &expenses[a].member };
-          let val_b = if edit_cell == Some((GridColumn::Member, b)) { edit_original.unwrap_or(&expenses[b].member) } else { &expenses[b].member };
-          val_a.to_lowercase().cmp(&val_b.to_lowercase())
-      }
-      ExpenseSortColumn::Category => {
-          let val_a = if edit_cell == Some((GridColumn::Category, a)) { edit_original.unwrap_or(&expenses[a].category) } else { &expenses[a].category };
-          let val_b = if edit_cell == Some((GridColumn::Category, b)) { edit_original.unwrap_or(&expenses[b].category) } else { &expenses[b].category };
-          val_a.to_lowercase().cmp(&val_b.to_lowercase())
-      }
-      ExpenseSortColumn::Vendor => {
-          let val_a = if edit_cell == Some((GridColumn::Vendor, a)) { edit_original.unwrap_or(&expenses[a].vendor) } else { &expenses[a].vendor };
-          let val_b = if edit_cell == Some((GridColumn::Vendor, b)) { edit_original.unwrap_or(&expenses[b].vendor) } else { &expenses[b].vendor };
-          val_a.to_lowercase().cmp(&val_b.to_lowercase())
-      }
-      ExpenseSortColumn::Description => {
-          let val_a = if edit_cell == Some((GridColumn::Description, a)) { edit_original.unwrap_or(&expenses[a].description) } else { &expenses[a].description };
-          let val_b = if edit_cell == Some((GridColumn::Description, b)) { edit_original.unwrap_or(&expenses[b].description) } else { &expenses[b].description };
-          val_a.to_lowercase().cmp(&val_b.to_lowercase())
-      }
+      ExpenseSortColumn::Date => rows[a].row_date().cmp(rows[b].row_date()),
+      ExpenseSortColumn::Amount => rows[a].row_amount_cents().cmp(&rows[b].row_amount_cents()),
+      ExpenseSortColumn::Member => rows[a].row_member().to_lowercase().cmp(&rows[b].row_member().to_lowercase()),
+      ExpenseSortColumn::Category => rows[a].row_category().to_lowercase().cmp(&rows[b].row_category().to_lowercase()),
+      ExpenseSortColumn::Vendor => rows[a].row_vendor().to_lowercase().cmp(&rows[b].row_vendor().to_lowercase()),
+      ExpenseSortColumn::Description => rows[a].row_description().to_lowercase().cmp(&rows[b].row_description().to_lowercase()),
     };
     if sort.ascending { cmp } else { cmp.reverse() }
   });
@@ -802,7 +815,7 @@ pub fn sorted_expense_indices(
 
 pub fn text_on_bg(bg: Color32) -> Color32 {
   let lum = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
-  if lum > 120.0 { Color32::from_rgb(0x19, 0x19, 0x19) } else { Color32::WHITE }
+  if lum > 120.0 { Color32::BLACK } else { Color32::WHITE }
 }
 
 pub fn ui_grid_text_edit(
@@ -857,7 +870,7 @@ pub fn ui_grid_date_edit(
         ui.style_mut().spacing.button_padding = egui::vec2(4.0, 0.0);
         
         ui.style_mut().visuals.widgets.inactive.fg_stroke.color = ui.visuals().text_color();
-        ui.style_mut().visuals.widgets.hovered.fg_stroke.color = ui.visuals().selection.bg_fill;
+        ui.style_mut().visuals.widgets.hovered.fg_stroke.color = ui.visuals().text_color();
         ui.style_mut().spacing.interact_size.y = 18.0;
         ui.add(egui_extras::DatePickerButton::new(&mut parsed_date).highlight_weekends(false))
     }).inner;
@@ -883,40 +896,6 @@ pub fn ui_grid_date_edit(
 }
 
 
-pub fn resizable_column(initial: f32, minimum: f32, maximum: f32) -> Column {
-  Column::initial(initial)
-    .at_least(minimum)
-    .at_most(maximum.max(minimum))
-    .resizable(true)
-    .clip(true)
-}
-
-pub fn description_column() -> Column {
-  Column::remainder()
-    .at_least(DESCRIPTION_MIN_WIDTH)
-    .resizable(false)
-    .clip(true)
-}
-
-pub fn spreadsheet_columns(
-  ui: &mut egui::Ui,
-  date: f32,
-  amount: f32,
-  member: f32,
-  category: f32,
-  vendor: f32,
-) -> [Column; 6] {
-  let table_width = ui.available_width().max(800.0);
-  let fixed_budget = (table_width - DESCRIPTION_MIN_WIDTH).max(420.0);
-  [
-    resizable_column(date, 72.0, fixed_budget * 0.14),
-    resizable_column(amount, 72.0, fixed_budget * 0.12),
-    resizable_column(member, 88.0, fixed_budget * 0.14),
-    resizable_column(category, 140.0, fixed_budget * 0.26),
-    resizable_column(vendor, 100.0, fixed_budget * 0.24),
-    description_column(),
-  ]
-}
 
 pub fn themed_modal_frame(ctx: &egui::Context) -> egui::Frame {
   egui::Frame::window(&ctx.global_style())
@@ -934,98 +913,7 @@ pub fn themed_panel_frame(style: &egui::Style) -> egui::Frame {
     .inner_margin(egui::Margin::symmetric(10, 8))
 }
 
-pub fn configure_theme(ctx: &egui::Context, is_dark: bool) {
-  let mut visuals = if is_dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-  
-  if is_dark {
-    let panel_fill = Color32::from_rgb(0x0e, 0x0f, 0x11);
-    let window_fill = Color32::from_rgb(0x1a, 0x1c, 0x20);
-    let hovered_bg = Color32::from_rgb(0x2c, 0x2e, 0x33);
-    let text_primary = Color32::from_rgb(0xf3, 0xf4, 0xf6);
-    let text_muted = Color32::from_rgb(0x9c, 0xa3, 0xaf);
-    let border_color = Color32::from_rgb(0x2c, 0x2e, 0x33);
-    let accent_cyan = Color32::from_rgb(0x3b, 0x82, 0xf6);
 
-    visuals.panel_fill = panel_fill;
-    visuals.window_fill = window_fill;
-    visuals.extreme_bg_color = panel_fill;
-    visuals.faint_bg_color = window_fill;
-    visuals.text_edit_bg_color = Some(panel_fill);
-    visuals.widgets.noninteractive.bg_fill = window_fill;
-    visuals.widgets.inactive.bg_fill = window_fill;
-    visuals.widgets.inactive.weak_bg_fill = hovered_bg;
-    visuals.widgets.hovered.bg_fill = hovered_bg;
-    visuals.widgets.active.bg_fill = hovered_bg;
-    visuals.widgets.open.bg_fill = hovered_bg;
-    visuals.widgets.noninteractive.fg_stroke.color = text_muted;
-    visuals.widgets.inactive.fg_stroke.color = text_muted;
-    visuals.widgets.hovered.fg_stroke.color = text_primary;
-    visuals.widgets.active.fg_stroke.color = text_primary;
-    visuals.selection.bg_fill = accent_cyan;
-    visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(0x19, 0x19, 0x19));
-    visuals.text_cursor.stroke = egui::Stroke::new(2.5, text_primary);
-    visuals.text_cursor.on_duration = 0.65;
-    visuals.text_cursor.off_duration = 0.35;
-    visuals.hyperlink_color = accent_cyan;
-    visuals.warn_fg_color = text_muted;
-    visuals.error_fg_color = text_muted;
-    visuals.override_text_color = Some(text_primary);
-    visuals.window_stroke = egui::Stroke::new(1.0, border_color);
-  } else {
-    let panel_fill = Color32::from_rgb(0xf3, 0xf4, 0xf6);
-    let window_fill = Color32::from_rgb(0xff, 0xff, 0xff);
-    let hovered_bg = Color32::from_rgb(0xe5, 0xe7, 0xeb);
-    let text_primary = Color32::from_rgb(0x11, 0x18, 0x27);
-    let text_muted = Color32::from_rgb(0x6b, 0x72, 0x80);
-    let border_color = Color32::from_rgb(0xd1, 0xd5, 0xdb);
-    let accent_cyan = Color32::from_rgb(0x25, 0x63, 0xeb);
-
-    visuals.panel_fill = panel_fill;
-    visuals.window_fill = window_fill;
-    visuals.extreme_bg_color = panel_fill;
-    visuals.faint_bg_color = window_fill;
-    visuals.text_edit_bg_color = Some(panel_fill);
-    visuals.widgets.noninteractive.bg_fill = window_fill;
-    visuals.widgets.inactive.bg_fill = window_fill;
-    visuals.widgets.inactive.weak_bg_fill = hovered_bg;
-    visuals.widgets.hovered.bg_fill = hovered_bg;
-    visuals.widgets.active.bg_fill = hovered_bg;
-    visuals.widgets.open.bg_fill = hovered_bg;
-    visuals.widgets.noninteractive.fg_stroke.color = text_muted;
-    visuals.widgets.inactive.fg_stroke.color = text_muted;
-    visuals.widgets.hovered.fg_stroke.color = text_primary;
-    visuals.widgets.active.fg_stroke.color = text_primary;
-    visuals.selection.bg_fill = accent_cyan;
-    visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(0xff, 0xff, 0xff));
-    visuals.text_cursor.stroke = egui::Stroke::new(2.5, text_primary);
-    visuals.text_cursor.on_duration = 0.65;
-    visuals.text_cursor.off_duration = 0.35;
-    visuals.hyperlink_color = accent_cyan;
-    visuals.warn_fg_color = text_muted;
-    visuals.error_fg_color = text_muted;
-    visuals.override_text_color = Some(text_primary);
-    visuals.window_stroke = egui::Stroke::new(1.0, border_color);
-  }
-  
-  visuals.popup_shadow = egui::Shadow {
-      offset: [0, 4], blur: 8, spread: 0,
-      color: Color32::from_black_alpha(150),
-  };
-  visuals.window_shadow = egui::Shadow {
-      offset: [0, 8], blur: 16, spread: 0,
-      color: Color32::from_black_alpha(200),
-  };
-  
-  ctx.set_visuals(visuals);
-
-  let mut style = (*ctx.global_style()).clone();
-  style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-  style.spacing.button_padding = egui::vec2(8.0, 4.0);
-  style.visuals.widgets.inactive.corner_radius = 4.0.into();
-  style.visuals.widgets.hovered.corner_radius = 4.0.into();
-  style.visuals.widgets.active.corner_radius = 4.0.into();
-  ctx.set_global_style(style);
-}
 
 pub fn accent_palette_swatch_button(
   ui: &mut egui::Ui,
@@ -1165,7 +1053,7 @@ pub fn expense_grid_selection_status(ui: &mut egui::Ui, selection: &Option<GridS
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(12.0),
-        ui.visuals().selection.bg_fill,
+        ui.visuals().text_color(),
       );
     }
   }
@@ -1212,4 +1100,186 @@ pub fn ensure_root_window_visible(ctx: &egui::Context, force_center: bool) {
     egui::UserAttentionType::Critical,
   ));
 }
+
+pub fn commit_grid_cell<R: GridRow>(
+  rows: &mut [R],
+  selection: &Option<GridSelection>,
+  column: GridColumn,
+  idx: usize,
+) -> Vec<usize> {
+  let targets = grid_commit_targets(selection, column, idx);
+  let Some(source) = rows.get(idx) else { return Vec::new(); };
+  match column {
+    GridColumn::Date => {
+      let value = source.row_date().to_string();
+      for &t in &targets {
+        if let Some(r) = rows.get_mut(t) {
+          *r.row_date_mut() = value.clone();
+        }
+      }
+    }
+    GridColumn::Amount => {
+      let value = source.row_amount_input().to_string();
+      let cents = source.row_amount_cents();
+      for &t in &targets {
+        if let Some(r) = rows.get_mut(t) {
+          *r.row_amount_input_mut() = value.clone();
+          r.set_row_amount_cents(cents);
+        }
+      }
+    }
+    GridColumn::Member => {
+      let value = source.row_member().to_string();
+      for &t in &targets {
+        if let Some(r) = rows.get_mut(t) {
+          *r.row_member_mut() = value.clone();
+        }
+      }
+    }
+    GridColumn::Category => {
+      let value = source.row_category().to_string();
+      for &t in &targets {
+        if let Some(r) = rows.get_mut(t) {
+          *r.row_category_mut() = value.clone();
+        }
+      }
+    }
+    GridColumn::Vendor => {
+      let value = source.row_vendor().to_string();
+      for &t in &targets {
+        if let Some(r) = rows.get_mut(t) {
+          *r.row_vendor_mut() = value.clone();
+        }
+      }
+    }
+    GridColumn::Description => {
+      let value = source.row_description().to_string();
+      for &t in &targets {
+        if let Some(r) = rows.get_mut(t) {
+          *r.row_description_mut() = value.clone();
+        }
+      }
+    }
+  }
+  targets
+}
+
+impl GridState {
+  pub fn clear_selection(&mut self) {
+    self.selection = None;
+    self.drag = None;
+    self.edit_cell = None;
+    self.typeahead = None;
+    self.active_cell = None;
+  }
+
+  pub fn handle_raw_input<R: GridRow>(
+    &mut self,
+    ctx: &egui::Context,
+    raw_input: &mut egui::RawInput,
+    rows: &[R],
+    candidates_fn: impl Fn(GridColumn) -> Vec<String>,
+  ) {
+    let Some((column, idx)) = self.active_cell else {
+      return;
+    };
+    let mut keyboard_action = None;
+    raw_input.events.retain(|event| {
+      match event {
+        egui::Event::Key {
+          key: egui::Key::Enter,
+          pressed: true,
+          modifiers,
+          ..
+        } if !modifiers.any() => {
+          let has_suggestions = if let Some(row) = rows.get(idx) {
+            let val = match column {
+              GridColumn::Member      => row.row_member(),
+              GridColumn::Category    => row.row_category(),
+              GridColumn::Vendor      => row.row_vendor(),
+              GridColumn::Description => row.row_description(),
+              _ => "",
+            };
+            !autocomplete_suggestions_list(val, &candidates_fn(column)).is_empty()
+          } else {
+            false
+          };
+          
+          if has_suggestions {
+            keyboard_action = Some(GridKeyboardAction::Tab { shift: false });
+            false
+          } else if self.selection.as_ref().is_some_and(|selection| {
+            selection.column == column && selection.rows.len() > 1
+          }) {
+            true
+          } else {
+            keyboard_action = Some(GridKeyboardAction::Enter);
+            false
+          }
+        }
+        egui::Event::Key {
+          key: egui::Key::Tab,
+          pressed: true,
+          modifiers,
+          ..
+        } => {
+          keyboard_action = Some(GridKeyboardAction::Tab {
+            shift: modifiers.shift,
+          });
+          false
+        }
+        _ => true,
+      }
+    });
+
+    if let Some(action) = keyboard_action {
+      self.pending_keyboard = Some(GridPendingKeyboard {
+        column,
+        expense_idx: idx,
+        action,
+      });
+      ctx.request_repaint();
+    }
+  }
+
+  pub fn apply_pending_keyboard<R: GridRow>(
+    &mut self,
+    rows: &mut [R],
+    sorted_indices: &[usize],
+    autocomplete_selection: usize,
+    candidates_fn: impl Fn(GridColumn) -> Vec<String>,
+  ) -> Option<(GridColumn, usize, Vec<usize>)> {
+    let pending = self.pending_keyboard.take()?;
+    
+    // 1. If Tab, fill autocomplete
+    if matches!(pending.action, GridKeyboardAction::Tab { .. }) {
+      let candidates = candidates_fn(pending.column);
+      if let Some(row) = rows.get_mut(pending.expense_idx) {
+        let value_mut = match pending.column {
+          GridColumn::Member      => Some(row.row_member_mut()),
+          GridColumn::Category    => Some(row.row_category_mut()),
+          GridColumn::Vendor      => Some(row.row_vendor_mut()),
+          GridColumn::Description => Some(row.row_description_mut()),
+          _ => None,
+        };
+        if let Some(val) = value_mut {
+          let suggestions = autocomplete_suggestions_list(val, &candidates);
+          if let Some(suggestion) = suggestions.get(autocomplete_selection) {
+            *val = suggestion.clone();
+          }
+        }
+      }
+    }
+    
+    // 2. Commit the cell in memory
+    let committed_targets = commit_grid_cell(rows, &self.selection, pending.column, pending.expense_idx);
+    
+    // 3. Set the new focus target
+    self.pending_focus_target = grid_nav_target(sorted_indices, pending.expense_idx, pending.column, pending.action.to_nav());
+    self.edit_original = None;
+    
+    Some((pending.column, pending.expense_idx, committed_targets))
+  }
+}
+
 

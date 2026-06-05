@@ -71,6 +71,9 @@ pub fn open_database() -> rusqlite::Result<Connection> {
   migrate_member_colors(&conn)?;
   migrate_theme_accent_members_v4(&conn)?;
   migrate_theme_accent_categories_v4(&conn)?;
+  migrate_budgets_v5(&conn)?;
+  migrate_budget_snapshots_v6(&conn)?;
+  migrate_analytics_filters_v7(&conn)?;
 
   let account_count: i64 = conn.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?;
   if account_count == 0 {
@@ -421,6 +424,9 @@ pub const CATEGORY_DEFAULTS_V2_MIGRATION: &str = "category_defaults_v2";
 pub const CATEGORY_PALETTE_COLORS_V3_MIGRATION: &str = "category_palette_colors_v3";
 pub const THEME_ACCENT_MEMBERS_V4_MIGRATION: &str = "theme_accent_members_v4";
 pub const THEME_ACCENT_CATEGORIES_V4_MIGRATION: &str = "theme_accent_categories_v4";
+pub const BUDGETS_V5_MIGRATION: &str = "budgets_v5";
+pub const BUDGET_SNAPSHOTS_V6_MIGRATION: &str = "budget_snapshots_v6";
+pub const ANALYTICS_FILTERS_V7_MIGRATION: &str = "analytics_filters_v7";
 
 pub fn migrate_category_defaults_v2(conn: &Connection) -> rusqlite::Result<()> {
   ensure_migrations_table(conn)?;
@@ -486,6 +492,27 @@ pub fn migrate_theme_accent_categories_v4(conn: &Connection) -> rusqlite::Result
     recolor_household_categories(conn, household_id)?;
   }
   mark_migration_applied(conn, THEME_ACCENT_CATEGORIES_V4_MIGRATION)?;
+  Ok(())
+}
+
+pub fn migrate_budgets_v5(conn: &Connection) -> rusqlite::Result<()> {
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, BUDGETS_V5_MIGRATION)? {
+    return Ok(());
+  }
+  conn.execute(
+    "CREATE TABLE IF NOT EXISTS budgets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      household_id INTEGER NOT NULL DEFAULT 1 REFERENCES households(id),
+      category TEXT NOT NULL,
+      amount_cents INTEGER NOT NULL,
+      year INTEGER NOT NULL,
+      month INTEGER NOT NULL,
+      UNIQUE(household_id, category, year, month)
+    );",
+    [],
+  )?;
+  mark_migration_applied(conn, BUDGETS_V5_MIGRATION)?;
   Ok(())
 }
 
@@ -575,14 +602,18 @@ pub fn migrate_category_colors(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 pub const ACCENT_PALETTE_COUNT: usize = 12;
+pub const DEFAULT_ACCENT: Color32 = Color32::from_rgb(0x3f, 0x44, 0x47);
 
 pub fn accent_palette_swatches() -> Vec<Color32> {
-  let hovered_bg = Color32::from_rgb(0x3f, 0x44, 0x47);
-  let base = Hsva::from_srgba_unmultiplied([hovered_bg.r(), hovered_bg.g(), hovered_bg.b(), 255]);
+  accent_palette_swatches_from(crate::ui::theme::current_accent())
+}
+
+pub fn accent_palette_swatches_from(base: Color32) -> Vec<Color32> {
+  let base_hsva = Hsva::from_srgba_unmultiplied([base.r(), base.g(), base.b(), 255]);
   (0..ACCENT_PALETTE_COUNT)
     .map(|i| {
-      let mut hsva = base;
-      hsva.h = (base.h + i as f32 / ACCENT_PALETTE_COUNT as f32) % 1.0;
+      let mut hsva = base_hsva;
+      hsva.h = (base_hsva.h + i as f32 / ACCENT_PALETTE_COUNT as f32) % 1.0;
       hsva.s = (0.45 + (i % 3) as f32 * 0.06).clamp(0.45, 0.62);
       hsva.v = (0.55 + ((i / 3) % 3) as f32 * 0.08).clamp(0.55, 0.78);
       Color32::from(hsva)
@@ -1107,10 +1138,33 @@ pub fn category_for_vendor(conn: &Connection, household_id: i64, vendor: &str) -
     .query_map(params![household_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
     .unwrap_or_default();
-  rules
+  
+  if let Some(category) = rules
     .into_iter()
     .find_map(|(pattern, category)| normalized.contains(&pattern.to_lowercase()).then_some(category))
-    .unwrap_or_else(|| "Uncategorized".to_string())
+  {
+    return category;
+  }
+
+  // Smart fallback: Query the most frequent non-empty category used for this vendor in history
+  if let Ok(mut stmt) = conn.prepare(
+    "SELECT category, COUNT(*) as cnt 
+     FROM expenses 
+     WHERE household_id = ?1 
+       AND lower(vendor) = lower(?2) 
+       AND category IS NOT NULL 
+       AND category != '' 
+       AND category != 'Uncategorized'
+     GROUP BY category 
+     ORDER BY cnt DESC, id DESC 
+     LIMIT 1"
+  ) {
+    if let Ok(history_category) = stmt.query_row(params![household_id, vendor], |row| row.get::<_, String>(0)) {
+      return history_category;
+    }
+  }
+
+  "Uncategorized".to_string()
 }
 
 pub fn parse_csv_statement(conn: &Connection, household_id: i64, path: &std::path::Path) -> Result<Vec<ImportRow>, String> {
@@ -1183,3 +1237,233 @@ pub fn duplicate_import_count(conn: &Connection, household_id: i64, rows: &[Impo
     })
     .count()
 }
+
+pub fn load_budgets(conn: &Connection, household_id: i64, year: i32, month: i32) -> rusqlite::Result<Vec<Budget>> {
+  let mut stmt = conn.prepare(
+    "SELECT id, category, amount_cents, year, month FROM budgets WHERE household_id = ?1 AND year = ?2 AND month = ?3",
+  )?;
+  let rows = stmt
+    .query_map(params![household_id, year, month], |row| {
+      Ok(Budget {
+        id: row.get(0)?,
+        category: row.get(1)?,
+        amount_cents: row.get(2)?,
+        year: row.get(3)?,
+        month: row.get(4)?,
+      })
+    })?
+    .collect();
+  rows
+}
+
+pub fn save_budget(
+  conn: &Connection,
+  household_id: i64,
+  category: &str,
+  amount_cents: i64,
+  year: i32,
+  month: i32,
+) -> rusqlite::Result<()> {
+  conn.execute(
+    "INSERT INTO budgets (household_id, category, amount_cents, year, month)
+     VALUES (?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT(household_id, category, year, month)
+     DO UPDATE SET amount_cents = excluded.amount_cents",
+    params![household_id, category.trim(), amount_cents, year, month],
+  )?;
+  Ok(())
+}
+
+// ── Budget Snapshots v6 ──────────────────────────────────────────────────
+
+pub fn migrate_budget_snapshots_v6(conn: &Connection) -> rusqlite::Result<()> {
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, BUDGET_SNAPSHOTS_V6_MIGRATION)? {
+    return Ok(());
+  }
+  conn.execute(
+    "CREATE TABLE IF NOT EXISTS budget_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      household_id INTEGER NOT NULL DEFAULT 1,
+      category TEXT NOT NULL,
+      year INTEGER NOT NULL,
+      period_code INTEGER NOT NULL,
+      amount_cents INTEGER NOT NULL DEFAULT 0,
+      is_override INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(household_id, category, year, period_code)
+    );",
+    [],
+  )?;
+  mark_migration_applied(conn, BUDGET_SNAPSHOTS_V6_MIGRATION)?;
+  Ok(())
+}
+
+pub fn save_budget_snapshot(
+  conn: &Connection,
+  household_id: i64,
+  category: &str,
+  year: i32,
+  period_code: i32,
+  amount_cents: i64,
+  is_override: bool,
+) -> rusqlite::Result<()> {
+  conn.execute(
+    "INSERT INTO budget_snapshots (household_id, category, year, period_code, amount_cents, is_override)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT(household_id, category, year, period_code)
+     DO UPDATE SET amount_cents = excluded.amount_cents, is_override = excluded.is_override",
+    params![household_id, category.trim(), year, period_code, amount_cents, is_override as i32],
+  )?;
+  Ok(())
+}
+
+pub fn load_budget_snapshots_for_year(
+  conn: &Connection,
+  household_id: i64,
+  year: i32,
+) -> rusqlite::Result<Vec<BudgetSnapshot>> {
+  let mut stmt = conn.prepare(
+    "SELECT id, category, year, period_code, amount_cents, is_override
+     FROM budget_snapshots WHERE household_id = ?1 AND year = ?2",
+  )?;
+  let rows = stmt
+    .query_map(params![household_id, year], |row| {
+      Ok(BudgetSnapshot {
+        id: row.get(0)?,
+        category: row.get(1)?,
+        year: row.get(2)?,
+        period_code: row.get(3)?,
+        amount_cents: row.get(4)?,
+        is_override: row.get::<_, i32>(5)? != 0,
+      })
+    })?
+    .collect();
+  rows
+}
+
+// ── Analytics Filters v7 ─────────────────────────────────────────────────
+
+pub fn migrate_analytics_filters_v7(conn: &Connection) -> rusqlite::Result<()> {
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, ANALYTICS_FILTERS_V7_MIGRATION)? {
+    return Ok(());
+  }
+  conn.execute(
+    "CREATE TABLE IF NOT EXISTS analytics_filters (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      date_preset TEXT NOT NULL DEFAULT 'last_3_months',
+      date_start TEXT,
+      date_end TEXT,
+      granularity TEXT NOT NULL DEFAULT 'monthly',
+      active_chart TEXT NOT NULL DEFAULT 'category_breakdown',
+      category_filter_mode TEXT NOT NULL DEFAULT 'include',
+      selected_categories TEXT NOT NULL DEFAULT '[]',
+      selected_members TEXT NOT NULL DEFAULT '[]',
+      selected_vendors TEXT NOT NULL DEFAULT '[]',
+      candlestick_year INTEGER NOT NULL DEFAULT 2026,
+      candlestick_period TEXT NOT NULL DEFAULT 'monthly',
+      comparison_mode TEXT NOT NULL DEFAULT 'overlay',
+      comparison_date_preset TEXT NOT NULL DEFAULT 'last_month'
+    );",
+    [],
+  )?;
+  mark_migration_applied(conn, ANALYTICS_FILTERS_V7_MIGRATION)?;
+  Ok(())
+}
+
+pub fn load_analytics_state(
+  conn: &Connection,
+) -> rusqlite::Result<Option<AnalyticsFilterRow>> {
+  let mut stmt = conn.prepare(
+    "SELECT date_preset, date_start, date_end, granularity, active_chart,
+            category_filter_mode, selected_categories, selected_members,
+            selected_vendors, candlestick_year, candlestick_period,
+            comparison_mode, comparison_date_preset
+     FROM analytics_filters WHERE id = 1",
+  )?;
+  let mut rows = stmt.query_map([], |row| {
+    Ok(AnalyticsFilterRow {
+      date_preset: row.get(0)?,
+      date_start: row.get(1)?,
+      date_end: row.get(2)?,
+      granularity: row.get(3)?,
+      active_chart: row.get(4)?,
+      category_filter_mode: row.get(5)?,
+      selected_categories: row.get(6)?,
+      selected_members: row.get(7)?,
+      selected_vendors: row.get(8)?,
+      candlestick_year: row.get(9)?,
+      candlestick_period: row.get(10)?,
+      comparison_mode: row.get(11)?,
+      comparison_date_preset: row.get(12)?,
+    })
+  })?;
+  match rows.next() {
+    Some(Ok(row)) => Ok(Some(row)),
+    Some(Err(e)) => Err(e),
+    None => Ok(None),
+  }
+}
+
+pub fn save_analytics_state(
+  conn: &Connection,
+  state: &AnalyticsFilterRow,
+) -> rusqlite::Result<()> {
+  conn.execute(
+    "INSERT INTO analytics_filters (
+       id, date_preset, date_start, date_end, granularity, active_chart,
+       category_filter_mode, selected_categories, selected_members,
+       selected_vendors, candlestick_year, candlestick_period,
+       comparison_mode, comparison_date_preset
+     ) VALUES (
+       1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+     )
+     ON CONFLICT(id) DO UPDATE SET
+       date_preset = excluded.date_preset,
+       date_start = excluded.date_start,
+       date_end = excluded.date_end,
+       granularity = excluded.granularity,
+       active_chart = excluded.active_chart,
+       category_filter_mode = excluded.category_filter_mode,
+       selected_categories = excluded.selected_categories,
+       selected_members = excluded.selected_members,
+       selected_vendors = excluded.selected_vendors,
+       candlestick_year = excluded.candlestick_year,
+       candlestick_period = excluded.candlestick_period,
+       comparison_mode = excluded.comparison_mode,
+       comparison_date_preset = excluded.comparison_date_preset",
+    params![
+      state.date_preset,
+      state.date_start,
+      state.date_end,
+      state.granularity,
+      state.active_chart,
+      state.category_filter_mode,
+      state.selected_categories,
+      state.selected_members,
+      state.selected_vendors,
+      state.candlestick_year,
+      state.candlestick_period,
+      state.comparison_mode,
+      state.comparison_date_preset,
+    ],
+  )?;
+  Ok(())
+}
+
+pub struct AnalyticsFilterRow {
+  pub date_preset: String,
+  pub date_start: Option<String>,
+  pub date_end: Option<String>,
+  pub granularity: String,
+  pub active_chart: String,
+  pub category_filter_mode: String,
+  pub selected_categories: String,
+  pub selected_members: String,
+  pub selected_vendors: String,
+  pub candlestick_year: i32,
+  pub candlestick_period: String,
+  pub comparison_mode: String,
+  pub comparison_date_preset: String,
+}
+

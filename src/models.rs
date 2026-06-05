@@ -1,4 +1,4 @@
-use eframe::egui::{Color32, Id};
+use eframe::egui::Color32;
 use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -167,13 +167,7 @@ pub fn sorted_parent_category_ids(categories: &[Category]) -> Vec<i64> {
   parent_ids
 }
 
-pub fn settings_new_parent_name_id() -> Id {
-  Id::new("settings_new_parent_category_name")
-}
 
-pub fn settings_new_sub_name_id() -> Id {
-  Id::new("settings_new_subcategory_name")
-}
 
 pub fn category_assignable_labels(categories: &[Category]) -> Vec<String> {
   let parents = category_parent_map(categories);
@@ -245,6 +239,7 @@ impl From<ExpenseSortColumn> for GridColumn {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum GridNav {
   NextRow,
   PrevRow,
@@ -309,3 +304,54 @@ impl GridKeyboardAction {
     }
   }
 }
+
+#[derive(Default, Clone)]
+pub struct GridState {
+  pub selection: Option<GridSelection>,
+  pub drag: Option<GridSelectDrag>,
+  pub edit_cell: Option<(GridColumn, usize)>,
+  pub edit_original: Option<String>,
+  pub typeahead: Option<char>,
+  pub scroll_offset: f32,
+  pub pending_focus_target: Option<(GridColumn, usize)>,
+  pub pending_keyboard: Option<GridPendingKeyboard>,
+  pub active_cell: Option<(GridColumn, usize)>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct Budget {
+  pub id: i64,
+  pub category: String,
+  pub amount_cents: i64,
+  pub year: i32,
+  pub month: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct BudgetSnapshot {
+  pub id: i64,
+  pub category: String,
+  pub year: i32,
+  pub period_code: i32,
+  pub amount_cents: i64,
+  pub is_override: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BudgetFilter {
+  All,
+  OverBudget,
+  UnderBudget,
+  Unbudgeted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BudgetGranularity {
+  Weekly,
+  Monthly,
+  Quarterly,
+  Yearly,
+}
+
+

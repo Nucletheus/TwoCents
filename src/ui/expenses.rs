@@ -8,58 +8,36 @@ use crate::TwoCentsApp;
 
 impl TwoCentsApp {
   pub fn ui_expenses(&mut self, ui: &mut egui::Ui) {
-    let prev_edit_cell = self.expense_grid_edit_cell;
+    if let Some(sort) = self.pending_expense_sort.take() {
+      self.expense_sort = sort;
+      self.expense_grid_state.clear_selection();
+      self.rebuild_sorted_expense_indices();
+    }
     let toolbar_width = ui.available_width();
-    ui.horizontal(|ui| {
-      ui.set_width(toolbar_width);
-      ui.heading(RichText::new("Household Expense Spreadsheet").color(ui.visuals().strong_text_color()));
-      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if self.csv_import_rx.is_some() {
-          let _ = ui.button("Importing...").on_hover_text("Waiting for file selection");
-        } else if ui.button("Import CSV Statement").clicked() {
-          self.import_csv();
-        }
-        if ui.button("Settings").clicked() {
-          self.show_category_settings = true;
-        }
-      });
+    ui.horizontal_wrapped(|ui| {
+      ui.set_max_width(toolbar_width);
+      ui.heading(RichText::new("Household Expense Spreadsheet").color(ui.visuals().text_color()));
+    });
+    ui.horizontal_wrapped(|ui| {
+      ui.set_max_width(toolbar_width);
+      if self.csv_import_rx.is_some() {
+        let _ = ui.button("Importing...").on_hover_text("Waiting for file selection");
+      } else if ui.button("Import CSV Statement").clicked() {
+        self.import_csv();
+      }
+      if ui.button("Duplicates").clicked() {
+        self.find_duplicates();
+      }
+      if ui.button("Settings").clicked() {
+        self.show_category_settings = true;
+      }
     });
     ui.label(
       "Click or drag in a column to select rows. Hold Shift and drag to pan. Type to edit; Enter applies to all selected rows; Tab or Enter picks autocomplete and moves right; Escape clears.",
     );
-    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-      self.clear_expense_grid_selection();
-    }
-    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
-      if let Some(sel) = &self.expense_grid_selection {
-        if let Some(&row) = sel.rows.first() {
-          self.expense_grid_edit_cell = Some((sel.column, row));
-        }
-      }
-    }
-    if self.expense_grid_edit_cell.is_none() && self.expense_grid_selection.is_some() {
-      let is_ctrl_del = ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Delete) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Delete));
-      if is_ctrl_del {
-        if let Some(sel) = &self.expense_grid_selection {
-          let rows_to_delete = sel.rows.clone();
-          self.delete_expenses_by_indices(&rows_to_delete);
-        }
-      } else {
-        let is_del = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
-        if is_del {
-          if let Some(sel) = &self.expense_grid_selection {
-            self.show_delete_expense_confirm = true;
-            self.delete_expense_indices = sel.rows.clone();
-          }
-        }
-      }
-    }
-    expense_grid_selection_status(ui, &self.expense_grid_selection);
+    expense_grid_selection_status(ui, &self.expense_grid_state.selection);
 
     ui.add_space(4.0);
-    let mut pending_updates: Vec<(usize, &'static str)> = Vec::new();
-    let mut pending_category_commits: Vec<usize> = Vec::new();
-    let mut pending_member_commits: Vec<usize> = Vec::new();
     let category_candidates = self.cached_category_candidates.clone();
     let member_candidates = self.cached_member_candidates.clone();
     let vendor_candidates = self.cached_vendor_candidates.clone();
@@ -68,45 +46,35 @@ impl TwoCentsApp {
 
     let old_spacing = ui.spacing().item_spacing;
     ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
-    let expense_columns = spreadsheet_columns(ui, 100.0, 90.0, 100.0, 200.0, 160.0);
-    let expense_sort = self.expense_sort;
-    let sorted_indices = self.cached_sorted_expense_indices.clone();
-    let mut pending_grid_focus: Option<(GridColumn, usize)> = None;
-    self.active_expense_cell = None;
-    self.apply_pending_grid_keyboard(
-      &sorted_indices,
-      &mut pending_updates,
-      &mut pending_category_commits,
-      &mut pending_member_commits,
-    );
-    if let Some(target) = self.pending_grid_focus_target.take() {
-      pending_grid_focus = Some(target);
-    }
-    let mut expense_scroll_y = self.expense_grid_scroll_offset;
-    let grid_res = crate::ui::grid::render_shared_grid(
-      ui,
-      &mut self.expenses,
-      &sorted_indices,
-      &mut self.expense_grid_selection,
-      &mut self.expense_grid_drag,
-      &mut self.expense_grid_edit_cell,
-      &mut self.expense_grid_edit_original,
-      &mut self.expense_grid_typeahead,
-      &mut expense_scroll_y,
-      &mut autocomplete_selection,
-      &vendor_candidates,
-      &category_candidates,
-      &member_candidates,
-      &description_candidates,
-      &self.members,
-      &self.categories,
-      expense_columns.to_vec(),
-      "expense_cell",
-      true,
-    );
 
-    self.expense_grid_scroll_offset = expense_scroll_y;
-    self.active_expense_cell = grid_res.active_cell;
+    let sorted_indices = self.cached_sorted_expense_indices.clone();
+
+    let table_bg = ui.visuals().extreme_bg_color;
+    let table_stroke = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let grid_res = egui::Frame::default()
+      .fill(table_bg)
+      .stroke(egui::Stroke::new(1.0, table_stroke))
+      .corner_radius(8.0)
+      .inner_margin(egui::Margin::same(2))
+      .show(ui, |ui| {
+        crate::ui::grid::render_grid(
+          ui,
+          &mut self.expenses,
+          &sorted_indices,
+          &mut self.expense_grid_state,
+          &mut autocomplete_selection,
+          &vendor_candidates,
+          &category_candidates,
+          &member_candidates,
+          &description_candidates,
+          &self.members,
+          &self.categories,
+          "expense_cell",
+          true,
+        )
+      }).inner;
+
+    self.expense_grid_state.active_cell = grid_res.active_cell;
 
     if let Some((cat_id, name, color)) = grid_res.open_color_popup {
       self.category_color_popup = Some(CategoryColorPopup {
@@ -116,28 +84,29 @@ impl TwoCentsApp {
       });
     }
 
-    pending_updates.extend(grid_res.pending_field_updates);
-    pending_category_commits.extend(grid_res.pending_category_commits);
-    pending_member_commits.extend(grid_res.pending_member_commits);
-
-    if let Some((column, idx)) = pending_grid_focus {
-      self.expense_grid_selection = Some(GridSelection {
-        column,
-        rows: vec![idx],
-      });
-      self.expense_grid_edit_cell = Some((column, idx));
-      request_expense_cell_focus(ui, column, idx);
-    } else if let Some((column, idx)) = self.expense_grid_edit_cell {
-      request_expense_cell_focus(ui, column, idx);
+    if let Some(rows_to_delete) = grid_res.force_delete_rows {
+      self.delete_expenses_by_indices(&rows_to_delete);
+    } else if let Some(rows_to_delete) = grid_res.delete_rows {
+      self.show_delete_expense_confirm = true;
+      self.delete_expense_indices = rows_to_delete;
     }
-    if self.expense_grid_drag.is_some() {
+
+    let mut pending_updates = grid_res.pending_field_updates;
+    let mut pending_category_commits = grid_res.pending_category_commits;
+    let mut pending_member_commits = grid_res.pending_member_commits;
+
+    if self.expense_grid_state.drag.is_some() {
       ui.ctx().request_repaint();
     }
     ui.spacing_mut().item_spacing = old_spacing;
-    let mut sort_changed = false;
-    if self.expense_sort != expense_sort {
-      self.expense_sort = expense_sort;
-      sort_changed = true;
+    if let Some(col) = grid_res.clicked_sort_column {
+      let ascending = if self.expense_sort.column == col {
+        !self.expense_sort.ascending
+      } else {
+        true
+      };
+      self.pending_expense_sort = Some(ExpenseSort { column: col, ascending });
+      ui.ctx().request_repaint();
     }
     self.autocomplete_selection = autocomplete_selection;
 
@@ -154,17 +123,8 @@ impl TwoCentsApp {
       &pending_member_commits,
     );
 
-    let pending_edit = ui.ctx().data_mut(|d| {
-      d.remove_temp::<Option<(GridColumn, usize)>>(egui::Id::new("pending_edit_cell"))
-    });
-    if let Some(Some(cell)) = pending_edit {
-      self.expense_grid_edit_cell = Some(cell);
-      ui.ctx().request_repaint();
-    }
-    if sort_changed || self.expense_grid_edit_cell != prev_edit_cell {
-      self.rebuild_sorted_expense_indices();
-    }
   }
+
 
   pub fn flush_expense_grid_commits(
     &mut self,
@@ -287,6 +247,74 @@ impl TwoCentsApp {
       }
     } else {
       let _ = self.conn.execute("ROLLBACK", []);
+    }
+  }
+
+  pub fn find_duplicates(&mut self) {
+    let results = {
+      let mut stmt = match self.conn.prepare(
+        "SELECT e1.id, e1.date, e1.amount_cents, COALESCE(e1.member, ''), e1.category, COALESCE(e1.vendor, ''), e1.description
+         FROM expenses e1
+         INNER JOIN (
+             SELECT date, amount_cents, lower(COALESCE(vendor, '')) as l_vendor
+             FROM expenses
+             WHERE household_id = ?1
+             GROUP BY date, amount_cents, lower(COALESCE(vendor, ''))
+             HAVING COUNT(*) > 1
+         ) e2 ON e1.date = e2.date 
+             AND e1.amount_cents = e2.amount_cents 
+             AND lower(COALESCE(e1.vendor, '')) = e2.l_vendor
+         WHERE e1.household_id = ?1
+         ORDER BY e1.date DESC, e1.amount_cents DESC, lower(COALESCE(e1.vendor, ''))"
+      ) {
+        Ok(stmt) => stmt,
+        Err(err) => {
+          eprintln!("[duplicates] Prepare query failed: {err}");
+          return;
+        }
+      };
+
+      let rows_res = stmt.query_map(params![self.household_id], |row| {
+        let amount_cents: i64 = row.get(2)?;
+        let amount_input = money(amount_cents).replace('$', "");
+        Ok(Expense {
+          id: row.get(0)?,
+          date: row.get(1)?,
+          amount_input,
+          amount_cents,
+          member: row.get(3)?,
+          category: row.get(4)?,
+          vendor: row.get(5)?,
+          description: row.get(6)?,
+        })
+      });
+
+      match rows_res {
+        Ok(mapped_rows) => {
+          let mut results = Vec::new();
+          for r in mapped_rows {
+            if let Ok(exp) = r {
+              results.push(exp);
+            }
+          }
+          Ok(results)
+        }
+        Err(err) => Err(err),
+      }
+    }; // stmt is dropped here!
+
+    match results {
+      Ok(res) => {
+        self.duplicate_rows = res;
+        self.duplicate_deleted_ids.clear();
+        self.duplicate_grid_state.clear_selection();
+        self.show_duplicate_review = true;
+        self.rebuild_sorted_duplicate_indices();
+        self.log(format!("[duplicates] found {} possible duplicates for review", self.duplicate_rows.len()));
+      }
+      Err(err) => {
+        self.log(format!("[duplicates] Query execution failed: {err}"));
+      }
     }
   }
 }
