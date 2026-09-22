@@ -1,8 +1,101 @@
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use crate::models::*;
 use crate::db::*;
+use crate::ui::popups::styled_button;
 use crate::ui::widgets::*;
 use crate::TwoCentsApp;
+
+/// ponytail: combo box for the statement account — arrow painted inside the
+/// same field, ▾ shows the full past-account list, typing contains-searches,
+/// unknown names become new accounts at save. Returns state the caller
+/// applies (picked name, focus, toggle) so this stays a pure widget.
+struct AccountComboOut {
+  picked: Option<String>,
+  focused: bool,
+  toggled: bool,
+}
+
+fn account_combo(
+  ui: &mut egui::Ui,
+  name: &mut String,
+  candidates: &[String],
+  width: f32,
+  text_id: egui::Id,
+  dropdown_open: &mut bool,
+) -> AccountComboOut {
+  let h = ui.spacing().interact_size.y.max(24.0);
+  let (rect, _) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+  let painter = ui.painter();
+  painter.rect_filled(
+    rect,
+    crate::ui::theme_tokens::RADIUS_SM,
+    ui.visuals().extreme_bg_color,
+  );
+  painter.rect_stroke(
+    rect,
+    crate::ui::theme_tokens::RADIUS_SM,
+    ui.visuals().widgets.inactive.bg_stroke,
+    egui::StrokeKind::Middle,
+  );
+  // Frameless text edit fills the left side; chevron lives inside the right
+  // edge of the same box, exactly like egui's ComboBox.
+  let edit_w = width - 22.0;
+  let response = ui
+    .scope_builder(
+      egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+        rect.min + egui::vec2(6.0, 2.0),
+        egui::vec2(edit_w, h - 4.0),
+      )),
+      |ui| {
+        ui.add(
+          egui::TextEdit::singleline(name)
+            .id(text_id)
+            .frame(egui::Frame::NONE)
+            .desired_width(edit_w)
+            .hint_text("Account name"),
+        )
+      },
+    )
+    .inner;
+  let chevron_center = egui::pos2(rect.right() - 11.0, rect.center().y);
+  paint_chevron_down(
+    &ui.painter(),
+    egui::Rect::from_center_size(chevron_center, egui::vec2(10.0, 8.0)),
+    crate::ui::components::fg_muted(ui),
+  );
+  // ponytail: only the chevron sliver is click-sensitive here — the previous
+  // design stacked overlapping full-box interacts and egui's hit-test let
+  // the last one swallow the arrow clicks (the dropdown looked dead). Text
+  // clicks go to the TextEdit itself; `anchor` (hover-only) spans the whole
+  // box so the popup opens below it, flush with both edges.
+  let anchor = ui.interact(rect, text_id.with("anchor"), egui::Sense::hover());
+  let chevron_zone = ui.interact(
+    egui::Rect::from_min_max(
+      egui::pos2(rect.right() - 22.0, rect.top()),
+      egui::pos2(rect.right(), rect.bottom()),
+    ),
+    text_id.with("chevron"),
+    egui::Sense::click(),
+  );
+  if chevron_zone.hovered() {
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+  }
+  let mut toggled = false;
+  if chevron_zone.clicked() {
+    *dropdown_open = !*dropdown_open;
+    toggled = true;
+    ui.memory_mut(|mem| mem.request_focus(text_id));
+  }
+  let picked = show_autocomplete_popup(ui, &response, name, candidates, *dropdown_open, &anchor);
+  // ponytail: Enter only confirms the name — importing stays exclusively
+  // with the "Save Reviewed Import" button (an earlier Enter-to-save here
+  // silently imported every staged row as soon as the name was confirmed).
+  AccountComboOut {
+    picked,
+    focused: response.has_focus(),
+    toggled,
+  }
+}
 
 
 impl TwoCentsApp {
@@ -36,11 +129,122 @@ impl TwoCentsApp {
       .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
       .frame(themed_modal_frame(ctx))
       .show(ctx, |ui| {
+        // ── Header row (our own title bar replacement) ───────────────────────
+        let account_candidates: Vec<String> = self.accounts.iter()
+          .map(|account| account.name.clone())
+          .collect();
+        let mut account_picked: Option<String> = None;
+        let mut account_focused = false;
+        let account_text_id = egui::Id::new("import_account_text");
+        let dropdown_id = egui::Id::new("import_account_dropdown");
+        let mut dropdown_open = ui.ctx().data_mut(|d| d.get_temp::<bool>(dropdown_id).unwrap_or(false));
+        let mut account_own_row = false;
+        ui.horizontal(|ui| {
+          // ponytail: heading + secondary text, same hierarchy as the
+          // Settings window. Was a single same-color label.
+          ui.vertical(|ui| {
+            crate::ui::components::heading_lg(ui, "Statement Import Review");
+            crate::ui::components::label_muted(
+              ui,
+              "Edits here are staged. Click 'Save Reviewed Import' to commit them to your spreadsheet.",
+            );
+          });
+          let remaining_width = ui.available_width();
+          ui.allocate_ui_with_layout(
+            egui::vec2(remaining_width, ui.spacing().interact_size.y),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+              if styled_button(ui, "Cancel Review", false).clicked() {
+                self.show_import_review = false;
+              }
+              if styled_button(ui, "Save Reviewed Import", true).clicked() {
+                self.save_import();
+              }
+              // Statement-level account: prefilled from the CSV's Account
+              // column when present; rename it freely before saving — the
+              // detected value keeps mapping to the new name next import.
+              // ponytail: the combo never shrinks below ~200px — if the
+              // header strip can't fit it, it drops to its own full-width
+              // row under the header instead.
+              let available = ui.available_width() - 60.0; // reserve for "Account:"
+              if available >= 200.0 {
+                let out = account_combo(
+                  ui,
+                  &mut self.import_account_name,
+                  &account_candidates,
+                  available.clamp(200.0, 240.0),
+                  account_text_id,
+                  &mut dropdown_open,
+                );
+                account_picked = out.picked;
+                account_focused = out.focused;
+                if out.toggled {
+                  ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, dropdown_open));
+                }
+                if self.import_account_name.trim().is_empty() {
+                  crate::ui::components::label_muted(ui, "Name the account before saving");
+                }
+                ui.label(egui::RichText::new("Account:").weak());
+              } else {
+                account_own_row = true;
+              }
+            },
+          );
+        });
+        if account_own_row {
+          ui.add_space(2.0);
+          // ponytail: right-aligned AND one row high — bare with_layout let
+          // Align::Center float the picker in the window's leftover height
+          // (huge gap); allocating the row pins it under the header.
+          ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+              let width = ui.available_width().min(340.0);
+              let out = account_combo(
+                ui,
+                &mut self.import_account_name,
+                &account_candidates,
+                width,
+                account_text_id,
+                &mut dropdown_open,
+              );
+              account_picked = out.picked;
+              account_focused = out.focused;
+              if out.toggled {
+                ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, dropdown_open));
+              }
+              if self.import_account_name.trim().is_empty() {
+                crate::ui::components::label_muted(ui, "Name the account before saving");
+              }
+              ui.label(egui::RichText::new("Account:").weak());
+            },
+          );
+        }
+        if let Some(picked) = account_picked {
+          self.import_account_name = picked;
+          dropdown_open = false;
+          ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, false));
+        }
+        // ponytail: the statement picker IS the account assignment — mirror
+        // its value into every staged row so the grid's Account column shows
+        // live what will be saved (typed names and dropdown picks alike).
+        if !self.import_rows.is_empty() {
+          let name = self.import_account_name.trim().to_string();
+          for row in &mut self.import_rows {
+            row.account = name.clone();
+          }
+        }
+
         // Escape handling: only close the modal if nothing is being edited.
-        // If a cell is being edited, let the grid handle Escape first (cancel edit).
+        // If a cell is being edited, let the grid handle Escape first (cancel edit);
+        // if the account picker is focused, Escape just clears its suggestion list.
         if self.import_grid_state.edit_cell.is_none() {
           if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            if self.import_grid_state.selection.is_some() {
+            if account_focused || dropdown_open {
+              ui.memory_mut(|mem| mem.surrender_focus(account_text_id));
+              ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, false));
+            } else if self.import_grid_state.selection.is_some() {
               self.import_grid_state.clear_selection();
             } else {
               self.show_import_review = false;
@@ -48,31 +252,12 @@ impl TwoCentsApp {
             }
           }
         }
-
-        // ── Header row (our own title bar replacement) ───────────────────────
-        ui.horizontal(|ui| {
-          ui.label(RichText::new("Statement Import Review").color(ui.visuals().text_color()));
-          let remaining_width = ui.available_width();
-          ui.allocate_ui_with_layout(
-            egui::vec2(remaining_width, ui.spacing().interact_size.y),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-              if ui.button("Cancel Review").clicked() {
-                self.show_import_review = false;
-              }
-              if ui.add(egui::Button::new("Save Reviewed Import").fill(ui.visuals().selection.bg_fill)).clicked() {
-                self.save_import();
-              }
-            },
-          );
-        });
         ui.add_space(4.0);
-        ui.label(RichText::new("Edits here are staged. Click 'Save Reviewed Import' to commit them to your spreadsheet.").color(ui.visuals().text_color()));
-        ui.add_space(8.0);
-
-        ui.label(
-          "Click or drag in a column to select rows. Hold Shift and drag to pan. Type to edit; Enter applies to all selected rows; Tab or Enter picks autocomplete; Escape clears (Escape again cancels review).",
+        crate::ui::components::label_muted(
+          ui,
+          "Click or drag a column to select rows. Hold Shift and drag to pan. Type to edit; Enter applies to all selected rows; Tab or Enter picks autocomplete; Escape clears (Escape again cancels review).",
         );
+        ui.add_space(8.0);
 
         let category_candidates = self.cached_category_candidates.clone();
         let member_candidates = self.cached_member_candidates.clone();
@@ -81,15 +266,12 @@ impl TwoCentsApp {
         let mut autocomplete_selection = self.autocomplete_selection;
 
 
-        egui::Frame::new()
-          .fill(ui.visuals().window_fill)
-          .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
-          .corner_radius(6.0)
-          .inner_margin(egui::Margin::same(6))
+        // ponytail: shared grid_table_frame so the three grids have identical chrome.
+        crate::ui::components::grid_table_frame(ui)
           .show(ui, |ui| {
             let old_spacing = ui.spacing().item_spacing;
             ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
-            
+
             let grid_res = crate::ui::grid::render_grid(
               ui,
               &mut self.import_rows,
@@ -103,7 +285,7 @@ impl TwoCentsApp {
               &self.members,
               &self.categories,
               "import_cell",
-              false,
+              true,
             );
 
             self.import_grid_state.active_cell = grid_res.active_cell;
@@ -135,19 +317,30 @@ impl TwoCentsApp {
 
             let pending_updates = grid_res.pending_field_updates;
             let pending_category_commits = grid_res.pending_category_commits;
-            let _pending_member_commits = grid_res.pending_member_commits;
+            let pending_member_commits = grid_res.pending_member_commits;
 
             for &(idx, field) in &pending_updates {
               if field == "amount" {
                 if let Some(row) = self.import_rows.get_mut(idx) {
-                  if let Some(cents) = parse_amount_cents(&row.amount_input) {
-                    row.amount_cents = cents;
+                  if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
+                    // ponytail: sign is a function of category; excluded rows
+                    // keep their real amount (flag filters aggregation only).
+                    let sign = category_sign(&self.categories, &row.category);
+                    row.amount_cents = if sign == 1 { magnitude } else { -magnitude };
                   }
                 }
               }
             }
+            for idx in &pending_member_commits {
+              if let Some(row) = self.import_rows.get_mut(*idx) {
+                row.member = row.member.trim().to_string();
+              }
+            }
             if !pending_category_commits.is_empty() {
               self.categories = load_categories(&self.conn, self.household_id).unwrap_or_default();
+              // ponytail: sign is a function of category — re-derive after
+              // re-categorization so the review grid never shows stale signs.
+              self.sync_import_amounts();
             }
 
             if self.import_grid_state.drag.is_some() {
@@ -187,41 +380,62 @@ impl TwoCentsApp {
 
   pub fn process_csv_file(&mut self, path: &std::path::Path) {
     match parse_csv_statement(&self.conn, self.household_id, path) {
-      Ok(rows) if rows.is_empty() => self.log("[import] cancelled or no valid rows"),
+      Ok(rows) if rows.is_empty() => {}
       Ok(rows) => {
         let duplicates = duplicate_import_count(&self.conn, self.household_id, &rows);
         let ready = rows.iter().filter(|row| import_row_status(row) == "ready").count();
+        // ponytail: prefill the account name from the CSV's Account column
+        // (most common non-empty value). A previously-mapped csv_name wins,
+        // otherwise the raw value (rename it if you like); nothing detected
+        // stays blank — save is blocked until a name is typed.
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for row in &rows {
+          if !row.account.trim().is_empty() {
+            *counts.entry(row.account.trim()).or_insert(0) += 1;
+          }
+        }
+        let detected = counts.iter()
+          .max_by_key(|(_, count)| **count)
+          .map(|(name, _)| name.to_string())
+          .unwrap_or_default();
+        self.import_detected_account = detected.clone();
+        self.import_account_name = if let Some(matched) = self.accounts.iter()
+          .find(|account| account.csv_name.as_deref().is_some_and(|value| value.eq_ignore_ascii_case(&detected)))
+        {
+          matched.name.clone()
+        } else {
+          detected
+        };
         self.import_rows = rows;
+        self.sync_import_amounts();
         self.rebuild_import_cached_candidates();
         self.rebuild_sorted_import_indices();
         self.show_import_review = true;
-        self.log(format!(
-          "[import] loaded {} rows ready={} possible_duplicates={}",
-          self.import_rows.len(),
-          ready,
-          duplicates
-        ));
-      }
-      Err(err) => self.log(format!("[error] import failed: {err}")),
+              }
+      Err(_err) => {}
     }
   }
 
   fn save_import(&mut self) {
-    if self.import_rows.is_empty() {
-      self.log("[import] nothing to save");
-      return;
+    if self.import_rows.is_empty() || self.import_account_name.trim().is_empty() {
+            return;
     }
 
     self.sync_import_amounts();
     let rows = self.import_rows.clone();
-    match save_import_rows(&self.conn, self.household_id, &rows) {
+    let account = resolve_or_create_account(
+      &self.conn,
+      self.household_id,
+      &self.import_detected_account,
+      &self.import_account_name,
+    );
+    match account.and_then(|account_id| save_import_rows(&self.conn, self.household_id, &rows, account_id)) {
       Ok(count) => {
         self.import_rows.clear();
         self.show_import_review = false;
         self.reload();
-        self.log(format!("[import] saved {count} rows"));
-      }
-      Err(err) => self.log(format!("[error] import save failed: {err}")),
+              }
+      Err(err) => eprintln!("[import] save failed: {err}"),
     }
   }
 
@@ -236,15 +450,18 @@ impl TwoCentsApp {
     self.rebuild_import_cached_candidates();
     self.rebuild_sorted_import_indices();
     self.import_grid_state.clear_selection();
-    self.log(format!("[import] removed {} row(s)", sorted_indices.len()));
-  }
+      }
 
 
 
   fn sync_import_amounts(&mut self) {
+    let categories = self.categories.clone();
     for row in &mut self.import_rows {
-      if let Some(cents) = parse_amount_cents(&row.amount_input) {
-        row.amount_cents = cents;
+      if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
+        // ponytail: sign is a function of category; excluded rows keep
+        // their real amount (flag filters aggregation only).
+        let sign = category_sign(&categories, &row.category);
+        row.amount_cents = if sign == 1 { magnitude } else { -magnitude };
       }
     }
   }

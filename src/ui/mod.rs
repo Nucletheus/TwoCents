@@ -1,5 +1,3 @@
-use eframe::egui;
-
 pub mod widgets;
 pub mod grid;
 pub mod dashboard;
@@ -13,13 +11,9 @@ pub mod popups;
 
 pub mod budgets;
 pub mod theme;
+pub mod theme_tokens;
+pub mod components;
+pub mod settlements;
 
 // Future slots:
 // pub mod goals;
-// pub mod settlements;
-
-pub fn placeholder(ui: &mut egui::Ui, title: &str, body: &str) {
-  ui.heading(title);
-  ui.separator();
-  ui.label(body);
-}

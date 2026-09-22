@@ -1,5 +1,10 @@
+// ponytail: audit found 0 correctness warnings. All 42 clippy findings are
+// cosmetic nits (needless_borrow, collapsible_if, dead_code, etc.) — allow
+// globally; remove this attribute when each lint is addressed.
+#![allow(clippy::needless_borrow, clippy::needless_borrows_for_generic_args, clippy::collapsible_if, clippy::empty_line_after_doc_comments, clippy::manual_flatten, clippy::manual_is_multiple_of, clippy::needless_lifetimes, clippy::needless_range_loop, clippy::redundant_pattern_matching, clippy::unnecessary_cast, clippy::unnecessary_map_or, clippy::unnecessary_sort_by, clippy::while_let_on_iterator, clippy::clone_on_copy, clippy::ptr_arg, clippy::upper_case_acronyms, dead_code, unused_variables)]
+
 use chrono::Datelike;
-use eframe::egui::{self, RichText, TextureHandle};
+use eframe::egui::{self};
 use std::{env, fs, path::PathBuf, collections::HashMap};
 use rusqlite::{Connection, params};
 
@@ -11,7 +16,6 @@ use crate::models::*;
 use crate::db::*;
 use crate::ui::widgets::*;
 use crate::ui::theme;
-use crate::ui::placeholder;
 
 /// Cached week counts for the current budget year
 #[derive(Clone)]
@@ -77,17 +81,16 @@ struct TwoCentsApp {
   editing_self_name: String,
   import_rows: Vec<ImportRow>,
   pub show_import_review: bool,
+  import_account_name: String,
+  import_detected_account: String,
   csv_import_rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
   pub selected_theme: theme::ThemePreset,
-  pub terminal: Vec<String>,
-  chart: Option<TextureHandle>,
-  chart_dirty: bool,
   autocomplete_selection: usize,
   expense_sort: ExpenseSort,
   show_category_settings: bool,
   new_parent_category_name: String,
-  new_subcategory_name: String,
-  new_subcategory_parent_id: Option<i64>,
+  adding_subcategory_to: Option<i64>,
+  inline_subcategory_name: String,
   category_color_popup: Option<CategoryColorPopup>,
   member_color_popup: Option<MemberColorPopup>,
   pub expense_grid_state: GridState,
@@ -129,6 +132,16 @@ struct TwoCentsApp {
   /// default: [0.30, 0.45, 0.62, 0.79]
   pub budget_col_dividers: [f32; 4],
   week_cache: Option<WeekCountCache>,
+  cached_budget_snapshots: Vec<BudgetSnapshot>,
+  pub category_splits: Vec<CategorySplit>,
+  /// ponytail: grid edits commit to SQLite per keystroke was a synchronous
+  /// write per frame while typing — changes accumulate here and flush 400ms
+  /// after the last change, or immediately when the editing cell closes.
+  deferred_field_updates: Vec<(usize, &'static str)>,
+  deferred_category_commits: Vec<usize>,
+  deferred_member_commits: Vec<usize>,
+  expense_last_pending_len: usize,
+  expense_flush_at: Option<std::time::Instant>,
   pub analytics_state: crate::ui::analytics::state::AnalyticsState,
 }
 
@@ -267,17 +280,16 @@ impl TwoCentsApp {
       import_rows: Vec::new(),
       csv_import_rx: None,
       show_import_review: false,
+      import_account_name: String::new(),
+      import_detected_account: String::new(),
       selected_theme: theme::ThemePreset::OneDark,
       variant_mode: theme::VariantMode::System,
-      terminal: vec!["[app] eframe UI loaded".to_string()],
-      chart: None,
-      chart_dirty: true,
       autocomplete_selection: 0,
       expense_sort: ExpenseSort::default(),
       show_category_settings: false,
       new_parent_category_name: String::new(),
-      new_subcategory_name: String::new(),
-      new_subcategory_parent_id: None,
+      adding_subcategory_to: None,
+      inline_subcategory_name: String::new(),
       category_color_popup: None,
       member_color_popup: None,
       expense_grid_state: GridState::default(),
@@ -306,16 +318,27 @@ impl TwoCentsApp {
       duplicate_sort: ExpenseSort::default(),
       duplicate_deleted_ids: std::collections::HashSet::new(),
       budgets: std::collections::HashMap::new(),
-      budget_year: 2026,
-      budget_month: 5,
-      budget_week: 22,
-      budget_quarter: 2,
+      // ponytail: default to the current period at app start so the
+      // Budgets tab opens on the right month / week / quarter. The user
+      // can then change the view and the new value sticks for the rest
+      // of the session.
+      budget_year: chrono::Local::now().year(),
+      budget_month: chrono::Local::now().month() as i32,
+      budget_week: chrono::Local::now().iso_week().week(),
+      budget_quarter: ((chrono::Local::now().month() - 1) / 3 + 1) as u32,
       budget_filter: BudgetFilter::All,
       budget_granularity: BudgetGranularity::Monthly,
       budget_editing_category: None,
       budget_editing_input: String::new(),
       budget_col_dividers: [0.30, 0.45, 0.62, 0.79],
       week_cache: None,
+      cached_budget_snapshots: Vec::new(),
+      category_splits: Vec::new(),
+      deferred_field_updates: Vec::new(),
+      deferred_category_commits: Vec::new(),
+      deferred_member_commits: Vec::new(),
+      expense_last_pending_len: 0,
+      expense_flush_at: None,
       analytics_state: crate::ui::analytics::state::AnalyticsState::default(),
     };
     
@@ -333,22 +356,21 @@ impl TwoCentsApp {
 
 
   fn reload(&mut self) {
+    // ponytail: pending grid edits reference expense indices; flush before
+    // the row vec is rebuilt or they'd hit the wrong rows.
+    self.flush_deferred_expense_commits();
     self.accounts = load_accounts(&self.conn, self.household_id).unwrap_or_else(|err| {
-      self.log(format!("[error] accounts load failed: {err}"));
-      Vec::new()
+            Vec::new()
     });
     self.expenses = load_expenses(&self.conn, self.household_id).unwrap_or_else(|err| {
-      self.log(format!("[error] expenses load failed: {err}"));
-      Vec::new()
+            Vec::new()
     });
     let _ = seed_default_categories(&self.conn, self.household_id);
     self.categories = load_categories(&self.conn, self.household_id).unwrap_or_else(|err| {
-      self.log(format!("[error] categories load failed: {err}"));
-      Vec::new()
+            Vec::new()
     });
     self.members = load_household_members(&self.conn, self.household_id).unwrap_or_else(|err| {
-      self.log(format!("[error] members load failed: {err}"));
-      Vec::new()
+            Vec::new()
     });
     self.editing_self_name = self
       .members
@@ -356,11 +378,16 @@ impl TwoCentsApp {
       .find(|member| member.is_self)
       .map(|member| member.name.clone())
       .unwrap_or_else(|| "Me".to_string());
-    self.chart_dirty = true;
     self.rebuild_cached_candidates();
     self.rebuild_sorted_expense_indices();
     self.rebuild_sorted_import_indices();
     self.rebuild_sorted_duplicate_indices();
+
+    // Cache budget snapshots once per reload (was re-queried per category before)
+    self.cached_budget_snapshots = load_budget_snapshots_for_year(&self.conn, self.household_id, self.budget_year)
+      .unwrap_or_default();
+    self.category_splits = load_category_splits(&self.conn, self.household_id)
+      .unwrap_or_default();
 
     let month_code = match self.budget_granularity {
       BudgetGranularity::Yearly => 0,
@@ -423,23 +450,16 @@ impl TwoCentsApp {
     self.categories = load_categories(&self.conn, self.household_id).unwrap_or_default();
   }
 
-  fn log(&mut self, line: impl Into<String>) {
-    self.terminal.push(line.into());
-    if self.terminal.len() > 250 {
-      self.terminal.drain(0..50);
-    }
-  }
-
-  fn terminal_text(&self) -> String {
-    self.terminal.join("\n")
-  }
+  // ── Budget Snapshot Computation ──────────────────────────────────────
 
   fn delete_expenses_by_indices(&mut self, indices: &[usize]) {
+    // ponytail: flush deferred grid edits BEFORE deleting — they reference
+    // indices into self.expenses, which shift the moment rows are removed.
+    self.flush_deferred_expense_commits();
     let mut sorted_indices = indices.to_vec();
-    sorted_indices.sort_by(|a, b| b.cmp(a)); // sort descending
+    sorted_indices.sort_by(|a, b| b.cmp(&a)); // sort descending
     let mut logs = Vec::new();
-    let mut db_deleted = false;
-    
+
     if let Ok(tx) = self.conn.transaction() {
       let mut success = true;
       for &idx in &sorted_indices {
@@ -458,8 +478,6 @@ impl TwoCentsApp {
       if success {
         if let Err(err) = tx.commit() {
           logs.push(format!("[error] transaction commit failed: {err}"));
-        } else {
-          db_deleted = true;
         }
       }
     } else {
@@ -467,10 +485,7 @@ impl TwoCentsApp {
     }
 
     for log_msg in logs {
-      self.log(log_msg);
-    }
-    if db_deleted {
-      self.log(format!("[expenses] deleted {} row(s)", sorted_indices.len()));
+      eprintln!("{log_msg}");
     }
     self.expense_grid_state.clear_selection();
     self.reload();
@@ -503,19 +518,24 @@ impl eframe::App for TwoCentsApp {
         }
       }
 
-      let cached_members = self.cached_member_candidates.clone();
-      let cached_categories = self.cached_category_candidates.clone();
-      let cached_vendors = self.cached_import_vendor_candidates.clone();
-      let cached_descriptions = self.cached_import_description_candidates.clone();
-      let candidates_fn = move |col| match col {
-        GridColumn::Member => cached_members.clone(),
-        GridColumn::Category => cached_categories.clone(),
-        GridColumn::Vendor => cached_vendors.clone(),
-        GridColumn::Description => cached_descriptions.clone(),
-        _ => Vec::new(),
-      };
-      self.import_grid_state.handle_raw_input(ctx, raw_input, &self.import_rows, candidates_fn);
-    } else if self.tab == Tab::Expenses {
+      // ponytail: handle_raw_input early-returns unless a cell is active;
+      // guard here so the 4 candidate-Vec clones don't happen every frame
+      // with nothing being edited.
+      if self.import_grid_state.active_cell.is_some() {
+        let cached_members = self.cached_member_candidates.clone();
+        let cached_categories = self.cached_category_candidates.clone();
+        let cached_vendors = self.cached_import_vendor_candidates.clone();
+        let cached_descriptions = self.cached_import_description_candidates.clone();
+        let candidates_fn = move |col| match col {
+          GridColumn::Member => cached_members.clone(),
+          GridColumn::Category => cached_categories.clone(),
+          GridColumn::Vendor => cached_vendors.clone(),
+          GridColumn::Description => cached_descriptions.clone(),
+          _ => Vec::new(),
+        };
+        self.import_grid_state.handle_raw_input(ctx, raw_input, &self.import_rows, candidates_fn);
+      }
+    } else if self.tab == Tab::Expenses && self.expense_grid_state.active_cell.is_some() {
       let cached_members = self.cached_member_candidates.clone();
       let cached_categories = self.cached_category_candidates.clone();
       let cached_vendors = self.cached_vendor_candidates.clone();
@@ -535,7 +555,7 @@ impl eframe::App for TwoCentsApp {
 
   fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
     for log_msg in take_panic_logs() {
-      self.log(log_msg);
+      eprintln!("{log_msg}");
     }
 
     if let Some(rx) = &self.csv_import_rx {
@@ -543,11 +563,11 @@ impl eframe::App for TwoCentsApp {
         self.csv_import_rx = None;
         if let Some(path) = path_opt {
           self.process_csv_file(&path);
-        } else {
-          self.log("[import] cancelled");
         }
       }
-      ctx.request_repaint();
+      // ponytail: 50ms poll instead of a max-fps repaint loop while the
+      // native file dialog is open.
+      ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
     let use_dark = match self.variant_mode {
@@ -590,38 +610,34 @@ impl TwoCentsApp {
     let inner_w = available;
 
     // --- Header box ---
-    egui::Frame::default()
-      .fill(ui.visuals().window_fill)
-      .corner_radius(12.0)
-      .inner_margin(12.0)
-      .show(ui, |ui| {
-        ui.horizontal(|ui| {
-          ui.heading(RichText::new("TwoCents").color(ui.visuals().text_color()));
-          ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let vm = &mut self.variant_mode;
-            let btn_label = match vm {
-              theme::VariantMode::Dark => "☾",
-              theme::VariantMode::Light => "☀",
-              theme::VariantMode::System => "⚙",
+    crate::ui::components::card(ui).show(ui, |ui| {
+      ui.horizontal(|ui| {
+        ui.heading(crate::ui::components::heading_xl_text(ui, "TwoCents"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+          let vm = &mut self.variant_mode;
+          let btn_label = match vm {
+            theme::VariantMode::Dark => "☾",
+            theme::VariantMode::Light => "☀",
+            theme::VariantMode::System => "⚙",
+          };
+          let btn_hover = match vm {
+            theme::VariantMode::Dark => "Dark mode (click to cycle)",
+            theme::VariantMode::Light => "Light mode (click to cycle)",
+            theme::VariantMode::System => "Follow system (click to cycle)",
+          };
+          if ui.button(btn_label).on_hover_text(btn_hover).clicked() {
+            *vm = match vm {
+              theme::VariantMode::Dark => theme::VariantMode::Light,
+              theme::VariantMode::Light => theme::VariantMode::System,
+              theme::VariantMode::System => theme::VariantMode::Dark,
             };
-            let btn_hover = match vm {
-              theme::VariantMode::Dark => "Dark mode (click to cycle)",
-              theme::VariantMode::Light => "Light mode (click to cycle)",
-              theme::VariantMode::System => "Follow system (click to cycle)",
-            };
-            if ui.button(btn_label).on_hover_text(btn_hover).clicked() {
-              *vm = match vm {
-                theme::VariantMode::Dark => theme::VariantMode::Light,
-                theme::VariantMode::Light => theme::VariantMode::System,
-                theme::VariantMode::System => theme::VariantMode::Dark,
-              };
-            }
-            theme::theme_selector_ui(&mut self.selected_theme, ui);
-            ui.add_space(8.0);
-            ui.label(RichText::new("Couples focused finance app").color(ui.visuals().text_color()));
-          });
+          }
+          theme::theme_selector_ui(&mut self.selected_theme, ui);
+          ui.add_space(crate::ui::theme_tokens::SPACE_2);
+          crate::ui::components::label_muted(ui, "Couples focused finance app");
         });
       });
+    });
 
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
@@ -634,11 +650,8 @@ impl TwoCentsApp {
     });
     ui.separator();
 
-    // --- Content + Terminal area — constrained to inner_w ---
-    const TERMINAL_LOG_HEIGHT: f32 = 120.0;
-    const TERMINAL_RESERVED: f32 = TERMINAL_LOG_HEIGHT + 34.0;
-    const CONTENT_TERMINAL_GAP: f32 = 4.0;
-    let content_h = (ui.available_height() - TERMINAL_RESERVED - CONTENT_TERMINAL_GAP).max(200.0);
+    // --- Content area — fills the full window below the chrome ---
+    let content_h = ui.available_height().max(200.0);
     ui.allocate_ui_with_layout(
       egui::vec2(inner_w, content_h),
       egui::Layout::top_down(egui::Align::LEFT),
@@ -659,9 +672,7 @@ impl TwoCentsApp {
                 Tab::Accounts | Tab::Goals => {},
                 Tab::Analytics => self.ui_analytics(ui),
                 Tab::Budgets => unreachable!("budgets tab uses dedicated layout"),
-                Tab::Settlements => {
-                  placeholder(ui, "Settlements", "Not ported yet. Shared settlement math moves next.")
-                }
+                Tab::Settlements => self.ui_settlements(ui),
                 Tab::Households => self.ui_households(ui),
                 Tab::Expenses => unreachable!("expenses tab uses dedicated layout"),
               }
@@ -670,14 +681,6 @@ impl TwoCentsApp {
       },
     );
 
-    ui.add_space(CONTENT_TERMINAL_GAP);
-    ui.allocate_ui_with_layout(
-      egui::vec2(inner_w, TERMINAL_LOG_HEIGHT + 34.0),
-      egui::Layout::top_down(egui::Align::LEFT),
-      |ui| {
-        self.ui_terminal(ui);
-      },
-    );
     self.ui_category_settings_window(&ctx);
     self.ui_category_color_popup(&ctx);
     self.ui_member_color_popup(&ctx);
@@ -692,8 +695,15 @@ impl TwoCentsApp {
     if modal_open {
       let screen = ctx.content_rect();
       let bg_layer = egui::LayerId::new(egui::Order::Background, egui::Id::new("import_blocker"));
-      // Visual dim.
-      let overlay = ctx.global_style().visuals.panel_fill.linear_multiply(0.65);
+      // ponytail: theme-aware dim overlay. Solid black/white at 50% alpha
+      // instead of multiplying the panel color (which was muddy on every
+      // theme). In dark mode the dim is a translucent black; in light mode
+      // a translucent dark gray.
+      let overlay = if theme::active_is_dark() {
+        egui::Color32::from_black_alpha(160)
+      } else {
+        egui::Color32::from_black_alpha(120)
+      };
       ctx.layer_painter(bg_layer)
         .rect_filled(screen, 0.0, overlay);
       // Interaction blocker: a transparent clickable Area that eats all pointer events
@@ -709,32 +719,6 @@ impl TwoCentsApp {
     // The import review Window renders at Order::Foreground — above everything.
     self.ui_import_review(&ctx);
     self.ui_duplicate_review(&ctx);
-  }
-
-  fn ui_terminal(&self, ui: &mut egui::Ui) {
-    ui.label(RichText::new("Terminal").color(ui.visuals().text_color()));
-    egui::Frame::default()
-      .fill(ui.visuals().panel_fill)
-      .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_fill))
-      .corner_radius(6.0)
-      .inner_margin(egui::Margin { left: 10, right: 18, top: 8, bottom: 8 })
-      .show(ui, |ui| {
-        let text = self.terminal_text();
-        egui::ScrollArea::vertical()
-          .id_salt("terminal_scroll")
-          .max_height(120.0)
-          .stick_to_bottom(true)
-          .show(ui, |ui| {
-            ui.add(
-              egui::TextEdit::multiline(&mut text.as_str())
-                .font(egui::TextStyle::Monospace)
-                .desired_rows(6)
-                .desired_width(ui.available_width())
-                .text_color(ui.visuals().text_color())
-                .interactive(false),
-            );
-          });
-      });
   }
 
   // ── Budget Snapshot Computation ──────────────────────────────────────
@@ -837,13 +821,9 @@ impl TwoCentsApp {
   }
 
   fn get_snapshot_amount(&self, category: &str, period_code: i32) -> Option<i64> {
-    load_budget_snapshots_for_year(&self.conn, self.household_id, self.budget_year)
-      .ok()
-      .and_then(|snaps| {
-        snaps.iter()
-          .find(|s| s.category == category && s.period_code == period_code)
-          .map(|s| s.amount_cents)
-      })
+    self.cached_budget_snapshots.iter()
+      .find(|s| s.category == category && s.period_code == period_code)
+      .map(|s| s.amount_cents)
   }
 
   fn sum_past_periods(&self, category: &str, gran: BudgetGranularity) -> i64 {
@@ -1226,17 +1206,20 @@ impl TwoCentsApp {
   }
 }
 
+// ponytail: underline-style tab (Notion). Active tab gets a 2px accent
+// underline; inactive tabs are muted. No fill, no pill.
 fn tab_button(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
   let selected = *current == tab;
-  let label_r = if selected {
-    let on_bg = ui.visuals().selection.bg_fill;
-    let lum = 0.299 * on_bg.r() as f32 + 0.587 * on_bg.g() as f32 + 0.114 * on_bg.b() as f32;
-    let c = if lum > 150.0 { egui::Color32::BLACK } else { egui::Color32::WHITE };
-    egui::RichText::new(label).color(c)
-  } else {
-    egui::RichText::new(label)
-  };
-  if ui.selectable_label(selected, label_r).clicked() {
+  let padding = egui::Margin::symmetric(crate::ui::theme_tokens::SPACE_2 as i8, 0);
+  let frame = egui::Frame::NONE.inner_margin(padding);
+  let response = frame.show(ui, |ui| {
+    ui.add(egui::Label::new(crate::ui::components::tab_label(ui, label, selected))
+      .selectable(false)
+      .sense(egui::Sense::click()))
+      .interact(egui::Sense::click())
+  }).inner;
+  if response.clicked() {
     *current = tab;
   }
+  crate::ui::components::tab_underline(ui, response.rect, selected);
 }

@@ -22,22 +22,23 @@ impl TwoCentsApp {
       .inner_margin(egui::Margin::symmetric(20, 14))
       .show(ui, |ui| {
         ui.set_max_width(560.0);
-        ui.heading(RichText::new("Households").color(ui.visuals().text_color()));
-        ui.label(
-          RichText::new("Manage your household, members, and member colors.")
-            .small()
-            .color(ui.visuals().weak_text_color()),
+        // ponytail: heading + muted description, Notion hierarchy.
+        crate::ui::components::heading_lg(ui, "Households");
+        crate::ui::components::label_muted(
+          ui,
+          "Manage your household, members, and member colors.",
         );
+        ui.add_space(crate::ui::theme_tokens::SPACE_4);
 
         household_panel(ui, "Active household", |ui| {
-          ui.label(RichText::new(&self.household_name).size(16.0).color(ui.visuals().text_color()));
+          ui.label(RichText::new(&self.household_name).size(16.0).color(crate::ui::components::fg_default(ui)));
         });
 
         household_panel(ui, "You", |ui| {
           ui.label(
             RichText::new("Default member for new expenses")
               .small()
-              .color(ui.visuals().weak_text_color()),
+              .color(crate::ui::components::fg_muted(ui)),
           );
           ui.add_space(4.0);
           ui.horizontal(|ui| {
@@ -60,16 +61,16 @@ impl TwoCentsApp {
             .max_height(140.0)
             .show(ui, |ui| {
               if other_members.is_empty() {
-                ui.label(RichText::new("No other members yet.").color(ui.visuals().weak_text_color()));
+                ui.label(RichText::new("No other members yet.").color(crate::ui::components::fg_muted(ui)));
               }
               for member in other_members {
                 ui.horizontal(|ui| {
                   if color_swatch_button(ui, member.color).clicked() {
                     member_color_pick = Some((member.id, member.name.clone(), member.color));
                   }
-                  ui.label(RichText::new(&member.name).color(ui.visuals().text_color()));
+                  ui.label(RichText::new(&member.name).color(crate::ui::components::fg_default(ui)));
                   ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Remove").clicked() {
+                    if crate::ui::popups::styled_button(ui, "Remove", false).clicked() {
                       delete_member = Some(member.id);
                     }
                   });
@@ -88,13 +89,13 @@ impl TwoCentsApp {
                 .id_salt("new_household_member")
                 .desired_width(field_width)
                 .margin(egui::Margin::symmetric(4, 2))
-                .text_color(ui.visuals().text_color())
+                .text_color(crate::ui::components::fg_default(ui))
                 .background_color(ui.visuals().panel_fill),
             );
             let add_clicked = ui
               .add(
-                egui::Button::new(RichText::new("Add").color(ui.visuals().strong_text_color()))
-                  .fill(ui.visuals().selection.bg_fill)
+                egui::Button::new(RichText::new("Add").color(crate::ui::theme::contrast_text(crate::ui::components::accent_color(ui))))
+                  .fill(crate::ui::components::accent_color(ui))
                   .min_size(egui::vec2(96.0, 30.0)),
               )
               .clicked();
@@ -109,8 +110,7 @@ impl TwoCentsApp {
             match self.try_add_household_member(&pending_name) {
               Ok(()) => status_message = Some(format!("Added '{pending_name}'.")),
               Err(err) => {
-                self.log(format!("[error] {err}"));
-                status_message = Some(err);
+                                status_message = Some(err);
               }
             }
             refocus_add_member = true;
@@ -121,13 +121,13 @@ impl TwoCentsApp {
           ui.label(
             RichText::new("Type a name, press Enter, or click Add.")
               .small()
-              .color(ui.visuals().weak_text_color()),
+              .color(crate::ui::components::fg_muted(ui)),
           );
         });
 
         if let Some(message) = &status_message {
           ui.add_space(8.0);
-          ui.label(RichText::new(message).color(ui.visuals().selection.bg_fill));
+          ui.label(RichText::new(message).color(crate::ui::components::accent_color(ui)));
         }
       });
 
@@ -141,9 +141,8 @@ impl TwoCentsApp {
         match update_self_member_name(&self.conn, self.household_id, &name) {
           Ok(()) => {
             self.reload();
-            self.log(format!("[household] updated your name to '{name}'"));
-          }
-          Err(err) => self.log(format!("[error] member save failed: {err}")),
+                      }
+          Err(_err) => {}
         }
       }
     }
@@ -151,9 +150,8 @@ impl TwoCentsApp {
       match delete_household_member(&self.conn, self.household_id, member_id) {
         Ok(()) => {
           self.reload();
-          self.log("[household] removed member");
-        }
-        Err(err) => self.log(format!("[error] remove member failed: {err}")),
+                  }
+        Err(_err) => {}
       }
     }
   }
@@ -166,7 +164,6 @@ impl TwoCentsApp {
     add_household_member(&self.conn, self.household_id, name).map_err(|err| err.to_string())?;
     self.new_member_name.clear();
     self.reload();
-    self.log(format!("[household] added member '{name}'"));
-    Ok(())
+        Ok(())
   }
 }

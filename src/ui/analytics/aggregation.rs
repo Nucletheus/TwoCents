@@ -12,6 +12,26 @@ pub struct TimeSeriesPoint {
 }
 
 #[derive(Clone)]
+pub struct TimeSeriesSegment {
+    /// Category label, e.g. "Food > Groceries".
+    pub category: String,
+    /// Amount in dollars for this category within the period.
+    pub amount: f64,
+    /// Category color, used as the bar fill. Falls back to a neutral gray
+    /// when the user has not assigned a color (e.g. a category was deleted).
+    pub color: eframe::egui::Color32,
+}
+
+#[derive(Clone)]
+pub struct TimeSeriesBucket {
+    pub date: NaiveDate,
+    pub total: f64,
+    /// Segments stacked bottom-up. Order is stable (sorted by amount desc)
+    /// so the largest slice sits at the bottom of the bar.
+    pub segments: Vec<TimeSeriesSegment>,
+}
+
+#[derive(Clone)]
 pub struct CategoryTotal {
     pub category: String,
     pub amount: f64,
@@ -68,11 +88,18 @@ pub fn parse_expense_date(date_str: &str) -> Option<NaiveDate> {
 pub fn filter_expenses(
     expenses: &[Expense],
     state: &AnalyticsState,
+    excluded_categories: &std::collections::HashSet<String>,
 ) -> Vec<Expense> {
     let (start, end) = (state.date_start, state.date_end);
-    
+
     expenses.iter()
         .filter(|exp| {
+            // ponytail: analytics are spending-only — income (positive rows)
+            // and excluded transfer/payment categories never chart.
+            if exp.amount_cents >= 0 || excluded_categories.contains(&exp.category) {
+                return false;
+            }
+
             // Date filter
             if let Some(exp_date) = parse_expense_date(&exp.date) {
                 if let Some(start_date) = start {
@@ -212,6 +239,120 @@ pub fn aggregate_time_series(
                 amount,
                 cumulative,
             }
+        })
+        .collect()
+}
+
+/// ponytail: per-period, per-category breakdown used by the time-series stacked
+/// bar chart. Walks the same period grid as `aggregate_time_series` but
+/// produces, for each period, a list of (category, amount, color) segments
+/// that sum to the period total. Categories that don't appear in a given
+/// period are omitted from that period's segments (the bar has no slice for
+/// them, naturally).
+pub fn aggregate_time_series_by_category(
+    expenses: &[Expense],
+    categories: &[Category],
+    granularity: AnalyticsGranularity,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<TimeSeriesBucket> {
+    // Build category color map (full_label -> color).
+    let cat_parents = category_parent_map(categories);
+    let mut category_colors: HashMap<String, eframe::egui::Color32> = HashMap::new();
+    for category in categories {
+        let label = category.full_label(&cat_parents);
+        category_colors.insert(label, category.color);
+    }
+    let fallback = eframe::egui::Color32::from_rgb(128, 128, 128);
+
+    // Per-period category totals.
+    let mut period_buckets: HashMap<NaiveDate, HashMap<String, f64>> = HashMap::new();
+
+    for exp in expenses {
+        if let Some(exp_date) = parse_expense_date(&exp.date) {
+            let period_start = match granularity {
+                AnalyticsGranularity::Daily => exp_date,
+                AnalyticsGranularity::Weekly => {
+                    let weekday = exp_date.weekday().num_days_from_monday();
+                    exp_date - Duration::days(weekday as i64)
+                }
+                AnalyticsGranularity::Monthly => exp_date.with_day(1).unwrap(),
+                AnalyticsGranularity::Quarterly => {
+                    let quarter_start_month = ((exp_date.month() - 1) / 3) * 3 + 1;
+                    exp_date.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
+                }
+                AnalyticsGranularity::Yearly => exp_date.with_ordinal(1).unwrap(),
+            };
+            *period_buckets
+                .entry(period_start)
+                .or_default()
+                .entry(exp.category.clone())
+                .or_insert(0.0) += exp.amount_cents as f64 / 100.0;
+        }
+    }
+
+    // Generate the same period grid `aggregate_time_series` would, so the
+    // x-axis labels match exactly.
+    let mut periods: Vec<NaiveDate> = Vec::new();
+    let mut current = match granularity {
+        AnalyticsGranularity::Daily => start,
+        AnalyticsGranularity::Weekly => {
+            let weekday = start.weekday().num_days_from_monday();
+            start - Duration::days(weekday as i64)
+        }
+        AnalyticsGranularity::Monthly => start.with_day(1).unwrap(),
+        AnalyticsGranularity::Quarterly => {
+            let quarter_start_month = ((start.month() - 1) / 3) * 3 + 1;
+            start.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
+        }
+        AnalyticsGranularity::Yearly => start.with_ordinal(1).unwrap(),
+    };
+    while current <= end {
+        periods.push(current);
+        current = match granularity {
+            AnalyticsGranularity::Daily => current + Duration::days(1),
+            AnalyticsGranularity::Weekly => current + Duration::days(7),
+            AnalyticsGranularity::Monthly => {
+                if current.month() == 12 {
+                    current.with_year(current.year() + 1).unwrap().with_month(1).unwrap()
+                } else {
+                    current.with_month(current.month() + 1).unwrap()
+                }
+            }
+            AnalyticsGranularity::Quarterly => {
+                let next_month = current.month() + 3;
+                if next_month > 12 {
+                    current.with_year(current.year() + 1).unwrap().with_month(next_month - 12).unwrap()
+                } else {
+                    current.with_month(next_month).unwrap()
+                }
+            }
+            AnalyticsGranularity::Yearly => current.with_year(current.year() + 1).unwrap(),
+        };
+    }
+
+    // Build the buckets. Empty periods still get a bucket (total 0, no
+    // segments) so the x-axis stays consistent.
+    periods
+        .into_iter()
+        .map(|period| {
+            let mut cat_totals = period_buckets.remove(&period).unwrap_or_default();
+            // Drop zero-amount entries defensively.
+            cat_totals.retain(|_, v| *v > 0.0);
+            let total: f64 = cat_totals.values().sum();
+            // Sort largest-first so the largest slice sits at the bottom of
+            // the stacked bar (consistent with the donut chart's largest-first
+            // arrangement).
+            let mut segments: Vec<TimeSeriesSegment> = cat_totals
+                .into_iter()
+                .map(|(category, amount)| TimeSeriesSegment {
+                    color: category_colors.get(&category).copied().unwrap_or(fallback),
+                    category,
+                    amount,
+                })
+                .collect();
+            segments.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap_or(std::cmp::Ordering::Equal));
+            TimeSeriesBucket { date: period, total, segments }
         })
         .collect()
 }

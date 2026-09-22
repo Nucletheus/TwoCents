@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Pos2, RichText, Stroke};
+use eframe::egui::{self, Color32, Pos2, RichText};
 
 use crate::models::*;
 use super::state::*;
@@ -12,7 +12,7 @@ pub fn render_category_breakdown_chart(
     state: &mut AnalyticsState,
 ) -> bool {
     let mut state_changed = false;
-    let filtered = filter_expenses(expenses, state);
+    let filtered = filter_expenses(expenses, state, &excluded_category_labels(categories));
     let category_totals = aggregate_by_category(&filtered, categories);
     
     if category_totals.is_empty() {
@@ -66,7 +66,7 @@ pub fn render_category_breakdown_chart(
                 egui::Align2::CENTER_CENTER,
                 total_text,
                 egui::FontId::proportional(18.0),
-                ui.visuals().text_color(),
+                crate::ui::components::fg_default(ui),
             );
         });
         
@@ -74,10 +74,10 @@ pub fn render_category_breakdown_chart(
         
         // Right side: Legend
         ui.vertical(|ui| {
-            ui.heading(RichText::new("Categories").strong());
+            crate::ui::components::heading_lg(ui, "Categories");
             ui.add_space(8.0);
             
-            ui.label(RichText::new("Click a category to filter").size(11.0).color(ui.visuals().weak_text_color()));
+            ui.label(RichText::new("Click a category to filter").size(11.0).color(crate::ui::components::fg_muted(ui)));
             ui.add_space(4.0);
             
             egui::ScrollArea::vertical()
@@ -168,9 +168,9 @@ pub fn render_category_breakdown_chart(
                     };
                     ui.label(RichText::new(format!("{} {} categories", mode_text, state.selected_categories.len()))
                         .size(11.0)
-                        .color(ui.visuals().weak_text_color()));
+                        .color(crate::ui::components::fg_muted(ui)));
                     
-                    if ui.small_button("Clear").clicked() {
+                    if crate::ui::popups::styled_button(ui, "Clear", false).clicked() {
                         state.selected_categories.clear();
                         state_changed = true;
                     }
@@ -224,6 +224,14 @@ fn draw_donut_slice(
     
     // Close the shape
     points.push(points[0]);
-    
-    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+
+    // ponytail: 1px outline on each slice in the same color, 18%
+    // darker. Defines the slice boundary so adjacent wedges read
+    // as distinct slices, not as a smooth gradient.
+    let slice_outline = crate::ui::components::darker(color, 0.18);
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::new(1.0_f32, slice_outline),
+    ));
 }

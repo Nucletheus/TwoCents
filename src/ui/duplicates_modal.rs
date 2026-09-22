@@ -1,7 +1,8 @@
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use rusqlite::params;
 use crate::models::*;
 use crate::db::*;
+use crate::ui::popups::styled_button;
 use crate::ui::widgets::*;
 use crate::TwoCentsApp;
 
@@ -47,28 +48,34 @@ impl TwoCentsApp {
 
         // ── Header row ───────────────────────────────────────────────────────
         ui.horizontal(|ui| {
-          ui.label(RichText::new("Review Possible Duplicates").color(ui.visuals().text_color()));
+          // ponytail: heading + secondary text, Notion hierarchy.
+          ui.vertical(|ui| {
+            crate::ui::components::heading_lg(ui, "Review Possible Duplicates");
+            crate::ui::components::label_muted(
+              ui,
+              "Edits and deletions are staged in memory. Click 'Save and Resolve Duplicates' to write them to your database.",
+            );
+          });
           let remaining_width = ui.available_width();
           ui.allocate_ui_with_layout(
             egui::vec2(remaining_width, ui.spacing().interact_size.y),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-              if ui.button("Cancel").clicked() {
+              if styled_button(ui, "Cancel", false).clicked() {
                 self.show_duplicate_review = false;
               }
-              if ui.add(egui::Button::new("Save and Resolve Duplicates").fill(ui.visuals().selection.bg_fill)).clicked() {
+              if styled_button(ui, "Save and Resolve Duplicates", true).clicked() {
                 self.save_duplicates();
               }
             },
           );
         });
         ui.add_space(4.0);
-        ui.label(RichText::new("Edits and deletions are staged in memory. Click 'Save and Resolve Duplicates' to write them to your database.").color(ui.visuals().text_color()));
-        ui.add_space(8.0);
-
-        ui.label(
+        crate::ui::components::label_muted(
+          ui,
           "Use standard keys: Delete key to remove rows. Double click or press F2 to edit. Tab or Enter picks autocomplete.",
         );
+        ui.add_space(8.0);
 
         let category_candidates = self.cached_category_candidates.clone();
         let member_candidates = self.cached_member_candidates.clone();
@@ -76,15 +83,12 @@ impl TwoCentsApp {
         let description_candidates = self.cached_description_candidates.clone();
         let mut autocomplete_selection = self.autocomplete_selection;
 
-        egui::Frame::new()
-          .fill(ui.visuals().window_fill)
-          .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
-          .corner_radius(6.0)
-          .inner_margin(egui::Margin::same(6))
+        // ponytail: shared grid_table_frame so the three grids have identical chrome.
+        crate::ui::components::grid_table_frame(ui)
           .show(ui, |ui| {
             let old_spacing = ui.spacing().item_spacing;
             ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
-            
+
             let grid_res = crate::ui::grid::render_grid(
               ui,
               &mut self.duplicate_rows,
@@ -158,9 +162,12 @@ impl TwoCentsApp {
                   row.date = format_date(&row.date).unwrap_or_else(|| row.date.clone());
                 }
                 if field == "amount" {
-                  if let Some(cents) = parse_amount_cents(&row.amount_input) {
-                    row.amount_cents = cents;
-                    row.amount_input = money(cents).replace('$', "");
+                  if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
+                    // ponytail: sign is a function of category; excluded rows
+                    // keep their real amount.
+                    let sign = category_sign(&categories, &row.category);
+                    row.amount_cents = if sign == 1 { magnitude } else { -magnitude };
+                    row.amount_input = money(row.amount_cents).replace('$', "");
                   }
                 }
               }
@@ -173,6 +180,15 @@ impl TwoCentsApp {
                   let typed = row.category.clone();
                   if let Some(matched) = find_category_by_label(&categories, &typed) {
                     row.category = matched.full_label(&parents);
+                    // ponytail: sign is a function of category — re-derive
+                    // on recategorize (same as grid/review commits), else
+                    // resolving duplicates would save a stale sign. Excluded
+                    // rows keep their real amount.
+                    if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
+                      let sign = category_sign(&categories, &row.category);
+                      row.amount_cents = if sign == 1 { magnitude } else { -magnitude };
+                      row.amount_input = money(row.amount_cents).replace('$', "");
+                    }
                   } else {
                     row.category.clear();
                   }
@@ -191,8 +207,7 @@ impl TwoCentsApp {
 
   fn save_duplicates(&mut self) {
     if self.conn.execute("BEGIN IMMEDIATE", []).is_err() {
-      self.log("[error] begin duplicates transaction failed");
-      return;
+            return;
     }
 
     let mut ok = true;
@@ -204,8 +219,7 @@ impl TwoCentsApp {
         params![id, self.household_id]
       ) {
         ok = false;
-        self.log(format!("[error] delete duplicates failed: {err}"));
-        break;
+                break;
       }
     }
 
@@ -239,8 +253,7 @@ impl TwoCentsApp {
           ]
         ) {
           ok = false;
-          self.log(format!("[error] update duplicate failed: {err}"));
-          break;
+                    break;
         }
       }
     }
@@ -248,14 +261,12 @@ impl TwoCentsApp {
     if ok {
       if self.conn.execute("COMMIT", []).is_err() {
         let _ = self.conn.execute("ROLLBACK", []);
-        self.log("[error] commit duplicates transaction failed");
-      } else {
+              } else {
         self.duplicate_rows.clear();
         self.duplicate_deleted_ids.clear();
         self.show_duplicate_review = false;
         self.reload();
-        self.log("[duplicates] successfully saved changes and resolved duplicates");
-      }
+              }
     } else {
       let _ = self.conn.execute("ROLLBACK", []);
     }
@@ -272,6 +283,5 @@ impl TwoCentsApp {
     }
     self.rebuild_sorted_duplicate_indices();
     self.duplicate_grid_state.clear_selection();
-    self.log(format!("[duplicates] removed {} row(s) from duplicates list (staged for deletion)", sorted_indices.len()));
-  }
+      }
 }

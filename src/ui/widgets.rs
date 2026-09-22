@@ -15,21 +15,33 @@ pub const MEMBER_PICKER_MIN_WIDTH: f32 = 140.0;
 pub fn grid_header(ui: &mut egui::Ui, label: &str) -> egui::Response {
   let width = ui.available_width().max(1.0);
   let (rect, response) = ui.allocate_exact_size(egui::vec2(width, GRID_HEADER_HEIGHT), egui::Sense::click());
-  
-  let fill_color = ui.visuals().widgets.noninteractive.bg_fill.gamma_multiply(0.5);
-  
-  ui.painter().rect_filled(rect, 0.0, fill_color);
-  ui.painter().rect_stroke(
+
+  // ponytail: header sits INSIDE grid_table_frame (1px stroke, 6px radius,
+  // 2px inner margin). The frame already owns the top, left, and right
+  // edges — drawing our own top border put a 1px line directly under the
+  // frame's 1px stroke, producing a visible 2px doubled line. Drop the
+  // top border; the frame provides it. Keep the rounded top corners so
+  // the bg_subtle fill matches the frame's radius. Add a 1px bottom
+  // border so the header reads as a sub-band separated from the data
+  // rows below.
+  let fill_color = crate::ui::components::bg_subtle(ui);
+  let border_color = crate::ui::components::border_default(ui);
+  let radius = crate::ui::theme_tokens::RADIUS_MD as u8;
+  ui.painter().rect_filled(
     rect,
-    0.0,
-    egui::Stroke::new(1.5, ui.visuals().widgets.noninteractive.bg_stroke.color),
-    egui::StrokeKind::Inside,
+    egui::CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 },
+    fill_color,
   );
-  
-  let text_color = ui.visuals().text_color();
-  
+  // Bottom edge only — 1px line separating the header from the data rows.
+  ui.painter().line_segment(
+    [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
+    egui::Stroke::new(1.0_f32, border_color),
+  );
+
+  let text_color = crate::ui::components::fg_default(ui);
+
   ui.painter().text(
-    egui::pos2(rect.left() + 4.0, rect.center().y),
+    egui::pos2(rect.left() + crate::ui::theme_tokens::SPACE_2, rect.center().y),
     egui::Align2::LEFT_CENTER,
     label,
     egui::FontId::proportional(13.0),
@@ -109,7 +121,7 @@ pub fn grid_commit_targets(
   active_row: usize,
 ) -> Vec<usize> {
   if let Some(sel) = selection {
-    if sel.column == column && sel.rows.len() > 1 && sel.rows.contains(&active_row) {
+    if sel.column == column && sel.rows.len() > 1 && sel.rows.binary_search(&active_row).is_ok() {
       return sel.rows.clone();
     }
   }
@@ -134,15 +146,17 @@ pub fn grid_text_field_committed(ui: &egui::Ui, response: &egui::Response, blur_
 }
 
 pub fn grid_row_selected(selection: &Option<GridSelection>, column: GridColumn, row: usize) -> bool {
+  // ponytail: binary_search — rows are kept sorted; contains() was O(k) per
+  // cell per frame during drag-select.
   selection
     .as_ref()
-    .is_some_and(|sel| sel.column == column && sel.rows.contains(&row))
+    .is_some_and(|sel| sel.column == column && sel.rows.binary_search(&row).is_ok())
 }
 
 pub fn grid_row_has_any_selection(selection: &Option<GridSelection>, row: usize) -> bool {
   selection
     .as_ref()
-    .is_some_and(|sel| sel.rows.contains(&row))
+    .is_some_and(|sel| sel.rows.binary_search(&row).is_ok())
 }
 
 pub fn grid_selection_anchor(selection: &Option<GridSelection>) -> Option<(GridColumn, usize)> {
@@ -214,27 +228,30 @@ pub fn paint_grid_cell_highlight(
   if !ui.is_rect_visible(cell_rect) {
     return;
   }
+  // ponytail: route cell-paint colors through the components palette so
+  // every cell reacts to the same theme changes as the rest of the UI.
+  let sel = crate::ui::components::accent_color(ui);
   if dragging && selected {
-    ui.painter().rect_filled(cell_rect, 0.0, Color32::from_rgba_unmultiplied(ui.visuals().selection.bg_fill.r(), ui.visuals().selection.bg_fill.g(), ui.visuals().selection.bg_fill.b(), 40));
+    ui.painter().rect_filled(cell_rect, 0.0, Color32::from_rgba_unmultiplied(sel.r(), sel.g(), sel.b(), 40));
   } else if selected {
-    ui.painter().rect_filled(cell_rect, 0.0, Color32::from_rgba_unmultiplied(ui.visuals().selection.bg_fill.r(), ui.visuals().selection.bg_fill.g(), ui.visuals().selection.bg_fill.b(), 15));
+    ui.painter().rect_filled(cell_rect, 0.0, Color32::from_rgba_unmultiplied(sel.r(), sel.g(), sel.b(), 15));
   } else if row_has_selection {
     // Subtle "grayed out" highlight for non-selected columns in a selected row
-    let ghost = ui.visuals().widgets.noninteractive.bg_fill.linear_multiply(0.08);
+    let ghost = crate::ui::components::bg_hover(ui).linear_multiply(0.5);
     ui.painter().rect_filled(cell_rect, 0.0, ghost);
   }
   if editing {
     ui.painter().rect_stroke(
       cell_rect.expand(1.0),
       0.0,
-      egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+      egui::Stroke::new(2.0_f32, sel),
       egui::StrokeKind::Outside,
     );
   } else if selected {
     ui.painter().rect_stroke(
       cell_rect,
       0.0,
-      egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+      egui::Stroke::new(1.0_f32, crate::ui::components::border_default(ui)),
       egui::StrokeKind::Inside,
     );
   }
@@ -259,7 +276,7 @@ pub fn process_grid_column_cell(
   let response = ui.interact(cell_rect, cell_id, egui::Sense::click_and_drag());
 
   if response.clicked() {
-    let already_selected = selection.as_ref().map_or(false, |s| s.column == column && s.rows.contains(&row));
+    let already_selected = selection.as_ref().map_or(false, |s| s.column == column && s.rows.binary_search(&row).is_ok());
     if !already_selected {
       *selection = Some(GridSelection {
         column,
@@ -273,7 +290,7 @@ pub fn process_grid_column_cell(
   }
 
   if response.double_clicked() {
-    let already_selected = selection.as_ref().map_or(false, |s| s.column == column && s.rows.contains(&row));
+    let already_selected = selection.as_ref().map_or(false, |s| s.column == column && s.rows.binary_search(&row).is_ok());
     if !already_selected {
       *selection = Some(GridSelection {
         column,
@@ -286,7 +303,12 @@ pub fn process_grid_column_cell(
     ui.ctx().request_repaint();
   }
 
-  if response.drag_started() {
+  // ponytail: start a drag only when none is active — a second cell firing
+  // drag_started mid-gesture re-anchored the drag (anchor/end reset,
+  // selection collapse, "skipping"). ender removed: egui can reassign the
+  // dragged id mid-gesture, firing spurious drag_stopped that killed the
+  // drag; finish_grid_drag already ends it on true button release.
+  if response.drag_started() && drag.is_none() {
     surrender_focused_widget(ui.ctx());
     *edit_cell = None;
     *drag = Some(GridSelectDrag {
@@ -298,10 +320,6 @@ pub fn process_grid_column_cell(
       column,
       rows: vec![row],
     });
-  }
-
-  if response.drag_stopped() {
-    *drag = None;
   }
 }
 
@@ -374,7 +392,7 @@ pub fn member_picker_max_height(member_count: usize) -> f32 {
 pub fn measure_picker_label_width(ui: &egui::Ui, text: &str) -> f32 {
   let font_id = egui::TextStyle::Body.resolve(ui.style());
   ui.painter()
-    .layout_no_wrap(text.to_owned(), font_id, ui.visuals().text_color())
+    .layout_no_wrap(text.to_owned(), font_id, crate::ui::components::fg_default(ui))
     .size()
     .x
 }
@@ -391,7 +409,7 @@ pub fn category_picker_menu_width(ui: &egui::Ui, categories: &[Category], cell_w
 pub fn picker_popup_frame(style: &egui::Style) -> egui::Frame {
   egui::Frame::new()
     .fill(style.visuals.window_fill)
-    .stroke(egui::Stroke::new(1.0, style.visuals.widgets.noninteractive.bg_stroke.color))
+    .stroke(egui::Stroke::new(1.0_f32, style.visuals.widgets.noninteractive.bg_stroke.color))
     .corner_radius(4.0)
     .inner_margin(egui::Margin::same(4))
     .shadow(egui::Shadow::NONE)
@@ -447,7 +465,7 @@ pub fn grid_text_edit_cell(
     .desired_width(f32::INFINITY)
     .frame(egui::Frame::NONE)
     .margin(egui::Margin::same(0))
-    .text_color(ui.visuals().text_color())
+    .text_color(crate::ui::components::fg_default(ui))
     .background_color(Color32::TRANSPARENT)
     .show(ui);
   let response = output.response.response.clone();
@@ -455,7 +473,7 @@ pub fn grid_text_edit_cell(
     ui.painter().rect_stroke(
       response.rect.expand(2.0),
       0.0,
-      egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+      egui::Stroke::new(2.0_f32, crate::ui::components::accent_color(ui)),
       egui::StrokeKind::Outside,
     );
   }
@@ -537,8 +555,80 @@ pub fn show_cell_autocomplete_popup(
   picked
 }
 
+/// ponytail: combo-style autocomplete — same interaction as the grid cell
+/// popup, but empty text lists EVERY candidate, typing switches to
+/// contains-search, and `force_open` (a ▾ toggle) shows the list without
+/// focus. Selection index lives in egui temp state, so callers need no
+/// extra field.
+pub fn show_autocomplete_popup(
+  ui: &mut egui::Ui,
+  response: &egui::Response,
+  value: &str,
+  candidates: &[String],
+  force_open: bool,
+  anchor: &egui::Response,
+) -> Option<String> {
+  if !grid_cell_active(response) && !force_open {
+    return None;
+  }
+  let prefix = value.trim().to_lowercase();
+  // ponytail: ▾ (force_open) always lists every candidate — a combo's arrow
+  // ignores the current text; typed search stays contains-based.
+  let suggestions: Vec<String> = if force_open {
+    candidates.iter().filter(|candidate| !candidate.trim().is_empty()).cloned().collect()
+  } else {
+    candidates.iter()
+      .filter(|candidate| {
+        let candidate_lower = candidate.to_lowercase();
+        !candidate_lower.is_empty()
+          && (prefix.is_empty() || (candidate_lower.contains(&prefix) && candidate_lower != prefix))
+      })
+      .cloned()
+      .collect()
+  };
+  if suggestions.is_empty() {
+    return None;
+  }
 
+  let selection_id = response.id.with("autocomplete_selection");
+  let mut selected_index = ui.ctx().data_mut(|d| d.get_temp::<usize>(selection_id).unwrap_or(0));
+  if selected_index >= suggestions.len() {
+    selected_index = 0;
+  }
+  if response.has_focus() {
+    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+      selected_index = (selected_index + 1).min(suggestions.len() - 1);
+    }
+    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+      selected_index = selected_index.saturating_sub(1);
+    }
+  }
 
+  let mut picked = None;
+  if autocomplete_accept_key_pressed(ui, response) {
+    picked = Some(suggestions[selected_index].clone());
+  }
+
+  let _ = egui::Popup::from_response(anchor)
+    .gap(2.0)
+    .frame(picker_popup_frame(ui.style()))
+    .show(|ui| {
+      ui.set_min_width(anchor.rect.width().max(140.0));
+      for (idx, suggestion) in suggestions.iter().enumerate() {
+        let highlighted = idx == selected_index;
+        let btn = autocomplete_suggestion_button(ui, suggestion, highlighted);
+        if btn.hovered() {
+          selected_index = idx;
+        }
+        if btn.clicked() {
+          picked = Some(suggestion.clone());
+        }
+      }
+    });
+  ui.ctx().data_mut(|d| d.insert_temp(selection_id, selected_index));
+
+  picked
+}
 
 pub fn unique_nonempty_values<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
   let mut unique = Vec::new();
@@ -552,12 +642,12 @@ pub fn unique_nonempty_values<'a>(values: impl Iterator<Item = &'a str>) -> Vec<
 }
 
 pub fn autocomplete_suggestion_button(ui: &mut egui::Ui, label: &str, highlighted: bool) -> egui::Response {
-  let text = RichText::new(label).color(ui.visuals().text_color());
+  let text = RichText::new(label).color(crate::ui::components::fg_default(ui));
   ui.add_sized(
     [ui.available_width(), 20.0],
     egui::Button::new(text)
-      .fill(if highlighted { ui.visuals().widgets.hovered.bg_fill } else { ui.visuals().window_fill })
-      .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT)),
+      .fill(if highlighted { crate::ui::components::bg_hover(ui) } else { crate::ui::components::bg_canvas(ui) })
+      .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT)),
   )
 }
 
@@ -607,7 +697,7 @@ pub fn category_cell_ui(
       .desired_width((cell_rect.width() - chevron_w).max(0.0))
       .frame(egui::Frame::NONE)
       .margin(egui::Margin { left: 3, right: 3, top: 0, bottom: 0 })
-      .text_color(ui.visuals().text_color())
+      .text_color(crate::ui::components::fg_default(ui))
       .background_color(Color32::TRANSPARENT)
       .show(ui);
 
@@ -627,14 +717,14 @@ pub fn category_cell_ui(
       let divider = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 22);
       ui.painter().line_segment(
         [chevron_rect.left_top(), chevron_rect.left_bottom()],
-        egui::Stroke::new(0.5, divider),
+        egui::Stroke::new(0.5_f32, divider),
       );
       if chevron_resp.hovered() {
-        let hover = ui.visuals().selection.bg_fill.linear_multiply(0.12);
+        let hover = crate::ui::components::accent_color(ui).linear_multiply(0.12);
         ui.painter().rect_filled(chevron_rect, 0.0, hover);
       }
       let chevron_color = if chevron_resp.hovered() {
-        ui.visuals().selection.bg_fill
+        crate::ui::components::accent_color(ui)
       } else {
         bg
       };
@@ -648,7 +738,7 @@ pub fn category_cell_ui(
       ui.painter().rect_stroke(
         text.rect.expand(1.0),
         0.0,
-        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+        egui::Stroke::new(2.0_f32, crate::ui::components::accent_color(ui)),
         egui::StrokeKind::Outside,
       );
     }
@@ -672,14 +762,14 @@ pub fn member_none_row_selectable(ui: &mut egui::Ui, selected: bool) -> bool {
   let (rect, response) = ui.allocate_exact_size(egui::vec2(row_w, PICKER_ROW_HEIGHT), egui::Sense::click());
   if ui.is_rect_visible(rect) {
     if response.hovered() || selected {
-      ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+      ui.painter().rect_filled(rect, 2.0, crate::ui::components::bg_hover(ui));
     }
     ui.painter().text(
       egui::pos2(rect.left() + 8.0, rect.center().y),
       egui::Align2::LEFT_CENTER,
       "(none)",
       egui::FontId::proportional(13.0),
-      ui.visuals().text_color(),
+      crate::ui::components::fg_default(ui),
     );
   }
   response.clicked()
@@ -690,7 +780,7 @@ pub fn member_row_selectable(ui: &mut egui::Ui, member: &HouseholdMember, select
   let (rect, response) = ui.allocate_exact_size(egui::vec2(row_w, PICKER_ROW_HEIGHT), egui::Sense::click());
   if ui.is_rect_visible(rect) {
     if response.hovered() || selected {
-      ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+      ui.painter().rect_filled(rect, 2.0, crate::ui::components::bg_hover(ui));
     }
     let swatch = egui::Rect::from_min_size(
       rect.min + egui::vec2(6.0, (PICKER_ROW_HEIGHT - 12.0) * 0.5),
@@ -702,7 +792,7 @@ pub fn member_row_selectable(ui: &mut egui::Ui, member: &HouseholdMember, select
       egui::Align2::LEFT_CENTER,
       &member.name,
       egui::FontId::proportional(13.0),
-      ui.visuals().text_color(),
+      crate::ui::components::fg_default(ui),
     );
   }
   response.clicked()
@@ -710,9 +800,7 @@ pub fn member_row_selectable(ui: &mut egui::Ui, member: &HouseholdMember, select
 
 fn contrast_on_accent(ui: &egui::Ui, selected: bool) -> Option<Color32> {
   if selected {
-    let bg = ui.visuals().selection.bg_fill;
-    let lum = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
-    Some(if lum > 150.0 { Color32::BLACK } else { Color32::WHITE })
+    Some(crate::ui::theme::contrast_text(crate::ui::components::accent_color(ui)))
   } else { None }
 }
 
@@ -750,7 +838,7 @@ pub fn category_picker_row(ui: &mut egui::Ui, label: &str, bg: Color32, selected
   if ui.is_rect_visible(rect) {
     ui.painter().rect_filled(rect, 0.0, bg);
     if response.hovered() || selected {
-      let overlay = ui.visuals().selection.bg_fill.linear_multiply(0.14);
+      let overlay = crate::ui::components::accent_color(ui).linear_multiply(0.14);
       ui.painter().rect_filled(rect, 0.0, overlay);
     }
     ui.painter().text(
@@ -765,15 +853,14 @@ pub fn category_picker_row(ui: &mut egui::Ui, label: &str, bg: Color32, selected
 }
 
 pub fn household_panel<R>(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
-  ui.add_space(10.0);
-  egui::Frame::new()
-    .fill(ui.visuals().window_fill)
-    .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_fill))
-    .corner_radius(8.0)
-    .inner_margin(egui::Margin::symmetric(14, 10))
+  ui.add_space(crate::ui::theme_tokens::SPACE_3);
+  crate::ui::components::card_subtle(ui)
+    .inner_margin(egui::Margin::symmetric(crate::ui::theme_tokens::SPACE_3 as i8, crate::ui::theme_tokens::SPACE_2 as i8))
     .show(ui, |ui| {
-      ui.label(RichText::new(title).strong().color(ui.visuals().text_color()));
-      ui.add_space(8.0);
+      // ponytail: section_header reads as a quiet marker. The old strong+fg_default
+      // label was visually identical to the page heading, which fought the hierarchy.
+      crate::ui::components::section_header(ui, title);
+      ui.add_space(crate::ui::theme_tokens::SPACE_2);
       add_contents(ui)
     })
     .inner
@@ -787,7 +874,7 @@ pub fn color_swatch_button(ui: &mut egui::Ui, color: Color32) -> egui::Response 
     ui.painter().rect_stroke(
       rect,
       2.0,
-      egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+      egui::Stroke::new(1.0_f32, crate::ui::components::border_default(ui)),
       egui::StrokeKind::Inside,
     );
   }
@@ -807,6 +894,7 @@ pub fn sorted_grid_indices<R: GridRow>(
       ExpenseSortColumn::Category => rows[a].row_category().to_lowercase().cmp(&rows[b].row_category().to_lowercase()),
       ExpenseSortColumn::Vendor => rows[a].row_vendor().to_lowercase().cmp(&rows[b].row_vendor().to_lowercase()),
       ExpenseSortColumn::Description => rows[a].row_description().to_lowercase().cmp(&rows[b].row_description().to_lowercase()),
+      ExpenseSortColumn::Account => rows[a].row_account().to_lowercase().cmp(&rows[b].row_account().to_lowercase()),
     };
     if sort.ascending { cmp } else { cmp.reverse() }
   });
@@ -862,15 +950,15 @@ pub fn ui_grid_date_edit(
         
     let response = ui.push_id(cell_id.with("datepicker"), |ui| {
         ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-        ui.style_mut().visuals.widgets.hovered.bg_fill = ui.visuals().widgets.hovered.bg_fill;
-        ui.style_mut().visuals.widgets.active.bg_fill = ui.visuals().widgets.hovered.bg_fill;
+        ui.style_mut().visuals.widgets.hovered.bg_fill = crate::ui::components::bg_hover(ui);
+        ui.style_mut().visuals.widgets.active.bg_fill = crate::ui::components::bg_hover(ui);
         ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
         ui.style_mut().visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
         ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
         ui.style_mut().spacing.button_padding = egui::vec2(4.0, 0.0);
         
-        ui.style_mut().visuals.widgets.inactive.fg_stroke.color = ui.visuals().text_color();
-        ui.style_mut().visuals.widgets.hovered.fg_stroke.color = ui.visuals().text_color();
+        ui.style_mut().visuals.widgets.inactive.fg_stroke.color = crate::ui::components::fg_default(ui);
+        ui.style_mut().visuals.widgets.hovered.fg_stroke.color = crate::ui::components::fg_default(ui);
         ui.style_mut().spacing.interact_size.y = 18.0;
         ui.add(egui_extras::DatePickerButton::new(&mut parsed_date).highlight_weekends(false))
     }).inner;
@@ -897,20 +985,18 @@ pub fn ui_grid_date_edit(
 
 
 
+/// Modal window frame: 1px border, 8px radius, 24px padding, drop shadow.
+/// ponytail: thin shim over `components::modal` so existing call sites
+/// keep their `&ctx` signature.
 pub fn themed_modal_frame(ctx: &egui::Context) -> egui::Frame {
-  egui::Frame::window(&ctx.global_style())
-    .fill(ctx.global_style().visuals.panel_fill)
-    .stroke(egui::Stroke::new(2.0, ctx.global_style().visuals.selection.bg_fill))
-    .corner_radius(10.0)
-    .inner_margin(egui::Margin::symmetric(14, 12))
+  let _ = ctx;
+  crate::ui::components::modal()
 }
 
-pub fn themed_panel_frame(style: &egui::Style) -> egui::Frame {
-  egui::Frame::new()
-    .fill(style.visuals.window_fill)
-    .stroke(egui::Stroke::new(1.0, style.visuals.widgets.noninteractive.bg_stroke.color))
-    .corner_radius(8.0)
-    .inner_margin(egui::Margin::symmetric(10, 8))
+pub fn themed_panel_frame(_style: &egui::Style) -> egui::Frame {
+  // ponytail: shim over `components::card_subtle` for backwards compat.
+  // The Style arg is ignored; the active palette supplies the colors.
+  crate::ui::components::card_subtle_dummy()
 }
 
 
@@ -931,21 +1017,21 @@ pub fn accent_palette_swatch_button(
       painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+        egui::Stroke::new(2.0_f32, crate::ui::components::accent_color(ui)),
         egui::StrokeKind::Outside,
       );
     } else if response.hovered() {
       painter.rect_stroke(
         rect,
         2.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.hovered.fg_stroke.color),
+        egui::Stroke::new(1.0_f32, crate::ui::components::border_strong(ui)),
         egui::StrokeKind::Outside,
       );
     } else {
       painter.rect_stroke(
         rect,
         2.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::Stroke::new(1.0_f32, crate::ui::components::border_default(ui)),
         egui::StrokeKind::Inside,
       );
     }
@@ -955,7 +1041,7 @@ pub fn accent_palette_swatch_button(
 
 pub fn accent_color_picker_ui(ui: &mut egui::Ui, color: &mut Color32) -> bool {
   let mut changed = false;
-  ui.label(RichText::new("Choose an accent color").small().color(ui.visuals().text_color()));
+  ui.label(RichText::new("Choose an accent color").small().color(crate::ui::components::fg_default(ui)));
   ui.add_space(4.0);
 
   const COLS: usize = 6;
@@ -989,7 +1075,8 @@ pub fn accent_color_picker_ui(ui: &mut egui::Ui, color: &mut Color32) -> bool {
 
 pub fn grid_column_next(column: GridColumn) -> Option<GridColumn> {
   match column {
-    GridColumn::Date => Some(GridColumn::Amount),
+    GridColumn::Date => Some(GridColumn::Account),
+    GridColumn::Account => Some(GridColumn::Amount),
     GridColumn::Amount => Some(GridColumn::Member),
     GridColumn::Member => Some(GridColumn::Category),
     GridColumn::Category => Some(GridColumn::Vendor),
@@ -1001,7 +1088,8 @@ pub fn grid_column_next(column: GridColumn) -> Option<GridColumn> {
 pub fn grid_column_prev(column: GridColumn) -> Option<GridColumn> {
   match column {
     GridColumn::Date => None,
-    GridColumn::Amount => Some(GridColumn::Date),
+    GridColumn::Account => Some(GridColumn::Date),
+    GridColumn::Amount => Some(GridColumn::Account),
     GridColumn::Member => Some(GridColumn::Amount),
     GridColumn::Category => Some(GridColumn::Member),
     GridColumn::Vendor => Some(GridColumn::Category),
@@ -1053,7 +1141,7 @@ pub fn expense_grid_selection_status(ui: &mut egui::Ui, selection: &Option<GridS
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(12.0),
-        ui.visuals().text_color(),
+        crate::ui::components::fg_default(ui),
       );
     }
   }
@@ -1157,6 +1245,14 @@ pub fn commit_grid_cell<R: GridRow>(
       for &t in &targets {
         if let Some(r) = rows.get_mut(t) {
           *r.row_description_mut() = value.clone();
+        }
+      }
+    }
+    GridColumn::Account => {
+      let value = source.row_account().to_string();
+      for &t in &targets {
+        if let Some(r) = rows.get_mut(t) {
+          *r.row_account_mut() = value.clone();
         }
       }
     }

@@ -2,9 +2,6 @@ use chrono::Datelike;
 use eframe::egui::{self, Color32, RichText, Stroke};
 use crate::models::*;
 use crate::db::*;
-use crate::ui::theme;
-
-
 fn clip_text(ui: &mut egui::Ui, cell: egui::Rect, p: egui::Pos2, a: egui::Align2, t: &str, f: egui::FontId, c: Color32) {
   let old = ui.clip_rect();
   ui.set_clip_rect(cell.intersect(old));
@@ -27,7 +24,7 @@ fn week_range(year: i32, week: u32) -> (chrono::NaiveDate, chrono::NaiveDate) {
 
 impl TwoCentsApp {
   pub fn ui_budgets(&mut self, ui: &mut egui::Ui) {
-    ui.heading("Budgets");
+    crate::ui::components::heading_lg(ui, "Budgets");
     ui.add_space(8.0);
 
     // 1. Timeframe / Granularity Toggles at the Top
@@ -66,7 +63,7 @@ impl TwoCentsApp {
     ui.horizontal_wrapped(|ui| {
       ui.style_mut().spacing.button_padding = egui::vec2(10.0, 6.0);
       
-      let prev_clicked = ui.button(RichText::new("‹").size(16.0)).clicked();
+      let prev_clicked = crate::ui::popups::styled_button(ui, "‹", false).clicked();
       
       // Build title text for the fixed-width area
       let title_text = match self.budget_granularity {
@@ -102,11 +99,11 @@ impl TwoCentsApp {
         egui::Align2::CENTER_CENTER,
         &title_text,
         egui::FontId::proportional(16.0),
-        ui.visuals().text_color(),
+        crate::ui::components::fg_default(ui),
       );
       
-      let next_clicked = ui.button(RichText::new("›").size(16.0)).clicked();
-      let snap_clicked = ui.button(RichText::new("◎").size(16.0))
+      let next_clicked = crate::ui::popups::styled_button(ui, "›", false).clicked();
+      let snap_clicked = crate::ui::popups::styled_button(ui, "◎", false)
         .on_hover_text("Snap to current period")
         .clicked();
       
@@ -218,7 +215,10 @@ impl TwoCentsApp {
           BudgetGranularity::Yearly => format!("Copy Limits from {}", prev_year),
         };
         
-        if ui.button(copy_label).on_hover_text("Copy all budget allocations from the previous period to the current period.").clicked() {
+        if crate::ui::popups::styled_button(ui, &copy_label, false)
+          .on_hover_text("Copy all budget allocations from the previous period to the current period.")
+          .clicked()
+        {
           let mut copied_count = 0;
 
           // Primary: copy yearly caps from previous year's snapshots
@@ -245,14 +245,9 @@ impl TwoCentsApp {
                 BudgetGranularity::Weekly => 100 + self.budget_week as i32,
               };
               for pb in prev_budgets {
-                if let Ok(_) = save_budget(&self.conn, self.household_id, &pb.category, pb.amount_cents, self.budget_year, current_period_code) {
-                  copied_count += 1;
-                }
+                let _ = save_budget(&self.conn, self.household_id, &pb.category, pb.amount_cents, self.budget_year, current_period_code);
               }
-              self.log(format!("[budgets] copied {copied_count} limits from previous period (legacy)"));
             }
-          } else {
-            self.log(format!("[budgets] carried forward {copied_count} budget(s) from {prev_year} to {}", self.budget_year));
           }
 
           self.reload();
@@ -263,8 +258,18 @@ impl TwoCentsApp {
     ui.add_space(10.0);
 
     // 3. Compute Actual Spent per category dynamically based on active timeframe
+    // ponytail: spending = debit rows only, magnitude — income (positive) and
+    // excluded transfer/payment categories never enter budget math.
+    let excluded_categories = excluded_category_labels(&self.categories);
     let assignable_categories = category_assignable_labels(&self.categories);
     let mut spent_map = std::collections::HashMap::new();
+
+    let accumulate = |exp: &crate::models::Expense, spent_map: &mut std::collections::HashMap<String, i64>| {
+      if exp.amount_cents >= 0 || excluded_categories.contains(&exp.category) {
+        return;
+      }
+      *spent_map.entry(exp.category.clone()).or_insert(0) += -exp.amount_cents;
+    };
 
     match self.budget_granularity {
       BudgetGranularity::Weekly => {
@@ -272,7 +277,7 @@ impl TwoCentsApp {
         for exp in &self.expenses {
           if let Ok(exp_date) = chrono::NaiveDate::parse_from_str(&exp.date, "%Y-%m-%d") {
             if exp_date >= start_date && exp_date <= end_date {
-              *spent_map.entry(exp.category.clone()).or_insert(0) += exp.amount_cents;
+              accumulate(exp, &mut spent_map);
             }
           }
         }
@@ -281,7 +286,7 @@ impl TwoCentsApp {
         let prefix = format!("{}-{:02}", self.budget_year, self.budget_month);
         for exp in &self.expenses {
           if exp.date.starts_with(&prefix) {
-            *spent_map.entry(exp.category.clone()).or_insert(0) += exp.amount_cents;
+            accumulate(exp, &mut spent_map);
           }
         }
       }
@@ -291,7 +296,7 @@ impl TwoCentsApp {
         let prefix3 = format!("{}-{:02}", self.budget_year, (self.budget_quarter - 1) * 3 + 3);
         for exp in &self.expenses {
           if exp.date.starts_with(&prefix1) || exp.date.starts_with(&prefix2) || exp.date.starts_with(&prefix3) {
-            *spent_map.entry(exp.category.clone()).or_insert(0) += exp.amount_cents;
+            accumulate(exp, &mut spent_map);
           }
         }
       }
@@ -299,7 +304,7 @@ impl TwoCentsApp {
         let prefix = format!("{}-", self.budget_year);
         for exp in &self.expenses {
           if exp.date.starts_with(&prefix) {
-            *spent_map.entry(exp.category.clone()).or_insert(0) += exp.amount_cents;
+            accumulate(exp, &mut spent_map);
           }
         }
       }
@@ -315,61 +320,39 @@ impl TwoCentsApp {
     }
     let remaining_overall = total_budgeted - total_spent;
 
-    // Render cards
-    let card_fill = ui.visuals().widgets.noninteractive.bg_fill;
-    let card_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-    let text_col = ui.visuals().text_color();
-    let success_col = theme::current_success();
-    let error_col = theme::current_error();
+    // ponytail: extracted summary-card helper. Three near-identical Frame::default
+    // blocks reduced to one helper called three times. Caller passes the
+    // themed label + amount + optional color override for the amount.
+    // Success/error overrides route through components::success_color/error_color
+    // so the "remaining overall" green/red matches the rest of the app.
     let total_w = ui.available_width();
     let card_content_w = ((total_w - 72.0) / 3.0).max(20.0); // 72 = 3 frames × 24px inner margin
+    let render_card = |ui: &mut egui::Ui, label: &str, amount: i64, color: Option<egui::Color32>| {
+      crate::ui::components::card(ui)
+        .show(ui, |ui| {
+          ui.set_width(card_content_w);
+          ui.vertical(|ui| {
+            crate::ui::components::label_faint(ui, label);
+            ui.add_space(4.0);
+            let amount_text = money(amount);
+            let rt = match color {
+              Some(c) => egui::RichText::new(amount_text).size(20.0).strong().color(c),
+              None => egui::RichText::new(amount_text).size(20.0).strong().color(crate::ui::components::fg_default(ui)),
+            };
+            ui.heading(rt);
+          });
+        });
+    };
     ui.horizontal(|ui| {
       ui.spacing_mut().item_spacing.x = 0.0;
-      // Total Budgeted Card
-      egui::Frame::default()
-        .fill(card_fill)
-        .stroke(card_stroke)
-        .corner_radius(8.0)
-        .inner_margin(12.0)
-        .show(ui, |ui| {
-          ui.set_width(card_content_w);
-          ui.vertical(|ui| {
-            ui.label(RichText::new("TOTAL ALLOCATED").size(10.0).weak());
-            ui.add_space(4.0);
-            ui.heading(RichText::new(money(total_budgeted)).color(text_col));
-          });
-        });
-
-      // Total Spent Card
-      egui::Frame::default()
-        .fill(card_fill)
-        .stroke(card_stroke)
-        .corner_radius(8.0)
-        .inner_margin(12.0)
-        .show(ui, |ui| {
-          ui.set_width(card_content_w);
-          ui.vertical(|ui| {
-            ui.label(RichText::new("TOTAL SPENT").size(10.0).weak());
-            ui.add_space(4.0);
-            ui.heading(RichText::new(money(total_spent)).color(text_col));
-          });
-        });
-
-      // Remaining Card
-      egui::Frame::default()
-        .fill(card_fill)
-        .stroke(card_stroke)
-        .corner_radius(8.0)
-        .inner_margin(12.0)
-        .show(ui, |ui| {
-          ui.set_width(card_content_w);
-          ui.vertical(|ui| {
-            ui.label(RichText::new("REMAINING OVERALL").size(10.0).weak());
-            ui.add_space(4.0);
-            let color = if remaining_overall >= 0 { success_col } else { error_col };
-            ui.heading(RichText::new(money(remaining_overall)).color(color));
-          });
-        });
+      render_card(ui, "TOTAL ALLOCATED", total_budgeted, None);
+      render_card(ui, "TOTAL SPENT", total_spent, None);
+      let color = if remaining_overall >= 0 {
+        crate::ui::components::success_color(ui)
+      } else {
+        crate::ui::components::error_color(ui)
+      };
+      render_card(ui, "REMAINING OVERALL", remaining_overall, Some(color));
     });
 
     ui.add_space(14.0);
@@ -417,8 +400,14 @@ impl TwoCentsApp {
     }
 
     let mut entries: Vec<CatEntry> = Vec::new();
+    // ponytail: excluded categories (user-flagged) are skipped from the
+    // budget list entirely — spent stays 0 via the aggregation filter too.
+    let excluded = excluded_category_labels(&self.categories);
     for &pid in &parent_ids {
       let Some(parent) = self.categories.iter().find(|c| c.id == pid) else { continue; };
+      if excluded.contains(&parent.name) {
+        continue;
+      }
       if !has_children.contains(&pid) {
         entries.push(CatEntry {
           is_child: false,
@@ -448,6 +437,9 @@ impl TwoCentsApp {
         for &cid in &child_ids {
           let Some(child) = self.categories.iter().find(|c| c.id == cid) else { continue; };
           let full_label = child.full_label(&cat_parents);
+          if excluded.contains(&full_label) {
+            continue;
+          }
           entries.push(CatEntry {
             is_child: true,
             parent_name: parent.name.clone(),
@@ -494,10 +486,13 @@ impl TwoCentsApp {
     }
 
     if rows.is_empty() {
-      ui.add_space(20.0);
-      ui.centered_and_justified(|ui| {
-        ui.label(RichText::new("No categories match the active filter.").weak().italics());
-      });
+      // ponytail: real empty state, matches the rest of the app's empty
+      // placeholders (icon + headline + subtext).
+      crate::ui::components::empty_state(
+        ui,
+        "No categories match the active filter",
+        "Switch the filter to All to see every category, or clear filters above.",
+      );
       return;
     }
 
@@ -522,7 +517,7 @@ impl TwoCentsApp {
     let table_avail_h = ui.available_height().max(120.0);
     let table_rect = egui::Rect::from_min_size(table_tl, egui::vec2(avail, table_avail_h));
     ui.painter().rect_filled(table_rect, 8.0, ui.visuals().extreme_bg_color);
-    ui.painter().rect_stroke(table_rect, 8.0, Stroke::new(1.0, sep_color), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(table_rect, 8.0, Stroke::new(1.0_f32, sep_color), egui::StrokeKind::Inside);
 
     let left0 = table_rect.left() + 2.0;
 
@@ -557,30 +552,36 @@ impl TwoCentsApp {
       for &x in &divider_xs[..divider_xs.len() - 1] {
         ui.painter().line_segment(
           [egui::pos2(x, y0), egui::pos2(x, y1)],
-          Stroke::new(1.0, sep_color),
+          Stroke::new(1.0_f32, sep_color),
         );
       }
     };
 
     // ---- Header row (fixed) ----
+    // ponytail: bg_subtle matches the expense / import / duplicates grid
+    // headers so all four tables in the app have the same header band.
+    // 1px bottom stroke (was 1.5) to match the other borders in the table
+    // and the design system.
     let hdr_top = table_rect.top() + 1.0;
-    let hdr_bg = ui.visuals().widgets.noninteractive.bg_fill.gamma_multiply(0.5);
     let hdr_rect = egui::Rect::from_min_size(egui::pos2(left0, hdr_top), egui::vec2(cw, row_h));
-    ui.painter().rect_filled(hdr_rect, 0.0, hdr_bg);
+    ui.painter().rect_filled(hdr_rect, 0.0, crate::ui::components::bg_subtle(ui));
     ui.painter().line_segment(
       [egui::pos2(left0, hdr_top + row_h), egui::pos2(left0 + cw, hdr_top + row_h)],
-      Stroke::new(1.5, sep_color),
+      Stroke::new(1.0_f32, crate::ui::components::border_default(ui)),
     );
 
     let hdr_labels = ["Category", "Allocated Limit", "Actual Spending", "Remaining", "Progress"];
+    // ponytail: small uppercase muted labels, same style as the other
+    // table headers in the app.
+    let hdr_text = crate::ui::components::fg_muted(ui);
     for (i, label) in hdr_labels.iter().enumerate() {
       let cx = col_x(i) + 8.0;
       ui.painter().text(
         egui::pos2(cx, hdr_top + row_h / 2.0),
         egui::Align2::LEFT_CENTER,
-        *label,
-        egui::FontId::proportional(12.0),
-        ui.visuals().text_color(),
+        &label.to_uppercase(),
+        egui::FontId::proportional(11.0),
+        hdr_text,
       );
     }
     paint_vseps(ui, hdr_top, hdr_top + row_h);
@@ -629,7 +630,7 @@ impl TwoCentsApp {
                 ui.painter().rect_filled(row_rect, 0.0, cat_bg);
                 ui.painter().line_segment(
                   [egui::pos2(left0, y0 + row_h), egui::pos2(left0 + cw, y0 + row_h)],
-                  Stroke::new(1.5, sep_color),
+                  Stroke::new(1.5_f32, sep_color),
                 );
 
                 let c0 = egui::Rect::from_min_size(egui::pos2(col_x(0), y0), egui::vec2(col_w[0], row_h));
@@ -638,16 +639,27 @@ impl TwoCentsApp {
                 let c3 = egui::Rect::from_min_size(egui::pos2(col_x(3), y0), egui::vec2(col_w[3], row_h));
 
                 let swatch_rect = egui::Rect::from_min_size(egui::pos2(left0 + 6.0, y0 + row_h / 2.0 - 5.0), egui::vec2(10.0, 10.0));
-                ui.painter().circle_filled(swatch_rect.center(), 5.0, cat.color);
-                clip_text(ui, c0, egui::pos2(left0 + 22.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &cat.parent_name, egui::FontId::proportional(13.0), ui.visuals().text_color());
+                // ponytail: themed swatch with a 1px border. The previous
+                // version was a bare circle_filled, which read as flat
+                // against the tinted row background.
+                crate::ui::components::color_swatch_decorated(
+                  ui.painter(),
+                  swatch_rect,
+                  cat.color,
+                  crate::ui::components::border_default(ui),
+                );
+                clip_text(ui, c0, egui::pos2(left0 + 22.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &cat.parent_name, egui::FontId::proportional(13.0), crate::ui::components::fg_default(ui));
 
-                clip_text(ui, c1, egui::pos2(col_x(1) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(limit_sum), egui::FontId::monospace(13.0), ui.visuals().text_color());
-                clip_text(ui, c2, egui::pos2(col_x(2) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(spent_sum), egui::FontId::monospace(13.0), ui.visuals().text_color());
-                let rem_col = if rem_sum >= 0 { ui.visuals().text_color() } else { theme::current_error() };
+                clip_text(ui, c1, egui::pos2(col_x(1) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(limit_sum), egui::FontId::monospace(13.0), crate::ui::components::fg_default(ui));
+                clip_text(ui, c2, egui::pos2(col_x(2) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(spent_sum), egui::FontId::monospace(13.0), crate::ui::components::fg_default(ui));
+                let rem_col = if rem_sum >= 0 { crate::ui::components::fg_default(ui) } else { crate::ui::components::error_color(ui) };
                 clip_text(ui, c3, egui::pos2(col_x(3) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(rem_sum), egui::FontId::monospace(13.0), rem_col);
                 let bar_cell_w = col_w[4];
                 let bar_rect = egui::Rect::from_min_size(egui::pos2(col_x(4), y0), egui::vec2(bar_cell_w, row_h));
-                draw_progress_bar(ui, bar_rect, pct);
+                // ponytail: progress_bar now lives in components. Same
+                // semantic (≤80% success, ≤100% warning, >100% error) but
+                // routes through the components palette.
+                crate::ui::components::progress_bar(ui, bar_rect, pct);
 
                 paint_vseps(ui, y0, y0 + row_h);
                 ui.allocate_space(egui::vec2(0.0, row_h));
@@ -666,22 +678,22 @@ impl TwoCentsApp {
                   );
 
                   clip_text(ui, c0c, egui::pos2(left0 + 24.0, cy0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &child.display_name,
-                    egui::FontId::proportional(13.0), ui.visuals().text_color());
+                    egui::FontId::proportional(13.0), crate::ui::components::fg_default(ui));
                   let bgt_rect = egui::Rect::from_min_size(
                     egui::pos2(col_x(1), cy0),
                     egui::vec2(col_w[1], row_h),
                   );
                   self.render_budget_limit_cell(ui, &child.full_label, child.limit, bgt_rect, past_period);
                   clip_text(ui, c2c, egui::pos2(col_x(2) + 8.0, cy0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(child.spent),
-                    egui::FontId::monospace(13.0), ui.visuals().text_color());
+                    egui::FontId::monospace(13.0), crate::ui::components::fg_default(ui));
                   let rem = child.limit - child.spent;
-                  let rem_col = if rem >= 0 { ui.visuals().text_color() } else { theme::current_error() };
+                  let rem_col = if rem >= 0 { crate::ui::components::fg_default(ui) } else { crate::ui::components::error_color(ui) };
                   clip_text(ui, c3c, egui::pos2(col_x(3) + 8.0, cy0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(rem),
                     egui::FontId::monospace(13.0), rem_col);
                   let pct = if child.limit > 0 { (child.spent as f32 / child.limit as f32).clamp(0.0, 2.0) } else if child.spent > 0 { 1.5 } else { 0.0 };
                   let bar_cell_w = col_w[4];
                   let bar_rect = egui::Rect::from_min_size(egui::pos2(col_x(4), cy0), egui::vec2(bar_cell_w, row_h));
-                  draw_progress_bar(ui, bar_rect, pct);
+                  crate::ui::components::progress_bar(ui, bar_rect, pct);
 
                   paint_vseps(ui, cy0, cy0 + row_h);
                   ui.allocate_space(egui::vec2(0.0, row_h));
@@ -701,24 +713,36 @@ impl TwoCentsApp {
                 );
 
                 let swatch_rect = egui::Rect::from_min_size(egui::pos2(left0 + 6.0, y0 + row_h / 2.0 - 5.0), egui::vec2(10.0, 10.0));
-                ui.painter().circle_filled(swatch_rect.center(), 5.0, cat.color);
+                // ponytail: themed swatch with a 1px border. The previous
+                // version was a bare circle_filled, which read as flat
+                // against the tinted row background.
+                crate::ui::components::color_swatch_decorated(
+                  ui.painter(),
+                  swatch_rect,
+                  cat.color,
+                  crate::ui::components::border_default(ui),
+                );
                 clip_text(ui, c0, egui::pos2(left0 + 22.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &cat.display_name,
-                  egui::FontId::proportional(13.0), ui.visuals().text_color());
+                  egui::FontId::proportional(13.0), crate::ui::components::fg_default(ui));
                 let bgt_rect = egui::Rect::from_min_size(
                   egui::pos2(col_x(1), y0),
                   egui::vec2(col_w[1], row_h),
                 );
                 self.render_budget_limit_cell(ui, &cat.full_label, cat.limit, bgt_rect, past_period);
                 clip_text(ui, c2, egui::pos2(col_x(2) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(cat.spent),
-                  egui::FontId::monospace(13.0), ui.visuals().text_color());
+                  egui::FontId::monospace(13.0), crate::ui::components::fg_default(ui));
                 let rem = cat.limit - cat.spent;
-                let rem_col = if rem >= 0 { ui.visuals().text_color() } else { theme::current_error() };
+                // ponytail: use the live palette (components::error_color) like the
+                // parent/child rows, not the static theme::current_error().
+                let rem_col = if rem >= 0 { crate::ui::components::fg_default(ui) } else { crate::ui::components::error_color(ui) };
                 clip_text(ui, c3, egui::pos2(col_x(3) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(rem),
                   egui::FontId::monospace(13.0), rem_col);
                 let pct = if cat.limit > 0 { (cat.spent as f32 / cat.limit as f32).clamp(0.0, 2.0) } else if cat.spent > 0 { 1.5 } else { 0.0 };
                 let bar_cell_w = col_w[4];
                 let bar_rect = egui::Rect::from_min_size(egui::pos2(col_x(4), y0), egui::vec2(bar_cell_w, row_h));
-                draw_progress_bar(ui, bar_rect, pct);
+                // ponytail: same progress_bar as parent/child rows so all three
+                // row shapes render the bar identically (track + fill + label).
+                crate::ui::components::progress_bar(ui, bar_rect, pct);
 
                 paint_vseps(ui, y0, y0 + row_h);
                 ui.allocate_space(egui::vec2(0.0, row_h));
@@ -772,7 +796,7 @@ impl TwoCentsApp {
           egui::Align2::LEFT_CENTER,
           &limit_text,
           egui::FontId::monospace(13.0),
-          ui.visuals().weak_text_color(),
+          crate::ui::components::fg_muted(ui),
         );
       } else {
         ui.painter().text(
@@ -780,7 +804,7 @@ impl TwoCentsApp {
           egui::Align2::LEFT_CENTER,
           &limit_text,
           egui::FontId::monospace(13.0),
-          if limit_cents > 0 { ui.visuals().text_color() } else { ui.visuals().weak_text_color() },
+          if limit_cents > 0 { crate::ui::components::fg_default(ui) } else { crate::ui::components::fg_muted(ui) },
         );
         let id = egui::Id::new(("budget_limit_click", full_label));
         let resp = ui.interact(cell_rect, id, egui::Sense::click());
@@ -803,11 +827,7 @@ impl TwoCentsApp {
       // Propagate to monthly, quarterly, and weekly
       self.propagate_yearly_to_others(full_label, val_cents);
       
-      self.log(format!(
-        "[budgets] set yearly budget for '{}' → {}",
-        full_label, money(val_cents)
-      ));
-      self.reload();
+            self.reload();
       return;
     }
     
@@ -831,46 +851,6 @@ impl TwoCentsApp {
     // 3. Propagate to other granularities
     self.propagate_to_other_granularities(full_label, gran, val_cents);
     
-    self.log(format!(
-      "[budgets] set {} for '{}' → {}",
-      format!("{:?}", gran).to_lowercase(),
-      full_label, money(val_cents)
-    ));
-    self.reload();
+        self.reload();
   }
-}
-
-fn draw_progress_bar(ui: &egui::Ui, cell_rect: egui::Rect, percent: f32) {
-  let bar_left = cell_rect.left() + 6.0;
-  let avail_bar = (cell_rect.width() - 6.0 - 4.0).max(4.0);
-  let label_w = 34.0;
-  let bar_w = (avail_bar - label_w).max(4.0);
-  let bar_h = 8.0;
-  let bar_top = cell_rect.center().y - bar_h * 0.5;
-  let bar_rect = egui::Rect::from_min_size(
-    egui::pos2(bar_left, bar_top),
-    egui::vec2(bar_w, bar_h),
-  );
-  ui.painter().rect_filled(bar_rect, 4.0, ui.visuals().widgets.noninteractive.bg_stroke.color.linear_multiply(0.2));
-  if percent > 0.0 {
-    let fill_w = bar_w * percent.min(1.0);
-    let fill_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(fill_w, bar_h));
-    let fill_color = if percent <= 0.8 {
-      theme::current_success()
-    } else if percent <= 1.0 {
-      theme::current_warning()
-    } else {
-      theme::current_error()
-    };
-    ui.painter().rect_filled(fill_rect, 4.0, fill_color);
-  }
-  let pct_label = format!("{:.0}%", percent * 100.0);
-  let pct_color = if percent > 1.0 { theme::current_error() } else { ui.visuals().text_color() };
-  ui.painter().text(
-    egui::pos2(bar_rect.right() + 4.0, bar_rect.center().y),
-    egui::Align2::LEFT_CENTER,
-    &pct_label,
-    egui::FontId::proportional(11.0),
-    pct_color,
-  );
 }

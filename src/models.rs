@@ -19,6 +19,8 @@ pub trait GridRow {
   fn row_vendor_mut(&mut self) -> &mut String;
   fn row_description(&self) -> &str;
   fn row_description_mut(&mut self) -> &mut String;
+  fn row_account(&self) -> &str;
+  fn row_account_mut(&mut self) -> &mut String;
 }
 
 pub const CATEGORY_LABEL_SEP: &str = " › ";
@@ -37,9 +39,11 @@ pub enum Tab {
 
 #[derive(Clone)]
 pub struct Account {
+  pub id: i64,
   pub name: String,
   pub kind: String,
   pub balance_cents: i64,
+  pub csv_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -52,6 +56,8 @@ pub struct Expense {
   pub category: String,
   pub vendor: String,
   pub description: String,
+  pub account_id: i64,
+  pub account: String,
 }
 
 impl GridRow for Expense {
@@ -69,6 +75,8 @@ impl GridRow for Expense {
   fn row_vendor_mut(&mut self) -> &mut String { &mut self.vendor }
   fn row_description(&self) -> &str { &self.description }
   fn row_description_mut(&mut self) -> &mut String { &mut self.description }
+  fn row_account(&self) -> &str { &self.account }
+  fn row_account_mut(&mut self) -> &mut String { &mut self.account }
 }
 
 #[derive(Clone)]
@@ -80,6 +88,7 @@ pub struct ImportRow {
   pub category: String,
   pub vendor: String,
   pub description: String,
+  pub account: String,
 }
 
 impl GridRow for ImportRow {
@@ -97,6 +106,8 @@ impl GridRow for ImportRow {
   fn row_vendor_mut(&mut self) -> &mut String { &mut self.vendor }
   fn row_description(&self) -> &str { &self.description }
   fn row_description_mut(&mut self) -> &mut String { &mut self.description }
+  fn row_account(&self) -> &str { &self.account }
+  fn row_account_mut(&mut self) -> &mut String { &mut self.account }
 }
 
 #[derive(Clone)]
@@ -120,6 +131,7 @@ pub struct Category {
   pub name: String,
   pub parent_id: Option<i64>,
   pub color: Color32,
+  pub excluded: bool,
 }
 
 impl Category {
@@ -140,7 +152,6 @@ impl Category {
 pub fn category_parent_map<'a>(categories: &'a [Category]) -> HashMap<i64, &'a Category> {
   categories
     .iter()
-    .filter(|category| category.parent_id.is_none())
     .map(|category| (category.id, category))
     .collect()
 }
@@ -213,6 +224,7 @@ pub enum GridColumn {
   Category,
   Vendor,
   Description,
+  Account,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -223,6 +235,7 @@ pub enum ExpenseSortColumn {
   Category,
   Vendor,
   Description,
+  Account,
 }
 
 impl From<ExpenseSortColumn> for GridColumn {
@@ -234,6 +247,7 @@ impl From<ExpenseSortColumn> for GridColumn {
       ExpenseSortColumn::Category => GridColumn::Category,
       ExpenseSortColumn::Vendor => GridColumn::Vendor,
       ExpenseSortColumn::Description => GridColumn::Description,
+      ExpenseSortColumn::Account => GridColumn::Account,
     }
   }
 }
@@ -352,6 +366,71 @@ pub enum BudgetGranularity {
   Monthly,
   Quarterly,
   Yearly,
+}
+
+#[derive(Debug, Clone)]
+pub struct CategorySplit {
+  pub id: i64,
+  pub category: String,
+  pub member_name: String,
+  pub percentage: f64,
+}
+
+// ---- Excluded categories ----------------------------------------------------
+//
+// ponytail: any category can be flagged "excluded" in Settings (children
+// inherit via the tree walk). Excluded rows store 0 and show "—" — they
+// never enter budgets, analytics, or settlements. INCOME_PARENT is special
+// for signs only: anything under it is a positive credit.
+
+pub const INCOME_PARENT: &str = "Income";
+
+/// Labels (name + full_label) of every category flagged excluded or under
+/// an excluded ancestor — left out of all spending math and shown as "—".
+pub fn excluded_category_labels(categories: &[Category]) -> HashSet<String> {
+  let parents = category_parent_map(categories);
+  let mut out = HashSet::new();
+  for category in categories {
+    let mut cursor = Some(category.id);
+    let mut excluded = false;
+    while let Some(id) = cursor {
+      let Some(current) = parents.get(&id).copied() else { break };
+      if current.excluded {
+        excluded = true;
+        break;
+      }
+      cursor = current.parent_id;
+    }
+    if excluded {
+      out.insert(category.name.clone());
+      out.insert(category.full_label(&parents));
+    }
+  }
+  out
+}
+
+/// Sign for a stored amount given its category label: +1 (income credit),
+/// −1 (debit). ponytail: excluded categories keep their real amount — the
+/// flag only removes rows from aggregation math (budgets/analytics/
+/// settlements), never from the grid or duplicate matching.
+pub fn category_sign(categories: &[Category], label: &str) -> i64 {
+  let trimmed = label.trim();
+  if trimmed.is_empty() {
+    return -1;
+  }
+  let parents = category_parent_map(categories);
+  let Some(start) = categories.iter().find(|c| c.full_label(&parents) == trimmed || c.name == trimmed) else {
+    return -1;
+  };
+  let mut id = Some(start.id);
+  while let Some(current_id) = id {
+    let Some(current) = parents.get(&current_id).copied() else { break };
+    if current.name.eq_ignore_ascii_case(INCOME_PARENT) {
+      return 1;
+    }
+    id = current.parent_id;
+  }
+  -1
 }
 
 

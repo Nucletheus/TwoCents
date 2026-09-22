@@ -74,84 +74,22 @@ pub fn open_database() -> rusqlite::Result<Connection> {
   migrate_budgets_v5(&conn)?;
   migrate_budget_snapshots_v6(&conn)?;
   migrate_analytics_filters_v7(&conn)?;
+  migrate_category_palette_vibrant_v8(&conn)?;
+  migrate_category_splits_v9(&conn)?;
+  migrate_sign_protected_v10(&conn)?;
+  migrate_demo_cleanup_v11(&conn)?;
+  migrate_category_exclusion_v12(&conn)?;
 
-  let account_count: i64 = conn.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?;
-  if account_count == 0 {
-    conn.execute(
-      "INSERT INTO accounts (household_id, name, kind, balance_cents) VALUES (1, ?1, ?2, ?3)",
-      params!["Household Checking", "checking", 426_550],
-    )?;
-    conn.execute(
-      "INSERT INTO accounts (household_id, name, kind, balance_cents) VALUES (1, ?1, ?2, ?3)",
-      params!["Shared Savings", "savings", 1_240_000],
-    )?;
-  }
-
-  let expense_count: i64 = conn.query_row("SELECT COUNT(*) FROM expenses", [], |row| row.get(0))?;
-  if expense_count == 0 {
-    for (account_id, description, vendor, category, amount_cents, date) in [
-      (
-        1,
-        "Groceries",
-        "Groceries",
-        "Food › Groceries",
-        18_642,
-        "2026-05-01",
-      ),
-      (
-        1,
-        "Electric bill",
-        "Electric Company",
-        "Utilities › Electricity",
-        14_280,
-        "2026-05-03",
-      ),
-      (
-        1,
-        "Date night",
-        "Restaurant",
-        "Food › Dining Out",
-        9_875,
-        "2026-05-09",
-      ),
-      (
-        1,
-        "Gas",
-        "Gas Station",
-        "Transportation › Fuel",
-        6_122,
-        "2026-05-12",
-      ),
-      (
-        1,
-        "Internet",
-        "Internet Provider",
-        "Utilities › Internet",
-        7_999,
-        "2026-05-15",
-      ),
-    ] {
-      conn.execute(
-        "INSERT INTO expenses (household_id, account_id, description, vendor, category, member, amount_cents, date) VALUES (1, ?1, ?2, ?3, ?4, '', ?5, ?6)",
-        params![account_id, description, vendor, category, amount_cents, date],
-      )?;
-    }
-  }
+  // ponytail: legacy DBs carry UNIQUE(vendor_pattern) only — the vendor-rule
+  // upserts target (household_id, vendor_pattern), which matches nothing and
+  // fails every import with "ON CONFLICT clause does not match...". One
+  // idempotent index fixes both upsert sites (import + grid learning).
+  let _ = conn.execute(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_rules_household_pattern ON vendor_category_rules(household_id, vendor_pattern)",
+    [],
+  );
 
   seed_default_categories(&conn, 1)?;
-  for (pattern, category) in [
-    ("grocery", "Food › Groceries"),
-    ("market", "Food › Groceries"),
-    ("electric", "Utilities › Electricity"),
-    ("internet", "Utilities › Internet"),
-    ("restaurant", "Food › Dining Out"),
-    ("gas", "Transportation › Fuel"),
-  ] {
-    conn.execute(
-      "INSERT OR IGNORE INTO vendor_category_rules (household_id, vendor_pattern, category) VALUES (1, ?1, ?2)",
-      params![pattern, category],
-    )?;
-  }
   Ok(conn)
 }
 
@@ -332,23 +270,64 @@ pub fn delete_household_member(conn: &Connection, household_id: i64, member_id: 
 
 pub fn load_accounts(conn: &Connection, household_id: i64) -> rusqlite::Result<Vec<Account>> {
   let mut stmt = conn.prepare(
-    "SELECT name, kind, balance_cents FROM accounts WHERE household_id = ?1 ORDER BY id",
+    "SELECT id, name, kind, balance_cents, csv_name FROM accounts WHERE household_id = ?1 ORDER BY id",
   )?;
   let rows = stmt
     .query_map(params![household_id], |row| {
       Ok(Account {
-        name: row.get(0)?,
-        kind: row.get(1)?,
-        balance_cents: row.get(2)?,
+        id: row.get(0)?,
+        name: row.get(1)?,
+        kind: row.get(2)?,
+        balance_cents: row.get(3)?,
+        csv_name: row.get(4)?,
       })
     })?
     .collect();
   rows
 }
 
+/// ponytail: accounts are born from imports — the CSV's detected account
+/// value maps to a user-named account via csv_name, so the next import
+/// detecting the same value auto-selects the same account. Renames propagate.
+pub fn resolve_or_create_account(conn: &Connection, household_id: i64, detected: &str, name: &str) -> rusqlite::Result<i64> {
+  let name = name.trim();
+  let name = if name.is_empty() { "Checking" } else { name };
+  let detected = detected.trim();
+  if !detected.is_empty() {
+    if let Ok(id) = conn.query_row(
+      "SELECT id FROM accounts WHERE household_id = ?1 AND csv_name = ?2 COLLATE NOCASE",
+      params![household_id, detected],
+      |row| row.get::<_, i64>(0),
+    ) {
+      conn.execute("UPDATE accounts SET name = ?2 WHERE id = ?1", params![id, name])?;
+      return Ok(id);
+    }
+  }
+  if let Ok(id) = conn.query_row(
+    "SELECT id FROM accounts WHERE household_id = ?1 AND name = ?2 COLLATE NOCASE",
+    params![household_id, name],
+    |row| row.get::<_, i64>(0),
+  ) {
+    // Only record a mapping for a real detected value — never an empty one.
+    if !detected.is_empty() {
+      conn.execute("UPDATE accounts SET csv_name = ?2 WHERE id = ?1", params![id, detected])?;
+    }
+    return Ok(id);
+  }
+  conn.execute(
+    "INSERT INTO accounts (household_id, name, kind, balance_cents, csv_name) VALUES (?1, ?2, 'checking', 0, ?3)",
+    params![household_id, name, detected],
+  )?;
+  Ok(conn.last_insert_rowid())
+}
+
 pub fn load_expenses(conn: &Connection, household_id: i64) -> rusqlite::Result<Vec<Expense>> {
   let mut stmt = conn.prepare(
-    "SELECT id, date, amount_cents, COALESCE(member, ''), category, COALESCE(vendor, ''), description FROM expenses WHERE household_id = ?1 ORDER BY date DESC, id DESC",
+    "SELECT e.id, e.date, e.amount_cents, COALESCE(e.member, ''), e.category, COALESCE(e.vendor, ''), e.description, COALESCE(e.account_id, 1), COALESCE(a.name, '')
+     FROM expenses e
+     LEFT JOIN accounts a ON a.id = e.account_id
+     WHERE e.household_id = ?1
+     ORDER BY e.date DESC, e.id DESC",
   )?;
   let rows = stmt
     .query_map(params![household_id], |row| {
@@ -362,6 +341,8 @@ pub fn load_expenses(conn: &Connection, household_id: i64) -> rusqlite::Result<V
         category: row.get(4)?,
         vendor: row.get(5)?,
         description: row.get(6)?,
+        account_id: row.get(7)?,
+        account: row.get(8)?,
       })
     })?
     .collect();
@@ -370,7 +351,7 @@ pub fn load_expenses(conn: &Connection, household_id: i64) -> rusqlite::Result<V
 
 pub fn load_categories(conn: &Connection, household_id: i64) -> rusqlite::Result<Vec<Category>> {
   let mut stmt = conn.prepare(
-    "SELECT id, name, parent_id, COALESCE(color_rgb, 0) FROM categories WHERE household_id = ?1 ORDER BY COALESCE(parent_id, id), name",
+    "SELECT id, name, parent_id, COALESCE(color_rgb, 0), excluded FROM categories WHERE household_id = ?1 ORDER BY COALESCE(parent_id, id), name",
   )?;
   let rows = stmt
     .query_map(params![household_id], |row| {
@@ -379,6 +360,7 @@ pub fn load_categories(conn: &Connection, household_id: i64) -> rusqlite::Result
         name: row.get(1)?,
         parent_id: row.get(2)?,
         color: rgb_to_color(row.get(3)?),
+        excluded: row.get::<_, i64>(4)? != 0,
       })
     })?
     .collect();
@@ -427,6 +409,7 @@ pub const THEME_ACCENT_CATEGORIES_V4_MIGRATION: &str = "theme_accent_categories_
 pub const BUDGETS_V5_MIGRATION: &str = "budgets_v5";
 pub const BUDGET_SNAPSHOTS_V6_MIGRATION: &str = "budget_snapshots_v6";
 pub const ANALYTICS_FILTERS_V7_MIGRATION: &str = "analytics_filters_v7";
+pub const CATEGORY_PALETTE_VIBRANT_V8_MIGRATION: &str = "category_palette_vibrant_v8";
 
 pub fn migrate_category_defaults_v2(conn: &Connection) -> rusqlite::Result<()> {
   ensure_migrations_table(conn)?;
@@ -614,8 +597,11 @@ pub fn accent_palette_swatches_from(base: Color32) -> Vec<Color32> {
     .map(|i| {
       let mut hsva = base_hsva;
       hsva.h = (base_hsva.h + i as f32 / ACCENT_PALETTE_COUNT as f32) % 1.0;
-      hsva.s = (0.45 + (i % 3) as f32 * 0.06).clamp(0.45, 0.62);
-      hsva.v = (0.55 + ((i / 3) % 3) as f32 * 0.08).clamp(0.55, 0.78);
+      // ponytail: vibrant palette — saturation 0.65..0.85, value 0.78..0.92.
+      // Replaces the previous muted clamps (s 0.45..0.62, v 0.55..0.78)
+      // that produced pastel/washed-out swatches.
+      hsva.s = (0.65 + (i % 3) as f32 * 0.07).clamp(0.65, 0.85);
+      hsva.v = (0.80 + ((i / 3) % 3) as f32 * 0.05).clamp(0.80, 0.92);
       Color32::from(hsva)
     })
     .collect()
@@ -640,8 +626,11 @@ pub fn subcategory_color_from_parent(parent: Color32, sub_index: usize, sub_coun
   let idx = sub_index as f32;
   let mut sub = hsva;
   sub.h = (sub.h + (idx / n) * 0.06 + idx * 0.01) % 1.0;
-  sub.s = (sub.s * (0.92 + idx * 0.03 / n)).clamp(0.40, 0.75);
-  sub.v = (sub.v * (1.02 - idx * 0.02 / n)).clamp(0.50, 0.85);
+  // ponytail: vibrant subcategory clamp — s 0.60..0.92, v 0.72..0.95.
+  // Replaces the previous muted clamps (s 0.40..0.75, v 0.50..0.85)
+  // so children stay recognizably vivid against the new parent palette.
+  sub.s = (sub.s * (0.95 + idx * 0.04 / n)).clamp(0.60, 0.92);
+  sub.v = (sub.v * (1.00 - idx * 0.02 / n)).clamp(0.72, 0.95);
   Color32::from(sub)
 }
 
@@ -996,6 +985,9 @@ pub fn insert_default_category_tree(conn: &Connection, household_id: i64) -> rus
       add_subcategory_db(conn, household_id, parent_id, sub_name)?;
     }
   }
+
+  // ponytail: protected parents — seeding removed; exclusion is now a
+  // user-set flag on any category (see migrate_category_exclusion_v12).
   Ok(())
 }
 
@@ -1003,6 +995,7 @@ pub fn update_expense_row(conn: &Connection, row: &Expense, field: &str) -> rusq
   match field {
     "date" => { conn.execute("UPDATE expenses SET date = ?1 WHERE id = ?2", params![row.date, row.id])?; }
     "amount" => { conn.execute("UPDATE expenses SET amount_cents = ?1 WHERE id = ?2", params![row.amount_cents, row.id])?; }
+    "account" => { conn.execute("UPDATE expenses SET account_id = ?1 WHERE id = ?2", params![row.account_id, row.id])?; }
     "category" => {
       conn.execute("UPDATE expenses SET category = ?1 WHERE id = ?2", params![row.category, row.id])?;
     }
@@ -1016,7 +1009,7 @@ pub fn update_expense_row(conn: &Connection, row: &Expense, field: &str) -> rusq
   Ok(())
 }
 
-pub fn save_import_rows(conn: &Connection, household_id: i64, rows: &[ImportRow]) -> rusqlite::Result<usize> {
+pub fn save_import_rows(conn: &Connection, household_id: i64, rows: &[ImportRow], account_id: i64) -> rusqlite::Result<usize> {
   let categories = load_categories(conn, household_id)?;
   let parents = category_parent_map(&categories);
   for row in rows {
@@ -1027,21 +1020,31 @@ pub fn save_import_rows(conn: &Connection, household_id: i64, rows: &[ImportRow]
     } else {
       String::new()
     };
+    // ponytail: sign is a function of category — debits negative, Income
+    // positive. Excluded rows keep their real amount; the flag only filters
+    // them out of aggregation math.
+    let sign = category_sign(&categories, &category);
+    let amount_cents = if sign == 1 { row.amount_cents.abs() } else { -row.amount_cents.abs() };
     conn.execute(
-      "INSERT INTO expenses (household_id, account_id, description, vendor, category, member, amount_cents, date) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7)",
+      "INSERT INTO expenses (household_id, account_id, description, vendor, category, member, amount_cents, date) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
       params![
         household_id,
+        account_id,
         row.description,
         row.vendor,
         category,
         row.member,
-        row.amount_cents,
+        amount_cents,
         row.date
       ],
     )?;
-    if !category.is_empty() && !category.contains("Uncategorized") {
+    // ponytail: upsert instead of INSERT OR IGNORE — a rule was learned once
+    // and never updated, so corrections on later imports never stuck. Skip
+    // short vendors: learning from vendor "e" poisoned every future match.
+    if !category.is_empty() && !category.contains("Uncategorized") && row.vendor.trim().chars().count() >= 3 {
       conn.execute(
-        "INSERT OR IGNORE INTO vendor_category_rules (household_id, vendor_pattern, category) VALUES (?1, ?2, ?3)",
+        "INSERT INTO vendor_category_rules (household_id, vendor_pattern, category) VALUES (?1, ?2, ?3)
+         ON CONFLICT(household_id, vendor_pattern) DO UPDATE SET category = excluded.category",
         params![household_id, row.vendor.to_lowercase(), category],
       )?;
     }
@@ -1107,8 +1110,10 @@ pub fn normalize_date(raw: &str) -> String {
 }
 
 pub fn normalize_vendor(description: &str) -> String {
+  // ponytail: no '-' split — "E-TRANSFER 12345" collapsed to vendor "e",
+  // which was learned as a rule and matched every vendor containing 'e'.
   description
-    .split(['*', '-', '#'])
+    .split(['*', '#'])
     .next()
     .unwrap_or(description)
     .trim()
@@ -1127,40 +1132,46 @@ pub fn find_column(headers: &[String], candidates: &[&str]) -> Option<usize> {
 }
 
 pub fn category_for_vendor(conn: &Connection, household_id: i64, vendor: &str) -> String {
-  let normalized = vendor.to_lowercase();
-  let mut stmt = match conn.prepare(
-    "SELECT vendor_pattern, category FROM vendor_category_rules WHERE household_id = ?1 ORDER BY id",
-  ) {
-    Ok(stmt) => stmt,
-    Err(_) => return "Uncategorized".to_string(),
-  };
-  let rules = stmt
-    .query_map(params![household_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
-    .unwrap_or_default();
-  
-  if let Some(category) = rules
-    .into_iter()
-    .find_map(|(pattern, category)| normalized.contains(&pattern.to_lowercase()).then_some(category))
-  {
-    return category;
-  }
-
-  // Smart fallback: Query the most frequent non-empty category used for this vendor in history
+  // ponytail: recency-first — the user's most recent correction wins. The old
+  // order matched rules oldest-first and short-circuited before history was
+  // ever consulted, so re-categorizations never stuck.
+  // 1) Most recent non-empty category for this exact vendor.
   if let Ok(mut stmt) = conn.prepare(
-    "SELECT category, COUNT(*) as cnt 
-     FROM expenses 
-     WHERE household_id = ?1 
-       AND lower(vendor) = lower(?2) 
-       AND category IS NOT NULL 
-       AND category != '' 
+    "SELECT category
+     FROM expenses
+     WHERE household_id = ?1
+       AND lower(vendor) = lower(?2)
+       AND category IS NOT NULL
+       AND category != ''
        AND category != 'Uncategorized'
-     GROUP BY category 
-     ORDER BY cnt DESC, id DESC 
-     LIMIT 1"
+     ORDER BY date DESC, id DESC
+     LIMIT 1",
   ) {
     if let Ok(history_category) = stmt.query_row(params![household_id, vendor], |row| row.get::<_, String>(0)) {
       return history_category;
+    }
+  }
+
+  // 2) Vendor rules, newest first (skipping empty-category zombie rules left
+  // behind by deleted categories).
+  if let Ok(mut stmt) = conn.prepare(
+    "SELECT vendor_pattern, category FROM vendor_category_rules
+     WHERE household_id = ?1 AND category IS NOT NULL AND category != ''
+     ORDER BY id DESC",
+  ) {
+    let normalized = vendor.to_lowercase();
+    let rules = stmt
+      .query_map(params![household_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+      .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+      .unwrap_or_default();
+    if let Some(category) = rules
+      .into_iter()
+      // ponytail: short patterns like the learned 'e' rule substring-match
+      // nearly every vendor — never match on anything under 3 chars.
+      .filter(|(pattern, _)| pattern.trim().chars().count() >= 3)
+      .find_map(|(pattern, category)| normalized.contains(&pattern.to_lowercase()).then_some(category))
+    {
+      return category;
     }
   }
 
@@ -1179,9 +1190,10 @@ pub fn parse_csv_statement(conn: &Connection, household_id: i64, path: &std::pat
     .map(str::to_string)
     .collect::<Vec<_>>();
   let date_idx = find_column(&headers, &["date", "posted"]);
-  let amount_idx = find_column(&headers, &["amount", "debit", "withdrawal", "charge"]);
+  let amount_idx = find_column(&headers, &["amount", "debit", "withdrawal", "charge", "credit"]);
   let description_idx = find_column(&headers, &["description", "memo", "details", "transaction", "payee", "merchant"]);
   let category_idx = find_column(&headers, &["category"]);
+  let account_idx = find_column(&headers, &["account"]);
 
   let mut rows = Vec::new();
   for record in reader.records() {
@@ -1199,6 +1211,12 @@ pub fn parse_csv_statement(conn: &Connection, household_id: i64, path: &std::pat
       .filter(|value| !value.is_empty())
       .map(str::to_string)
       .unwrap_or_else(|| category_for_vendor(conn, household_id, &vendor));
+    let account = account_idx
+      .and_then(|idx| record.get(idx))
+      .map(str::trim)
+      .filter(|value| !value.is_empty())
+      .map(str::to_string)
+      .unwrap_or_default();
     rows.push(ImportRow {
       date,
       amount_input: money(amount_cents).replace('$', ""),
@@ -1207,6 +1225,7 @@ pub fn parse_csv_statement(conn: &Connection, household_id: i64, path: &std::pat
       category,
       vendor,
       description,
+      account,
     });
   }
   Ok(rows)
@@ -1228,7 +1247,7 @@ pub fn duplicate_import_count(conn: &Connection, household_id: i64, rows: &[Impo
     .filter(|row| {
       conn
         .query_row(
-          "SELECT COUNT(*) FROM expenses WHERE household_id = ?1 AND date = ?2 AND amount_cents = ?3 AND lower(COALESCE(vendor, '')) = lower(?4) AND lower(description) = lower(?5)",
+          "SELECT COUNT(*) FROM expenses WHERE household_id = ?1 AND date = ?2 AND abs(amount_cents) = ?3 AND lower(COALESCE(vendor, '')) = lower(?4) AND lower(description) = lower(?5)",
           params![household_id, row.date, row.amount_cents, row.vendor, row.description],
           |count_row| count_row.get::<_, i64>(0),
         )
@@ -1342,6 +1361,28 @@ pub fn load_budget_snapshots_for_year(
 }
 
 // ── Analytics Filters v7 ─────────────────────────────────────────────────
+
+pub fn migrate_category_palette_vibrant_v8(conn: &Connection) -> rusqlite::Result<()> {
+  // ponytail: re-derive every existing category's color with the new
+  // vibrant palette. recolor_household_categories uses the live
+  // accent_palette_swatches_from + subcategory_color_from_parent, so
+  // calling it after the palette function changed re-derives colors
+  // for every category in every household. Idempotent: the migration
+  // is marked applied so the next launch skips it.
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, CATEGORY_PALETTE_VIBRANT_V8_MIGRATION)? {
+    return Ok(());
+  }
+  let mut stmt = conn.prepare("SELECT id FROM households ORDER BY id")?;
+  let household_ids: Vec<i64> = stmt
+    .query_map([], |row| row.get(0))?
+    .collect::<Result<_, _>>()?;
+  for household_id in household_ids {
+    recolor_household_categories(conn, household_id)?;
+  }
+  mark_migration_applied(conn, CATEGORY_PALETTE_VIBRANT_V8_MIGRATION)?;
+  Ok(())
+}
 
 pub fn migrate_analytics_filters_v7(conn: &Connection) -> rusqlite::Result<()> {
   ensure_migrations_table(conn)?;
@@ -1465,5 +1506,187 @@ pub struct AnalyticsFilterRow {
   pub candlestick_period: String,
   pub comparison_mode: String,
   pub comparison_date_preset: String,
+}
+
+pub const CATEGORY_SPLITS_V9_MIGRATION: &str = "category_splits_v9";
+
+pub fn migrate_category_splits_v9(conn: &Connection) -> rusqlite::Result<()> {
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, CATEGORY_SPLITS_V9_MIGRATION)? {
+    return Ok(());
+  }
+  conn.execute_batch(
+    "
+    CREATE TABLE IF NOT EXISTS category_splits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      household_id INTEGER NOT NULL REFERENCES households(id),
+      category TEXT NOT NULL,
+      member_name TEXT NOT NULL,
+      percentage REAL NOT NULL,
+      UNIQUE(household_id, category, member_name)
+    );
+    ",
+  )?;
+  mark_migration_applied(conn, CATEGORY_SPLITS_V9_MIGRATION)?;
+  Ok(())
+}
+
+pub fn load_category_splits(conn: &Connection, household_id: i64) -> rusqlite::Result<Vec<CategorySplit>> {
+  let mut stmt = conn.prepare(
+    "SELECT id, category, member_name, percentage FROM category_splits WHERE household_id = ?1 ORDER BY category, member_name",
+  )?;
+  let rows = stmt.query_map(params![household_id], |row| {
+    Ok(CategorySplit {
+      id: row.get(0)?,
+      category: row.get(1)?,
+      member_name: row.get(2)?,
+      percentage: row.get(3)?,
+    })
+  })?;
+  rows.collect::<rusqlite::Result<Vec<_>>>()
+}
+
+pub const SIGN_PROTECTED_V10_MIGRATION: &str = "sign_protected_categories_v10";
+
+/// ponytail: idempotent re-sign of legacy amounts (stored all-positive) to
+/// the new signed convention. (Formerly also seeded protected parents.)
+pub fn migrate_sign_protected_v10(conn: &Connection) -> rusqlite::Result<()> {
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, SIGN_PROTECTED_V10_MIGRATION)? {
+    return Ok(());
+  }
+  // ponytail: idempotent re-sign — legacy rows stored all-positive debits,
+  // so a blind flip breaks on re-run and on income rows. Normalize magnitude
+  // first, then sign by category: Income tree = credit, everything else =
+  // debit (excluded rows keep magnitude, filtered out by label downstream).
+  conn.execute("UPDATE expenses SET amount_cents = abs(amount_cents)", [])?;
+  conn.execute(
+    "UPDATE expenses SET amount_cents = -amount_cents
+     WHERE NOT EXISTS (
+       SELECT 1 FROM categories c LEFT JOIN categories p ON c.parent_id = p.id
+       WHERE (c.name = expenses.category OR (p.name || ' / ' || c.name) = expenses.category)
+         AND COALESCE(p.name, c.name) = 'Income'
+     )",
+    [],
+  )?;
+  // ponytail: protected-parent seeding removed — exclusion is a user-set
+  // flag now (migrate_category_exclusion_v12). Kept as a no-op marker so
+  // already-migrated DBs don't re-run the sign normalization.
+  mark_migration_applied(conn, SIGN_PROTECTED_V10_MIGRATION)?;
+  Ok(())
+}
+
+pub const DEMO_CLEANUP_V11_MIGRATION: &str = "demo_data_cleanup_v11";
+
+/// ponytail: one-time purge of fake demo data (seeded accounts/expenses/
+/// starter rules) and poisoned vendor rules — single-letter and
+/// transaction-type patterns like 'e' or 'bill payment' substring-match
+/// nearly every vendor. Also adds accounts.csv_name so imports remember
+/// which detected CSV account value maps to which user-named account.
+pub fn migrate_demo_cleanup_v11(conn: &Connection) -> rusqlite::Result<()> {
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, DEMO_CLEANUP_V11_MIGRATION)? {
+    return Ok(());
+  }
+  let _ = conn.execute("ALTER TABLE accounts ADD COLUMN csv_name TEXT", []);
+  conn.execute(
+    "DELETE FROM expenses WHERE (description, vendor, date) IN (
+       ('Groceries','Groceries','2026-05-01'),
+       ('Electric bill','Electric Company','2026-05-03'),
+       ('Date night','Restaurant','2026-05-09'),
+       ('Gas','Gas Station','2026-05-12'),
+       ('Internet','Internet Provider','2026-05-15')
+     )",
+    [],
+  )?;
+  conn.execute(
+    "DELETE FROM vendor_category_rules WHERE category IS NULL OR category = ''
+       OR length(vendor_pattern) < 3
+       OR lower(vendor_pattern) IN (
+         'bill payment','federal payment','crd. card bill payment','payroll deposit',
+         'mortgage payment','fee','withdrawal','provincial payment','insurance',
+         'nsf fee','overlimit fee','annual fee','payment from','needs','the co',
+         'interest charges','miscellaneous payment','0810','dal'
+       )",
+    [],
+  )?;
+  conn.execute(
+    "DELETE FROM accounts WHERE id NOT IN (SELECT DISTINCT account_id FROM expenses)",
+    [],
+  )?;
+  mark_migration_applied(conn, DEMO_CLEANUP_V11_MIGRATION)?;
+  Ok(())
+}
+
+pub const CATEGORY_EXCLUSION_V12_MIGRATION: &str = "category_exclusion_v12";
+
+/// ponytail: exclusion becomes a user-set flag on any category instead of
+/// name-matched "protected" parents. Adds categories.excluded, flags the
+/// known transfer/payment categories, drops the v10-seeded (now unused)
+/// 'Credit Card Payments' root, and re-signs expenses idempotently so
+/// Income-tree rows stored under the old broken walk flip to credits.
+pub fn migrate_category_exclusion_v12(conn: &Connection) -> rusqlite::Result<()> {
+  ensure_migrations_table(conn)?;
+  if migration_applied(conn, CATEGORY_EXCLUSION_V12_MIGRATION)? {
+    return Ok(());
+  }
+  let _ = conn.execute(
+    "ALTER TABLE categories ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0",
+    [],
+  );
+  conn.execute(
+    "UPDATE categories SET excluded = 1 WHERE name IN ('Account Transfers', 'Credit Card Payments')",
+    [],
+  )?;
+  conn.execute(
+    "DELETE FROM categories WHERE name = 'Credit Card Payments' AND parent_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM categories c WHERE c.parent_id = categories.id)
+       AND NOT EXISTS (SELECT 1 FROM expenses e WHERE e.category LIKE 'Credit Card Payments%')",
+    [],
+  )?;
+  conn.execute("UPDATE expenses SET amount_cents = abs(amount_cents)", [])?;
+  conn.execute(
+    "UPDATE expenses SET amount_cents = -amount_cents
+     WHERE NOT EXISTS (
+       SELECT 1 FROM categories c LEFT JOIN categories p ON c.parent_id = p.id
+       WHERE (c.name = expenses.category OR (p.name || ?1 || c.name) = expenses.category)
+         AND COALESCE(p.name, c.name) = 'Income'
+     )",
+    params![CATEGORY_LABEL_SEP],
+  )?;
+  mark_migration_applied(conn, CATEGORY_EXCLUSION_V12_MIGRATION)?;
+  Ok(())
+}
+
+pub fn save_category_split(
+  conn: &Connection,
+  household_id: i64,
+  category: &str,
+  member_name: &str,
+  percentage: f64,
+) -> rusqlite::Result<()> {
+  conn.execute(
+    "INSERT INTO category_splits (household_id, category, member_name, percentage)
+     VALUES (?1, ?2, ?3, ?4)
+     ON CONFLICT(household_id, category, member_name) DO UPDATE SET percentage = excluded.percentage",
+    params![household_id, category, member_name, percentage],
+  )?;
+  Ok(())
+}
+
+pub fn delete_category_splits_for(conn: &Connection, household_id: i64, category: &str) -> rusqlite::Result<()> {
+  conn.execute(
+    "DELETE FROM category_splits WHERE household_id = ?1 AND category = ?2",
+    params![household_id, category],
+  )?;
+  Ok(())
+}
+
+pub fn delete_all_category_splits(conn: &Connection, household_id: i64) -> rusqlite::Result<()> {
+  conn.execute(
+    "DELETE FROM category_splits WHERE household_id = ?1",
+    params![household_id],
+  )?;
+  Ok(())
 }
 

@@ -153,6 +153,11 @@ pub struct AnalyticsState {
     pub comparison_mode: ComparisonMode,
     pub comparison_period_a_preset: DatePreset,
     pub comparison_period_b_preset: DatePreset,
+    /// ponytail: one-shot flag. When set, every analytics chart resets
+    /// its zoom/pan to the default bounds on its next draw, then clears
+    /// the flag. Driven by the "Reset View" button so it works across
+    /// all charts (the button lives outside the plot closures).
+    pub reset_view: bool,
 }
 
 impl Default for AnalyticsState {
@@ -174,6 +179,7 @@ impl Default for AnalyticsState {
             comparison_mode: ComparisonMode::Overlay,
             comparison_period_a_preset: DatePreset::LastMonth,
             comparison_period_b_preset: DatePreset::ThisMonth,
+            reset_view: false,
         }
     }
 }
@@ -223,6 +229,7 @@ impl AnalyticsState {
             comparison_mode: str_to_comparison_mode(&row.comparison_mode),
             comparison_period_a_preset: str_to_date_preset(&row.comparison_date_preset),
             comparison_period_b_preset: DatePreset::ThisMonth,
+            reset_view: false,
         }
     }
 }

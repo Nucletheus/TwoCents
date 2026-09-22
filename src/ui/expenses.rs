@@ -1,8 +1,9 @@
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use rusqlite::params;
 use crate::models::*;
 
 use crate::db::*;
+use crate::ui::popups::styled_button;
 use crate::ui::widgets::*;
 use crate::TwoCentsApp;
 
@@ -16,46 +17,59 @@ impl TwoCentsApp {
     let toolbar_width = ui.available_width();
     ui.horizontal_wrapped(|ui| {
       ui.set_max_width(toolbar_width);
-      ui.heading(RichText::new("Household Expense Spreadsheet").color(ui.visuals().text_color()));
+      crate::ui::components::heading_lg(ui, "Household Expense Spreadsheet");
     });
     ui.horizontal_wrapped(|ui| {
       ui.set_max_width(toolbar_width);
+      // ponytail: themed buttons instead of the default egui look. Subtle
+      // outlined buttons read cleaner in a toolbar than filled defaults.
       if self.csv_import_rx.is_some() {
-        let _ = ui.button("Importing...").on_hover_text("Waiting for file selection");
-      } else if ui.button("Import CSV Statement").clicked() {
+        let _ = styled_button(ui, "Importing...", false).on_hover_text("Waiting for file selection");
+      } else if styled_button(ui, "Import CSV Statement", true).clicked() {
         self.import_csv();
       }
-      if ui.button("Duplicates").clicked() {
+      if styled_button(ui, "Duplicates", false).clicked() {
         self.find_duplicates();
       }
-      if ui.button("Settings").clicked() {
+      if styled_button(ui, "Settings", false).clicked() {
         self.show_category_settings = true;
       }
     });
-    ui.label(
-      "Click or drag in a column to select rows. Hold Shift and drag to pan. Type to edit; Enter applies to all selected rows; Tab or Enter picks autocomplete and moves right; Escape clears.",
-    );
+    crate::ui::components::label_muted(ui,
+      "Click or drag in a column to select rows. Hold Shift and drag to pan. Type to edit; Enter applies to all selected rows; Tab or Enter picks autocomplete and moves right; Escape clears.");
     expense_grid_selection_status(ui, &self.expense_grid_state.selection);
 
     ui.add_space(4.0);
-    let category_candidates = self.cached_category_candidates.clone();
-    let member_candidates = self.cached_member_candidates.clone();
-    let vendor_candidates = self.cached_vendor_candidates.clone();
-    let description_candidates = self.cached_description_candidates.clone();
+    // ponytail: real empty state when the household has no expenses. The
+    // table-render path stays the same for non-empty cases.
+    if self.expenses.is_empty() {
+      crate::ui::components::empty_state(
+        ui,
+        "No expenses yet",
+        "Click Import CSV Statement to load a bank statement, or add an expense manually.",
+      );
+      return;
+    }
+    // ponytail: clones guarded on editing — autocomplete only reads these
+    // while a cell is open; the first frame of a new edit is the frame after
+    // edit_cell is set, so the candidates are present when needed.
+    let editing = self.expense_grid_state.edit_cell.is_some();
+    let category_candidates = if editing { self.cached_category_candidates.clone() } else { Vec::new() };
+    let member_candidates = if editing { self.cached_member_candidates.clone() } else { Vec::new() };
+    let vendor_candidates = if editing { self.cached_vendor_candidates.clone() } else { Vec::new() };
+    let description_candidates = if editing { self.cached_description_candidates.clone() } else { Vec::new() };
     let mut autocomplete_selection = self.autocomplete_selection;
 
     let old_spacing = ui.spacing().item_spacing;
     ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
 
-    let sorted_indices = self.cached_sorted_expense_indices.clone();
+    // ponytail: mem::take instead of a full O(N) Vec copy per frame —
+    // nothing reads the cache while the grid render borrows it.
+    let sorted_indices = std::mem::take(&mut self.cached_sorted_expense_indices);
 
-    let table_bg = ui.visuals().extreme_bg_color;
-    let table_stroke = ui.visuals().widgets.noninteractive.bg_stroke.color;
-    let grid_res = egui::Frame::default()
-      .fill(table_bg)
-      .stroke(egui::Stroke::new(1.0, table_stroke))
-      .corner_radius(8.0)
-      .inner_margin(egui::Margin::same(2))
+    // ponytail: shared grid_table_frame so the expense, import, and duplicates
+    // grids have identical chrome (1px border, 6px radius, 2px inner margin).
+    let grid_res = crate::ui::components::grid_table_frame(ui)
       .show(ui, |ui| {
         crate::ui::grid::render_grid(
           ui,
@@ -73,6 +87,7 @@ impl TwoCentsApp {
           true,
         )
       }).inner;
+    self.cached_sorted_expense_indices = sorted_indices;
 
     self.expense_grid_state.active_cell = grid_res.active_cell;
 
@@ -85,8 +100,12 @@ impl TwoCentsApp {
     }
 
     if let Some(rows_to_delete) = grid_res.force_delete_rows {
+      // ponytail: flush first — deferred edits reference indices that shift
+      // once rows are removed.
+      self.flush_deferred_expense_commits();
       self.delete_expenses_by_indices(&rows_to_delete);
     } else if let Some(rows_to_delete) = grid_res.delete_rows {
+      self.flush_deferred_expense_commits();
       self.show_delete_expense_confirm = true;
       self.delete_expense_indices = rows_to_delete;
     }
@@ -95,9 +114,6 @@ impl TwoCentsApp {
     let mut pending_category_commits = grid_res.pending_category_commits;
     let mut pending_member_commits = grid_res.pending_member_commits;
 
-    if self.expense_grid_state.drag.is_some() {
-      ui.ctx().request_repaint();
-    }
     ui.spacing_mut().item_spacing = old_spacing;
     if let Some(col) = grid_res.clicked_sort_column {
       let ascending = if self.expense_sort.column == col {
@@ -110,19 +126,47 @@ impl TwoCentsApp {
     }
     self.autocomplete_selection = autocomplete_selection;
 
-    pending_updates.sort_unstable();
-    pending_updates.dedup();
-    pending_category_commits.sort_unstable();
-    pending_category_commits.dedup();
-    pending_member_commits.sort_unstable();
-    pending_member_commits.dedup();
+    // ponytail: DB commits used to run per keystroke — a synchronous
+    // BEGIN/UPDATE/COMMIT every frame while typing. Accumulate this frame's
+    // changes and flush 400ms after the last change, or immediately when the
+    // editing cell closes. In-memory rows are already correct; the DB just
+    // catches up.
+    self.deferred_field_updates.append(&mut pending_updates);
+    self.deferred_category_commits.append(&mut pending_category_commits);
+    self.deferred_member_commits.append(&mut pending_member_commits);
+    let pending_total = self.deferred_field_updates.len()
+      + self.deferred_category_commits.len()
+      + self.deferred_member_commits.len();
+    if pending_total > 0 {
+      if pending_total != self.expense_last_pending_len {
+        self.expense_last_pending_len = pending_total;
+        self.expense_flush_at = Some(std::time::Instant::now());
+      }
+      let idle = self.expense_flush_at
+        .map_or(true, |t| t.elapsed() >= std::time::Duration::from_millis(400));
+      if idle || self.expense_grid_state.edit_cell.is_none() {
+        self.flush_deferred_expense_commits();
+      }
+    } else {
+      self.expense_last_pending_len = 0;
+      self.expense_flush_at = None;
+    }
 
-    self.flush_expense_grid_commits(
-      &pending_updates,
-      &pending_category_commits,
-      &pending_member_commits,
-    );
+  }
 
+  pub fn flush_deferred_expense_commits(&mut self) {
+    if self.deferred_field_updates.is_empty()
+      && self.deferred_category_commits.is_empty()
+      && self.deferred_member_commits.is_empty()
+    {
+      return;
+    }
+    let field_updates = std::mem::take(&mut self.deferred_field_updates);
+    let category_commits = std::mem::take(&mut self.deferred_category_commits);
+    let member_commits = std::mem::take(&mut self.deferred_member_commits);
+    self.flush_expense_grid_commits(&field_updates, &category_commits, &member_commits);
+    self.expense_last_pending_len = 0;
+    self.expense_flush_at = None;
   }
 
 
@@ -146,12 +190,10 @@ impl TwoCentsApp {
     member_indices.dedup();
 
     if self.conn.execute("BEGIN IMMEDIATE", []).is_err() {
-      self.log("[error] begin transaction failed");
-      return;
+            return;
     }
 
     let mut ok = true;
-    let mut chart_dirty = false;
 
     for &(idx, field) in pending_updates {
       let Some(row) = self.expenses.get_mut(idx) else {
@@ -164,17 +206,29 @@ impl TwoCentsApp {
         row.date = format_date(&row.date).unwrap_or_else(|| row.date.clone());
       }
       if field == "amount" {
-        if let Some(cents) = parse_amount_cents(&row.amount_input) {
-          row.amount_cents = cents;
-          row.amount_input = money(cents).replace('$', "");
+        // ponytail: sign is a function of category — debit negative,
+        // Income positive. Excluded rows keep their real amount.
+        if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
+          let sign = category_sign(&categories, &row.category);
+          row.amount_cents = if sign == 1 { magnitude } else { -magnitude };
+          row.amount_input = money(row.amount_cents).replace('$', "");
+        }
+      }
+      if field == "account" {
+        // Resolve the typed name against existing accounts; unknown names
+        // revert to the row's current account.
+        if let Some(matched) = self.accounts.iter().find(|account| account.name.eq_ignore_ascii_case(row.account.trim())) {
+          row.account_id = matched.id;
+          row.account = matched.name.clone();
+        } else if let Some(current) = self.accounts.iter().find(|account| account.id == row.account_id) {
+          row.account = current.name.clone();
         }
       }
       match update_expense_row(&self.conn, row, field) {
-        Ok(()) => chart_dirty = true,
+        Ok(()) => {}
         Err(err) => {
           ok = false;
-          self.log(format!("[error] save failed: {err}"));
-        }
+                  }
       }
     }
 
@@ -188,34 +242,54 @@ impl TwoCentsApp {
           "UPDATE expenses SET category = '' WHERE id = ?1 AND household_id = ?2",
           params![row.id, self.household_id],
         ) {
-          Ok(_) => chart_dirty = true,
+          Ok(_) => {}
           Err(err) => {
             ok = false;
-            self.log(format!("[error] save failed: {err}"));
-          }
+                      }
         }
         continue;
       }
       let typed = row.category.clone();
       let Some(matched) = find_category_by_label(&categories, &typed) else {
         row.category.clear();
-        self.log(format!(
-          "[categories] '{typed}' is not in Settings — pick a category from the list"
-        ));
-        continue;
+                continue;
       };
       row.category = matched.full_label(&parents);
       let category = row.category.clone();
       let expense_id = row.id;
+      // ponytail: category change re-derives the amount's sign —
+      // recategorizing to/from Income flips credit/debit. Excluded rows
+      // keep their real amount (flag filters aggregation only).
+      let sign = category_sign(&categories, &category);
+      let new_cents = if sign == 1 { row.amount_cents.abs() } else { -row.amount_cents.abs() };
+      if new_cents != row.amount_cents {
+        row.amount_cents = new_cents;
+        row.amount_input = money(new_cents).replace('$', "");
+        let _ = self.conn.execute(
+          "UPDATE expenses SET amount_cents = ?1 WHERE id = ?2 AND household_id = ?3",
+          params![new_cents, expense_id, self.household_id],
+        );
+      }
       match self.conn.execute(
         "UPDATE expenses SET category = ?1 WHERE id = ?2 AND household_id = ?3",
         params![category, expense_id, self.household_id],
       ) {
-        Ok(_) => chart_dirty = true,
+        Ok(_) => {
+          // ponytail: spreadsheet corrections teach the categorizer — upsert
+          // the vendor rule so future imports use the fixed category. Skip
+          // short vendors (< 3 chars) — they substring-match everything.
+          if !row.vendor.is_empty() && row.vendor.trim().chars().count() >= 3 {
+            let vendor = row.vendor.to_lowercase();
+            let _ = self.conn.execute(
+              "INSERT INTO vendor_category_rules (household_id, vendor_pattern, category) VALUES (?1, ?2, ?3)
+               ON CONFLICT(household_id, vendor_pattern) DO UPDATE SET category = excluded.category",
+              rusqlite::params![self.household_id, vendor, category],
+            );
+          }
+        }
         Err(err) => {
           ok = false;
-          self.log(format!("[error] save failed: {err}"));
-        }
+                  }
       }
     }
 
@@ -230,21 +304,17 @@ impl TwoCentsApp {
         "UPDATE expenses SET member = ?1 WHERE id = ?2 AND household_id = ?3",
         params![member, expense_id, self.household_id],
       ) {
-        Ok(_) => chart_dirty = true,
+        Ok(_) => {}
         Err(err) => {
           ok = false;
-          self.log(format!("[error] member save failed: {err}"));
-        }
+                  }
       }
     }
 
     if ok {
       if self.conn.execute("COMMIT", []).is_err() {
         let _ = self.conn.execute("ROLLBACK", []);
-        self.log("[error] commit transaction failed");
-      } else if chart_dirty {
-        self.chart_dirty = true;
-      }
+              }
     } else {
       let _ = self.conn.execute("ROLLBACK", []);
     }
@@ -253,16 +323,17 @@ impl TwoCentsApp {
   pub fn find_duplicates(&mut self) {
     let results = {
       let mut stmt = match self.conn.prepare(
-        "SELECT e1.id, e1.date, e1.amount_cents, COALESCE(e1.member, ''), e1.category, COALESCE(e1.vendor, ''), e1.description
+        "SELECT e1.id, e1.date, e1.amount_cents, COALESCE(e1.member, ''), e1.category, COALESCE(e1.vendor, ''), e1.description, COALESCE(e1.account_id, 1), COALESCE(a.name, '')
          FROM expenses e1
+         LEFT JOIN accounts a ON a.id = e1.account_id
          INNER JOIN (
              SELECT date, amount_cents, lower(COALESCE(vendor, '')) as l_vendor
              FROM expenses
              WHERE household_id = ?1
              GROUP BY date, amount_cents, lower(COALESCE(vendor, ''))
              HAVING COUNT(*) > 1
-         ) e2 ON e1.date = e2.date 
-             AND e1.amount_cents = e2.amount_cents 
+         ) e2 ON e1.date = e2.date
+             AND e1.amount_cents = e2.amount_cents
              AND lower(COALESCE(e1.vendor, '')) = e2.l_vendor
          WHERE e1.household_id = ?1
          ORDER BY e1.date DESC, e1.amount_cents DESC, lower(COALESCE(e1.vendor, ''))"
@@ -286,6 +357,8 @@ impl TwoCentsApp {
           category: row.get(4)?,
           vendor: row.get(5)?,
           description: row.get(6)?,
+          account_id: row.get(7)?,
+          account: row.get(8)?,
         })
       });
 
@@ -310,11 +383,9 @@ impl TwoCentsApp {
         self.duplicate_grid_state.clear_selection();
         self.show_duplicate_review = true;
         self.rebuild_sorted_duplicate_indices();
-        self.log(format!("[duplicates] found {} possible duplicates for review", self.duplicate_rows.len()));
-      }
+              }
       Err(err) => {
-        self.log(format!("[duplicates] Query execution failed: {err}"));
-      }
+              }
     }
   }
 }

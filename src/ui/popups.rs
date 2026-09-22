@@ -1,9 +1,10 @@
 use eframe::egui::{self, Color32, Id, RichText};
 use std::collections::HashSet;
-use crate::models::*;
 use crate::db::*;
-use crate::ui::widgets::*;
+use crate::models::*;
+use crate::ui::components::section_header;
 use crate::ui::theme;
+use crate::ui::widgets::*;
 use crate::TwoCentsApp;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,35 @@ pub fn category_color_for(categories: &[Category], label: &str) -> Color32 {
     .map(|c| c.color)
     .unwrap_or(Color32::TRANSPARENT)
 }
+
+
+// Visuals, but for inline actions in a settings list a subtle outlined
+// button reads cleaner than the default filled one. `primary` switches
+// to the accent fill.
+pub fn styled_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::Response {
+  if primary {
+    let accent = crate::ui::components::accent_color(ui);
+    let fg = theme::contrast_text(accent);
+    ui.add(
+      egui::Button::new(egui::RichText::new(label).color(fg))
+        .fill(accent)
+        .stroke(egui::Stroke::new(crate::ui::theme_tokens::BORDER_W, accent))
+        .corner_radius(crate::ui::theme_tokens::RADIUS_SM),
+    )
+  } else {
+    let fill = crate::ui::components::bg_subtle(ui);
+    let stroke = crate::ui::components::border_default(ui);
+    let fg = crate::ui::components::fg_default(ui);
+    ui.add(
+      egui::Button::new(egui::RichText::new(label).color(fg))
+        .fill(fill)
+        .stroke(egui::Stroke::new(crate::ui::theme_tokens::BORDER_W, stroke))
+        .corner_radius(crate::ui::theme_tokens::RADIUS_SM),
+    )
+  }
+}
+
+// ponytail: contrast picking lives in theme::contrast_text (single copy).
 
 /// Renders the category picker dropdown menu and returns the picked label, if any.
 /// Extracted from TwoCentsApp::ui_category_picker_menu so it can be called without &self.
@@ -82,17 +112,8 @@ impl TwoCentsApp {
         if let Some(member) = self.members.iter_mut().find(|member| member.id == member_id) {
           member.color = color;
         }
-        self.log(format!(
-          "[household] updated color for '{}'",
-          self
-            .members
-            .iter()
-            .find(|member| member.id == member_id)
-            .map(|member| member.name.as_str())
-            .unwrap_or("member")
-        ));
-      }
-      Err(err) => self.log(format!("[error] member color save failed: {err}")),
+              }
+      Err(_err) => {}
     }
   }
 
@@ -102,18 +123,34 @@ impl TwoCentsApp {
 
   pub fn ui_member_color_popup(&mut self, ctx: &egui::Context) {
     let mut popup_state = self.member_color_popup.clone();
-    let mut open = popup_state.is_some();
     let mut color_changed: Option<(i64, Color32)> = None;
+    let mut close_requested = false;
     if let Some(popup) = &mut popup_state {
       let title = format!("Member color: {}", popup.name);
       egui::Window::new(title)
+        .title_bar(false)
         .id(Id::new("member_color_popup"))
-        .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .default_width(300.0)
-        .frame(themed_modal_frame(ctx))
+        .default_width(320.0)
+        .frame(crate::ui::components::modal())
         .show(ctx, |ui| {
+          // ponytail: heading + muted description, Notion hierarchy. Same
+          // shape as Import / Duplicates / Settings modals. Replaces the
+          // OS title bar so the modal is consistent across the app.
+          ui.horizontal(|ui| {
+            crate::ui::components::heading_md(ui, "Pick a color");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+              if window_close_button(ui).clicked() {
+                close_requested = true;
+              }
+            });
+          });
+          crate::ui::components::label_muted(
+            ui,
+            &format!("This color identifies {} in the expense grid.", popup.name),
+          );
+          ui.add_space(crate::ui::theme_tokens::SPACE_3);
           if accent_color_picker_ui(ui, &mut popup.color) {
             color_changed = Some((popup.id, popup.color));
           }
@@ -122,7 +159,7 @@ impl TwoCentsApp {
     if let Some((id, color)) = color_changed {
       self.set_member_color(id, color);
     }
-    self.member_color_popup = if open { popup_state } else { None };
+    self.member_color_popup = if close_requested { None } else { popup_state };
   }
 
 
@@ -141,9 +178,18 @@ impl TwoCentsApp {
         if is_parent {
           self.recolor_subcategories_for_parent(category_id, color);
         }
-        self.chart_dirty = true;
       }
-      Err(err) => self.log(format!("[error] category color save failed: {err}")),
+      Err(_err) => {}
+    }
+  }
+
+  fn set_category_excluded(&mut self, category_id: i64, excluded: bool) {
+    let _ = self.conn.execute(
+      "UPDATE categories SET excluded = ?1 WHERE id = ?2 AND household_id = ?3",
+      rusqlite::params![excluded as i64, category_id, self.household_id],
+    );
+    if let Some(category) = self.categories.iter_mut().find(|category| category.id == category_id) {
+      category.excluded = excluded;
     }
   }
 
@@ -178,20 +224,27 @@ impl TwoCentsApp {
             sub.color = sub_color;
           }
         }
-        Err(err) => self.log(format!("[error] subcategory color save failed: {err}")),
+        Err(_err) => {}
       }
     }
   }
 
   fn delete_category(&mut self, category_id: i64) {
+    // ponytail: the Income root drives the credit/debit sign convention —
+    // deleting it would strand income rows. Everything else is deletable;
+    // exclusion is a user-set flag now, not name-based protection.
+    let is_income_root = self.categories.iter()
+      .find(|category| category.id == category_id)
+      .is_some_and(|category| category.name.eq_ignore_ascii_case(INCOME_PARENT));
+    if is_income_root {
+      return;
+    }
     match delete_category_from_db(&self.conn, self.household_id, category_id) {
       Ok(()) => {
         self.expenses = load_expenses(&self.conn, self.household_id).unwrap_or_default();
         self.reload_categories();
-        self.chart_dirty = true;
-        self.log("[categories] deleted category and cleared matching expenses");
-      }
-      Err(err) => self.log(format!("[error] delete category failed: {err}")),
+              }
+      Err(_err) => {}
     }
   }
 
@@ -203,9 +256,8 @@ impl TwoCentsApp {
     match add_parent_category_db(&self.conn, self.household_id, name) {
       Ok(()) => {
         self.reload_categories();
-        self.log(format!("[categories] added parent '{name}'"));
-      }
-      Err(err) => self.log(format!("[error] add parent category failed: {err}")),
+              }
+      Err(_err) => {}
     }
   }
 
@@ -217,9 +269,8 @@ impl TwoCentsApp {
     match add_subcategory_db(&self.conn, self.household_id, parent_id, name) {
       Ok(()) => {
         self.reload_categories();
-        self.log(format!("[categories] added subcategory '{name}'"));
-      }
-      Err(err) => self.log(format!("[error] add subcategory failed: {err}")),
+              }
+      Err(_err) => {}
     }
   }
 
@@ -233,23 +284,26 @@ impl TwoCentsApp {
     let parent_ids = sorted_parent_category_ids(&categories);
 
     let mut delete_target: Option<i64> = None;
-    let mut add_sub_to_parent: Option<i64> = None;
+    let mut start_add_sub: Option<i64> = None;
+    let mut commit_sub = false;
+    let mut cancel_sub = false;
+    let mut excluded_toggles: Vec<(i64, bool)> = Vec::new();
 
-    for parent_id in parent_ids {
-      let Some(parent) = categories.iter().find(|category| category.id == parent_id) else {
+    for parent_id in &parent_ids {
+      let Some(parent) = categories.iter().find(|c| c.id == *parent_id) else {
         continue;
       };
       ui.horizontal(|ui| {
         if color_swatch_button(ui, parent.color).clicked() {
           self.open_category_color_popup(parent.id, parent.name.clone(), parent.color);
         }
-        ui.label(RichText::new(&parent.name).strong().color(ui.visuals().selection.bg_fill));
+        ui.label(RichText::new(&parent.name).strong().color(crate::ui::components::accent_color(ui)));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
           if ui
             .add(
-              egui::Button::new(RichText::new("Delete").small().color(ui.visuals().text_color()))
+              egui::Button::new(RichText::new("Delete").small().color(crate::ui::components::fg_default(ui)))
                 .fill(ui.visuals().widgets.hovered.bg_fill)
-                .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)),
+                .stroke(egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color)),
             )
             .clicked()
           {
@@ -257,20 +311,45 @@ impl TwoCentsApp {
           }
           if ui
             .add(
-              egui::Button::new(RichText::new("+ Sub").small().color(ui.visuals().text_color()))
+              egui::Button::new(RichText::new("+ Sub").small().color(crate::ui::components::fg_default(ui)))
                 .fill(ui.visuals().widgets.hovered.bg_fill)
-                .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)),
+                .stroke(egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color)),
             )
             .clicked()
           {
-            add_sub_to_parent = Some(parent.id);
+            start_add_sub = Some(parent.id);
+          }
+          // ponytail: user-set exclusion — children inherit via the tree
+          // walk; excluded rows drop out of budgets/analytics/settlements.
+          let mut parent_excluded = parent.excluded;
+          if ui.checkbox(&mut parent_excluded, "Excluded").changed() {
+            excluded_toggles.push((parent.id, parent_excluded));
           }
         });
       });
 
+      // Inline subcategory input row
+      if self.adding_subcategory_to == Some(parent.id) {
+        ui.horizontal(|ui| {
+          ui.add_space(20.0);
+          let response = ui.add(
+            egui::TextEdit::singleline(&mut self.inline_subcategory_name)
+              .id(egui::Id::new(("inline_sub_input_field", parent.id)))
+              .hint_text("Subcategory name")
+              .desired_width(180.0),
+          );
+          if styled_button(ui, "Add", false).clicked() || text_field_enter_pressed(ui, &response) {
+            commit_sub = true;
+          }
+          if ui.small_button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel_sub = true;
+          }
+        });
+      }
+
       let mut sub_ids: Vec<i64> = categories
         .iter()
-        .filter(|category| category.parent_id == Some(parent_id))
+        .filter(|category| category.parent_id == Some(parent.id))
         .map(|category| category.id)
         .collect();
       sub_ids.sort_by(|a, b| {
@@ -280,7 +359,7 @@ impl TwoCentsApp {
       });
 
       for sub_id in sub_ids {
-        let Some(sub) = categories.iter().find(|category| category.id == sub_id) else {
+        let Some(sub) = categories.iter().find(|c| c.id == sub_id) else {
           continue;
         };
         ui.horizontal(|ui| {
@@ -288,17 +367,21 @@ impl TwoCentsApp {
           if color_swatch_button(ui, sub.color).clicked() {
             self.open_category_color_popup(sub.id, sub.full_label(&parents), sub.color);
           }
-          ui.label(RichText::new(&sub.name).color(ui.visuals().text_color()).small());
+          ui.label(RichText::new(&sub.name).color(crate::ui::components::fg_default(ui)).small());
           ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
               .add(
-                egui::Button::new(RichText::new("Delete").small().color(ui.visuals().text_color()))
+                egui::Button::new(RichText::new("Delete").small().color(crate::ui::components::fg_default(ui)))
                   .fill(ui.visuals().widgets.hovered.bg_fill)
-                  .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)),
+                  .stroke(egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color)),
               )
               .clicked()
             {
               delete_target = Some(sub.id);
+            }
+            let mut sub_excluded = sub.excluded;
+            if ui.checkbox(&mut sub_excluded, "Excluded").changed() {
+              excluded_toggles.push((sub.id, sub_excluded));
             }
           });
         });
@@ -306,8 +389,32 @@ impl TwoCentsApp {
       ui.separator();
     }
 
-    if let Some(parent_id) = add_sub_to_parent {
-      self.new_subcategory_parent_id = Some(parent_id);
+    for (category_id, excluded) in excluded_toggles {
+      self.set_category_excluded(category_id, excluded);
+    }
+
+    if let Some(parent_id) = start_add_sub {
+      self.adding_subcategory_to = Some(parent_id);
+      self.inline_subcategory_name.clear();
+      // The TextEdit renders next frame — egui assigns focus to it then, so
+      // the user can type immediately.
+      ui.ctx().memory_mut(|mem| {
+        mem.request_focus(egui::Id::new(("inline_sub_input_field", parent_id)))
+      });
+    }
+    if commit_sub {
+      if let Some(parent_id) = self.adding_subcategory_to {
+        let name = self.inline_subcategory_name.trim().to_string();
+        if !name.is_empty() {
+          self.add_subcategory(parent_id, &name);
+        }
+      }
+      self.adding_subcategory_to = None;
+      self.inline_subcategory_name.clear();
+    }
+    if cancel_sub {
+      self.adding_subcategory_to = None;
+      self.inline_subcategory_name.clear();
     }
     if let Some(category_id) = delete_target {
       self.delete_category(category_id);
@@ -320,24 +427,29 @@ impl TwoCentsApp {
     }
     let mut open = true;
     let mut add_parent = false;
-    let mut add_sub = false;
     egui::Window::new("Settings")
       .id(Id::new("category_settings_window"))
-      .open(&mut open)
       .collapsible(false)
       .resizable(true)
       .default_width(400.0)
       .frame(themed_modal_frame(ctx))
       .show(ctx, |ui| {
-        ui.label(RichText::new("Settings").color(ui.visuals().text_color()));
-        ui.label(
-          RichText::new("Create and delete categories here. The expense grid only uses these.")
-            .small()
-            .color(ui.visuals().text_color()),
+        ui.horizontal(|ui| {
+          crate::ui::components::heading_lg(ui, "Settings");
+          ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if window_close_button(ui).clicked() {
+              open = false;
+            }
+          });
+        });
+        ui.add_space(crate::ui::theme_tokens::SPACE_1);
+        crate::ui::components::label_muted(
+          ui,
+          "Create and delete categories here. The expense grid only uses these. Categories marked \"Excluded\" are left out of budgets, analytics, and settlements.",
         );
-        ui.add_space(6.0);
+        ui.add_space(crate::ui::theme_tokens::SPACE_4);
         themed_panel_frame(ui.style()).show(ui, |ui| {
-          ui.label(RichText::new("Add parent category").strong().color(ui.visuals().selection.bg_fill));
+          section_header(ui, "Add parent category");
           ui.horizontal(|ui| {
             let parent_name_response = ui.add(
               egui::TextEdit::singleline(&mut self.new_parent_category_name)
@@ -345,51 +457,15 @@ impl TwoCentsApp {
                 .hint_text("e.g. Home — press Enter")
                 .desired_width(220.0),
             );
-            add_parent =
-              ui.button("Add parent").clicked() || text_field_enter_pressed(ui, &parent_name_response);
+            if styled_button(ui, "Add parent", false).clicked()
+              || text_field_enter_pressed(ui, &parent_name_response)
+            {
+              add_parent = true;
+            }
           });
-          ui.add_space(8.0);
-          ui.label(RichText::new("Add subcategory").strong().color(ui.visuals().selection.bg_fill));
-          ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("new_subcategory_parent")
-              .selected_text(
-                self
-                  .new_subcategory_parent_id
-                  .and_then(|id| self.categories.iter().find(|c| c.id == id))
-                  .map(|c| c.name.clone())
-                  .unwrap_or_else(|| "Select parent…".to_string()),
-              )
-              .show_ui(ui, |ui| {
-                egui::ScrollArea::vertical()
-                  .id_salt("new_subcategory_parent_scroll")
-                  .max_height(200.0)
-                  .show(ui, |ui| {
-                    let parents = self.categories.clone();
-                    for parent_id in sorted_parent_category_ids(&parents) {
-                      let Some(parent) = parents.iter().find(|category| category.id == parent_id) else {
-                        continue;
-                      };
-                      let sel = self.new_subcategory_parent_id == Some(parent.id);
-                      if ui
-                        .selectable_label(sel, crate::ui::theme::sel_text(ui, sel, &parent.name))
-                        .clicked()
-                      {
-                        self.new_subcategory_parent_id = Some(parent.id);
-                      }
-                    }
-                  });
-              });
-            let sub_name_response = ui.add(
-              egui::TextEdit::singleline(&mut self.new_subcategory_name)
-                .id(settings_new_sub_name_id())
-                .hint_text("e.g. Mortgage — press Enter")
-                .desired_width(140.0),
-            );
-            add_sub = ui.button("Add sub").clicked() || text_field_enter_pressed(ui, &sub_name_response);
-          });
-          ui.add_space(8.0);
+          ui.add_space(crate::ui::theme_tokens::SPACE_4);
           ui.separator();
-          ui.label(RichText::new("Your categories").strong().color(ui.visuals().selection.bg_fill));
+          section_header(ui, "Your categories");
           egui::ScrollArea::vertical()
             .id_salt("category_settings_scroll")
             .auto_shrink([false, false])
@@ -407,36 +483,38 @@ impl TwoCentsApp {
         ctx.memory_mut(|mem| mem.request_focus(settings_new_parent_name_id()));
       }
     }
-    if add_sub {
-      if let Some(parent_id) = self.new_subcategory_parent_id {
-        let name = self.new_subcategory_name.trim().to_string();
-        if !name.is_empty() {
-          self.add_subcategory(parent_id, &name);
-          self.new_subcategory_name.clear();
-          ctx.memory_mut(|mem| mem.request_focus(settings_new_sub_name_id()));
-        }
-      } else {
-        self.log("[categories] pick a parent before adding a subcategory");
-        ctx.memory_mut(|mem| mem.request_focus(settings_new_sub_name_id()));
-      }
-    }
     self.show_category_settings = open;
   }
 
   pub fn ui_category_color_popup(&mut self, ctx: &egui::Context) {
     let mut popup_state = self.category_color_popup.clone();
-    let mut open = popup_state.is_some();
     let mut color_changed: Option<(i64, Color32)> = None;
+    let mut close_requested = false;
     if let Some(popup) = &mut popup_state {
-      let title = format!("Color: {}", popup.name);
+      let title = format!("Category color: {}", popup.name);
       egui::Window::new(title)
+        .title_bar(false)
         .id(Id::new("category_color_popup"))
-        .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .default_width(280.0)
-        .frame(themed_modal_frame(ctx))
+        .default_width(320.0)
+        .frame(crate::ui::components::modal())
         .show(ctx, |ui| {
+          // ponytail: heading + muted description, Notion hierarchy. Same
+          // shape as the member-color picker and the other modals.
+          ui.horizontal(|ui| {
+            crate::ui::components::heading_md(ui, "Pick a color");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+              if window_close_button(ui).clicked() {
+                close_requested = true;
+              }
+            });
+          });
+          crate::ui::components::label_muted(
+            ui,
+            &format!("This color identifies {} in the expense grid.", popup.name),
+          );
+          ui.add_space(crate::ui::theme_tokens::SPACE_3);
           if accent_color_picker_ui(ui, &mut popup.color) {
             color_changed = Some((popup.id, popup.color));
           }
@@ -445,7 +523,7 @@ impl TwoCentsApp {
     if let Some((id, color)) = color_changed {
       self.set_category_color(id, color);
     }
-    self.category_color_popup = if open { popup_state } else { None };
+    self.category_color_popup = if close_requested { None } else { popup_state };
   }
 
 
@@ -455,7 +533,6 @@ impl TwoCentsApp {
       let row_count = self.delete_expense_indices.len();
       
       egui::Window::new("Confirm Deletion")
-        .open(&mut open)
         .resizable(false)
         .collapsible(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -463,46 +540,43 @@ impl TwoCentsApp {
         .frame(
           egui::Frame::window(&ctx.global_style())
             .fill(ctx.global_style().visuals.panel_fill)
-            .stroke(egui::Stroke::new(2.0, theme::current_error()))
+            .stroke(egui::Stroke::new(2.0_f32, theme::current_error()))
             .corner_radius(10.0)
             .inner_margin(egui::Margin::symmetric(16, 16)),
         )
         .show(ctx, |ui| {
+          ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+            if window_close_button(ui).clicked() {
+              open = false;
+            }
+          });
           ui.vertical_centered(|ui| {
-            ui.label(
-              RichText::new("⚠ Warning")
-                .font(egui::FontId::proportional(18.0))
-                .strong()
-                .color(theme::current_error()),
-            );
-            ui.add_space(8.0);
+            // ponytail: heading + secondary text. Replaces the lone
+            // "⚠ Warning" RichText label.
+            crate::ui::components::heading_md(ui, "Confirm Deletion");
+            ui.add_space(crate::ui::theme_tokens::SPACE_2);
             ui.label(
               RichText::new(format!(
                 "Are you sure you want to permanently delete the selected {} expense row(s)?",
                 row_count
               ))
               .font(egui::FontId::proportional(14.0))
-              .color(ui.visuals().text_color()),
+              .color(crate::ui::components::fg_default(ui)),
             );
             ui.add_space(6.0);
             ui.label(
               RichText::new("This action cannot be undone.")
                 .font(egui::FontId::proportional(11.0))
-                .color(ui.visuals().weak_text_color()),
+                .color(crate::ui::components::fg_muted(ui)),
             );
             ui.add_space(16.0);
-            
+
             ui.horizontal(|ui| {
               ui.columns(2, |cols| {
+                // ponytail: Delete on the left per user preference.
                 cols[0].vertical_centered(|ui| {
-                  if ui.button("Cancel").clicked() {
-                    self.show_delete_expense_confirm = false;
-                    self.delete_expense_indices.clear();
-                  }
-                });
-                cols[1].vertical_centered(|ui| {
               let err = theme::current_error();
-              let on_err = if err.r() > 180 && err.g() > 180 && err.b() > 180 { Color32::BLACK } else { Color32::WHITE };
+              let on_err = theme::contrast_text(err);
               let confirm_btn = egui::Button::new(
                 RichText::new("Delete").strong().color(on_err),
               )
@@ -511,6 +585,12 @@ impl TwoCentsApp {
                     self.show_delete_expense_confirm = false;
                     let targets = std::mem::take(&mut self.delete_expense_indices);
                     self.delete_expenses_by_indices(&targets);
+                  }
+                });
+                cols[1].vertical_centered(|ui| {
+                  if styled_button(ui, "Cancel", false).clicked() {
+                    self.show_delete_expense_confirm = false;
+                    self.delete_expense_indices.clear();
                   }
                 });
               });
@@ -525,7 +605,6 @@ impl TwoCentsApp {
       let row_count = self.delete_import_indices.len();
       
       egui::Window::new("Remove staged rows?")
-        .open(&mut open)
         .resizable(false)
         .collapsible(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -533,17 +612,22 @@ impl TwoCentsApp {
         .frame(
           egui::Frame::window(&ctx.global_style())
             .fill(ctx.global_style().visuals.panel_fill)
-            .stroke(egui::Stroke::new(2.0, ctx.global_style().visuals.selection.bg_fill))
+            .stroke(egui::Stroke::new(2.0_f32, ctx.global_style().visuals.selection.bg_fill))
             .corner_radius(10.0)
             .inner_margin(egui::Margin::symmetric(16, 16)),
         )
         .show(ctx, |ui| {
+          ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+            if window_close_button(ui).clicked() {
+              open = false;
+            }
+          });
           ui.vertical_centered(|ui| {
             ui.label(
               RichText::new("Remove staged rows")
                 .font(egui::FontId::proportional(18.0))
                 .strong()
-                .color(ui.visuals().selection.bg_fill),
+                .color(crate::ui::components::accent_color(ui)),
             );
             ui.add_space(8.0);
             ui.label(
@@ -552,27 +636,22 @@ impl TwoCentsApp {
                 row_count
               ))
               .font(egui::FontId::proportional(14.0))
-              .color(ui.visuals().text_color()),
+              .color(crate::ui::components::fg_default(ui)),
             );
             ui.add_space(6.0);
             ui.label(
               RichText::new("These rows will not be saved into your database.")
                 .font(egui::FontId::proportional(11.0))
-                .color(ui.visuals().weak_text_color()),
+                .color(crate::ui::components::fg_muted(ui)),
             );
             ui.add_space(16.0);
             
             ui.horizontal(|ui| {
               ui.columns(2, |cols| {
+                // ponytail: Remove on the left per user preference.
                 cols[0].vertical_centered(|ui| {
-                  if ui.button("Cancel").clicked() {
-                    self.show_delete_import_confirm = false;
-                    self.delete_import_indices.clear();
-                  }
-                });
-                cols[1].vertical_centered(|ui| {
-                  let sel_bg = ui.visuals().selection.bg_fill;
-                  let on_sel = if sel_bg.r() > 180 && sel_bg.g() > 180 && sel_bg.b() > 180 { Color32::BLACK } else { Color32::WHITE };
+                  let sel_bg = crate::ui::components::accent_color(ui);
+                  let on_sel = theme::contrast_text(sel_bg);
                   let confirm_btn = egui::Button::new(
                     RichText::new("Remove").strong().color(on_sel),
                   )
@@ -581,6 +660,12 @@ impl TwoCentsApp {
                     self.show_delete_import_confirm = false;
                     let targets = std::mem::take(&mut self.delete_import_indices);
                     self.delete_import_rows_by_indices(&targets);
+                  }
+                });
+                cols[1].vertical_centered(|ui| {
+                  if ui.button("Cancel").clicked() {
+                    self.show_delete_import_confirm = false;
+                    self.delete_import_indices.clear();
                   }
                 });
               });
@@ -596,8 +681,32 @@ fn settings_new_parent_name_id() -> Id {
   Id::new("settings_new_parent_category_name")
 }
 
-fn settings_new_sub_name_id() -> Id {
-  Id::new("settings_new_subcategory_name")
+/// ponytail: egui's title-bar X is a ~16px hit target — too precise to click.
+/// This paints a 28×24 close glyph with a full-rect click area. Windows drop
+/// `.open()` and render this in their content instead. The X is drawn with
+/// two line segments — the ✕ text glyph is missing from egui's default fonts
+/// (rendered as a blank square).
+pub fn window_close_button(ui: &mut egui::Ui) -> egui::Response {
+  let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+  if response.hovered() {
+    ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+  }
+  let fg = if response.hovered() {
+    ui.visuals().widgets.hovered.fg_stroke.color
+  } else {
+    crate::ui::components::fg_muted(ui)
+  };
+  let c = rect.center();
+  let r = 5.0;
+  ui.painter().line_segment(
+    [egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)],
+    egui::Stroke::new(1.5_f32, fg),
+  );
+  ui.painter().line_segment(
+    [egui::pos2(c.x - r, c.y + r), egui::pos2(c.x + r, c.y - r)],
+    egui::Stroke::new(1.5_f32, fg),
+  );
+  response.on_hover_text("Close")
 }
 
 fn grid_cell_active(response: &egui::Response) -> bool {

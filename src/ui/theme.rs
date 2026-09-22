@@ -315,10 +315,46 @@ fn theme_pair(t: ThemePreset) -> ThemePair {
 
 // ---- Global theme palette (set every frame by configure_theme) ----
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 static THEME_PALETTE: Mutex<Option<ThemeColors>> = Mutex::new(None);
+static THEME_IS_DARK: AtomicBool = AtomicBool::new(true);
 
 fn store_palette(c: &ThemeColors) {
   if let Ok(mut g) = THEME_PALETTE.lock() { *g = Some(ThemeColors { ..*c }); }
+}
+
+/// ponytail: read the 9 raw fields the 13 source themes provide. The new
+/// `components` module derives its Notion token names (bg_subtle, fg_faint,
+/// border_strong, etc.) from these by mixing toward black/white. Tradeoff
+/// documented in `components::Palette::from_active`.
+pub fn active_raw() -> (
+  Color32, // panel_fill
+  Color32, // window_fill
+  Color32, // faint_bg
+  Color32, // hovered_bg
+  Color32, // text_primary
+  Color32, // border
+  Color32, // accent
+  Color32, // success
+  Color32, // warning
+  Color32, // error
+) {
+  THEME_PALETTE.lock().ok().and_then(|g| {
+    g.as_ref().map(|c| {
+      (c.panel_fill, c.window_fill, c.faint_bg, c.hovered_bg,
+       c.text_primary, c.border, c.accent, c.success, c.warning, c.error)
+    })
+  }).unwrap_or((
+    Color32::from_rgb(30, 30, 30), Color32::from_rgb(40, 40, 40),
+    Color32::from_rgb(40, 40, 40), Color32::from_rgb(60, 60, 60),
+    Color32::from_rgb(230, 230, 230), Color32::from_rgb(60, 60, 60),
+    Color32::from_rgb(0, 122, 255),
+    Color32::from_rgb(0, 180, 140), Color32::from_rgb(230, 140, 0), Color32::from_rgb(220, 80, 80),
+  ))
+}
+
+pub fn active_is_dark() -> bool {
+  THEME_IS_DARK.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn current_accent() -> Color32 {
@@ -337,7 +373,10 @@ pub fn current_error() -> Color32 {
   THEME_PALETTE.lock().ok().and_then(|g| g.as_ref().map(|c| c.error)).unwrap_or(Color32::from_rgb(220, 80, 80))
 }
 
-fn contrast_text(bg: Color32) -> Color32 {
+/// ponytail: the ONE contrast pick — black or white text for legibility on a
+/// given bg (rec.601 luminance, 150 threshold). All other copies of this idea
+/// were deduped into this function.
+pub fn contrast_text(bg: Color32) -> Color32 {
   let lum = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
   if lum > 150.0 { Color32::BLACK } else { Color32::WHITE }
 }
@@ -354,28 +393,44 @@ fn apply_visuals(visuals: &mut Visuals, c: &ThemeColors) {
   visuals.widgets.hovered.bg_fill = c.hovered_bg;
   visuals.widgets.active.bg_fill = c.accent;
   visuals.widgets.open.bg_fill = c.accent;
-  visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c.border);
-  visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, c.border);
-  visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, c.border);
-  visuals.widgets.active.bg_stroke = Stroke::new(1.0, c.accent);
-  visuals.widgets.open.bg_stroke = Stroke::new(1.0, c.accent);
+  visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, c.border);
+  visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, c.border);
+  visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, c.border);
+  visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, c.accent);
+  visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, c.accent);
   visuals.widgets.noninteractive.fg_stroke.color = c.text_primary;
   visuals.widgets.inactive.fg_stroke.color = c.text_primary;
   visuals.widgets.hovered.fg_stroke.color = c.text_primary;
   let on_accent = contrast_text(c.accent);
-  visuals.widgets.active.fg_stroke.color = c.text_primary;
-  visuals.widgets.open.fg_stroke.color = c.text_primary;
+  // ponytail: active/open widget states sit on accent backgrounds — their
+  // text must contrast with the accent, not text_primary (which is near-black
+  // in light themes → the black-on-blue button bug class).
+  visuals.widgets.active.fg_stroke.color = on_accent;
+  visuals.widgets.open.fg_stroke.color = on_accent;
   visuals.selection.bg_fill = c.accent;
-  visuals.selection.stroke = Stroke::new(1.0, on_accent);
-  visuals.text_cursor.stroke = Stroke::new(2.5, c.text_primary);
+  visuals.selection.stroke = Stroke::new(1.0_f32, on_accent);
+  visuals.text_cursor.stroke = Stroke::new(2.5_f32, c.text_primary);
   visuals.hyperlink_color = c.accent;
   visuals.warn_fg_color = c.warning;
   visuals.error_fg_color = c.error;
   visuals.override_text_color = None;
-  visuals.window_stroke = Stroke::new(1.0, c.border);
+  visuals.window_stroke = Stroke::new(1.0_f32, c.border);
 }
 
 pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool) {
+  // ponytail: skip the rebuild unless the theme actually changed — this ran
+  // every frame (Visuals alloc + set_visuals Arc swap + palette store) for
+  // values that only change on user action.
+  static LAST_APPLIED: Mutex<Option<(ThemePreset, bool)>> = Mutex::new(None);
+  let unchanged = LAST_APPLIED
+    .lock()
+    .ok()
+    .map(|guard| guard.as_ref().is_some_and(|(p, d)| *p == preset && *d == use_dark))
+    .unwrap_or(false);
+  if unchanged {
+    return;
+  }
+
   let pair = theme_pair(preset);
   let c = if use_dark { &pair.dark } else { &pair.light };
 
@@ -395,7 +450,11 @@ pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool)
   };
 
   ctx.set_visuals(visuals);
+  THEME_IS_DARK.store(use_dark, std::sync::atomic::Ordering::Relaxed);
   store_palette(c);
+  if let Ok(mut guard) = LAST_APPLIED.lock() {
+    *guard = Some((preset, use_dark));
+  }
 }
 
 pub fn sel_text(ui: &egui::Ui, selected: bool, label: &str) -> egui::RichText {

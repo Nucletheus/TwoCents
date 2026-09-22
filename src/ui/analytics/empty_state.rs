@@ -4,16 +4,16 @@ pub fn render_empty_state(ui: &mut egui::Ui, message: &str, hint: Option<&str>) 
     ui.vertical_centered(|ui| {
         ui.add_space(40.0);
         
-        let icon_color = ui.visuals().weak_text_color();
+        let icon_color = crate::ui::components::fg_muted(ui);
         ui.label(RichText::new("📊").size(48.0).color(icon_color));
         
         ui.add_space(16.0);
         
-        ui.label(RichText::new(message).size(16.0).color(ui.visuals().text_color()));
+        ui.label(RichText::new(message).size(16.0).color(crate::ui::components::fg_default(ui)));
         
         if let Some(hint_text) = hint {
             ui.add_space(8.0);
-            ui.label(RichText::new(hint_text).size(12.0).color(ui.visuals().weak_text_color()));
+            ui.label(RichText::new(hint_text).size(12.0).color(crate::ui::components::fg_muted(ui)));
         }
         
         ui.add_space(40.0);

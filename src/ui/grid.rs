@@ -9,8 +9,9 @@ use eframe::egui::{self, Color32, RichText};
 use egui_extras::TableBuilder;
 use crate::models::*;
 use crate::db::*;
+use crate::ui::popups::styled_button;
 use crate::ui::widgets::*;
-use crate::ui::popups::{member_color_for, category_color_for, category_picker_menu_ui};
+use crate::ui::popups::{member_color_for, category_picker_menu_ui};
 
 // ---------------------------------------------------------------------------
 // Result type — carries everything the caller needs to commit after rendering
@@ -99,15 +100,15 @@ pub fn render_grid<R: GridRow>(
   }
 
   // ── PENDING KEYBOARD EVENTS COMMITMENTS ──────────────────────────────────
-  let cached_members = member_candidates.to_vec();
-  let cached_categories = category_candidates.to_vec();
-  let cached_vendors = vendor_candidates.to_vec();
-  let cached_descriptions = description_candidates.to_vec();
+  // ponytail: candidate lists were cloned to owned Vecs every frame even with
+  // nothing being edited. The closure is only consumed by editing paths, so
+  // clone lazily inside it.
+  let editing_now = state.edit_cell.is_some();
   let candidates_fn = move |col| match col {
-    GridColumn::Member => cached_members.clone(),
-    GridColumn::Category => cached_categories.clone(),
-    GridColumn::Vendor => cached_vendors.clone(),
-    GridColumn::Description => cached_descriptions.clone(),
+    GridColumn::Member      => if editing_now { member_candidates.to_vec() } else { Vec::new() },
+    GridColumn::Category    => if editing_now { category_candidates.to_vec() } else { Vec::new() },
+    GridColumn::Vendor      => if editing_now { vendor_candidates.to_vec() } else { Vec::new() },
+    GridColumn::Description => if editing_now { description_candidates.to_vec() } else { Vec::new() },
     _ => Vec::new(),
   };
 
@@ -126,6 +127,7 @@ pub fn render_grid<R: GridRow>(
       GridColumn::Category => result.pending_category_commits.extend(targets),
       GridColumn::Vendor => result.pending_field_updates.extend(targets.into_iter().map(|t| (t, "vendor"))),
       GridColumn::Description => result.pending_field_updates.extend(targets.into_iter().map(|t| (t, "description"))),
+      GridColumn::Account => result.pending_field_updates.extend(targets.into_iter().map(|t| (t, "account"))),
     }
   }
 
@@ -147,22 +149,44 @@ pub fn render_grid<R: GridRow>(
       GridColumn::Category    => { row.row_category_mut().clear();       row.row_category_mut().push(ti); }
       GridColumn::Vendor      => { row.row_vendor_mut().clear();         row.row_vendor_mut().push(ti); }
       GridColumn::Description => { row.row_description_mut().clear();   row.row_description_mut().push(ti); }
+      GridColumn::Account     => { row.row_account_mut().clear();        row.row_account_mut().push(ti); }
     }
   } else {
     *typeahead = None; // discard if no edit cell
   }
 
-  let category_menu_w  = category_picker_menu_width(ui, categories, 200.0);
+  // ponytail: menu width measured once per (prefix, category count) and
+  // cached in egui temp data — layout_no_wrap per category per frame was
+  // pure waste; the measurement can only change when categories change.
+  let menu_w_id = egui::Id::new((cell_id_prefix, "cat_menu_w", categories.len()));
+  let category_menu_w = if ui.ctx().data(|d| d.get_temp::<f32>(menu_w_id).is_some()) {
+    ui.ctx().data(|d| d.get_temp::<f32>(menu_w_id).unwrap_or(200.0))
+  } else {
+    let measured = category_picker_menu_width(ui, categories, 200.0);
+    ui.ctx().data_mut(|d| d.insert_temp(menu_w_id, measured));
+    measured
+  };
   let member_menu_w    = MEMBER_PICKER_MIN_WIDTH;
   let member_count     = members.len();
   let member_scroll    = if member_count > 10 { Some(member_picker_max_height(member_count)) } else { None };
+
+  // ponytail: label→color map built once per frame — the old path rebuilt a
+  // HashMap + format!-ed every candidate full label PER CATEGORY CELL.
+  let parents_map = category_parent_map(categories);
+  let mut cat_colors: std::collections::HashMap<String, Color32> = std::collections::HashMap::with_capacity(categories.len() * 2);
+  for category in categories {
+    cat_colors.insert(category.name.clone(), category.color);
+    cat_colors.insert(category.full_label(&parents_map), category.color);
+  }
 
   let mut row_drag_bands: Vec<(usize, f32, f32)> = Vec::new();
   let mut scroll_y = *scroll_offset;
 
   // Helper closures to make cell egui::Id stable based on visual row positions
   let cell_id_by_visual = |col: GridColumn, visual_row: usize| -> egui::Id {
-    egui::Id::new((cell_id_prefix, format!("{col:?}"), visual_row))
+    // ponytail: hash the (prefix, column, row) tuple directly — format!-ing
+    // the enum was 12 String allocations per row per frame.
+    egui::Id::new((cell_id_prefix, col as u8, visual_row))
   };
   let get_cell_id_for_raw_row = |col: GridColumn, raw_idx: usize| -> Option<egui::Id> {
     sorted_indices.iter().position(|&i| i == raw_idx)
@@ -177,17 +201,18 @@ pub fn render_grid<R: GridRow>(
   };
 
   let w = ui.available_width();
-  let fractions = [0.12, 0.10, 0.10, 0.18, 0.15, 0.35];
-  let labels: [(GridColumn, &str); 6] = [
+  let fractions = [0.11, 0.09, 0.09, 0.09, 0.17, 0.14, 0.31];
+  let labels: [(GridColumn, &str); 7] = [
     (GridColumn::Date, "Date"),
+    (GridColumn::Account, "Account"),
     (GridColumn::Amount, "Amount"),
     (GridColumn::Member, "Member"),
     (GridColumn::Category, "Category"),
     (GridColumn::Vendor, "Vendor"),
     (GridColumn::Description, "Description"),
   ];
-  let sort_cols: [ExpenseSortColumn; 6] = [
-    ExpenseSortColumn::Date, ExpenseSortColumn::Amount,
+  let sort_cols: [ExpenseSortColumn; 7] = [
+    ExpenseSortColumn::Date, ExpenseSortColumn::Account, ExpenseSortColumn::Amount,
     ExpenseSortColumn::Member, ExpenseSortColumn::Category,
     ExpenseSortColumn::Vendor, ExpenseSortColumn::Description,
   ];
@@ -219,6 +244,7 @@ pub fn render_grid<R: GridRow>(
     .show(ui, |ui| {
       ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
       let mut builder = TableBuilder::new(ui)
+        .id_salt(format!("{cell_id_prefix}_table"))
         .striped(true)
         .vscroll(false)
         .min_scrolled_height(120.0)
@@ -228,18 +254,29 @@ pub fn render_grid<R: GridRow>(
       }
 
       builder
-        .body(|mut body| {
-          for (visual_row_index, &idx) in sorted_indices.iter().enumerate() {
-            body.row(GRID_ROW_HEIGHT, |mut row_ui| {
+        .body(|body| {
+          // ponytail: body.rows virtualizes — only the visible window of rows
+          // runs their cell closures. The old `for … body.row()` loop ran all
+          // N rows every frame even though egui clipped the painting only.
+          body.rows(GRID_ROW_HEIGHT, sorted_indices.len(), |mut row_ui| {
+            let visual_row_index = row_ui.index();
+            let idx = sorted_indices[visual_row_index];
 
               // ── DATE ────────────────────────────────────────────────────
               row_ui.col(|ui| {
                 let column = GridColumn::Date;
                 let cell_rect = ui.max_rect();
                 if show_row_separator {
+                  // ponytail: paint the row separator at the TOP of the cell
+                  // (the boundary between the previous row and this one)
+                  // instead of the bottom. The previous version drew it at
+                  // the bottom, which got covered by the next row's striped
+                  // background. Drawing at top puts the line on top of the
+                  // previous row's background but below this row's content.
                   ui.painter().line_segment(
-                    [cell_rect.left_bottom(), egui::pos2(cell_rect.right(), cell_rect.bottom())],
-                    egui::Stroke::new(1.5, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                    [egui::pos2(cell_rect.left(), cell_rect.top()),
+                     egui::pos2(cell_rect.right(), cell_rect.top())],
+                    egui::Stroke::new(1.0_f32, crate::ui::components::border_default(ui)),
                   );
                 }
                 row_drag_bands.push((idx, cell_rect.top(), cell_rect.bottom()));
@@ -252,7 +289,6 @@ pub fn render_grid<R: GridRow>(
                   drag,
                   edit_cell,
                 );
-                let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
                   let (_resp, date_changed) = ui_grid_date_edit(
@@ -286,6 +322,56 @@ pub fn render_grid<R: GridRow>(
                 });
               });
 
+              // ── ACCOUNT ─────────────────────────────────────────────────
+              row_ui.col(|ui| {
+                let column = GridColumn::Account;
+                process_grid_column_cell(
+                  ui,
+                  column,
+                  idx,
+                  cell_id_by_visual(column, visual_row_index).with("bg"),
+                  selection,
+                  drag,
+                  edit_cell,
+                );
+                // ponytail: review grid's Account is statement-level — the
+                // picker in the header owns it, so the cell is read-only.
+                if cell_id_prefix == "import_cell" {
+                  if edit_cell.map(|(col, _)| col) == Some(column) {
+                    *edit_cell = None;
+                    *edit_original = None;
+                  }
+                  let text = RichText::new(rows[idx].row_account()).color(crate::ui::components::fg_default(ui));
+                  ui.add_sized([ui.available_width(), GRID_ROW_HEIGHT], egui::Label::new(text).truncate());
+                } else {
+                ui.horizontal(|ui| {
+                  let editing = grid_cell_editing(edit_cell, column, idx);
+                  let response = ui_grid_text_edit(
+                    ui, rows[idx].row_account_mut(), edit_original, edit_cell,
+                    cell_id_by_visual(column, visual_row_index), editing,
+                  );
+                  if editing && cell_has_focus(ui.ctx(), column, idx) {
+                    result.active_cell = Some((column, idx));
+                  }
+                  if response.changed() {
+                    result.pending_field_updates.push((idx, "account"));
+                  }
+                  if editing && grid_text_field_committed(ui, &response, egui::Rect::NOTHING) {
+                    let targets = grid_commit_targets(selection, column, idx);
+                    let value = rows[idx].row_account().to_string();
+                    for &t in &targets {
+                      if t != idx {
+                        if let Some(r) = rows.get_mut(t) { *r.row_account_mut() = value.clone(); }
+                      }
+                      result.pending_field_updates.push((t, "account"));
+                    }
+                    *edit_cell = None;
+                    *edit_original = None;
+                  }
+                });
+                }
+              });
+
               // ── AMOUNT ──────────────────────────────────────────────────
               row_ui.col(|ui| {
                 let column = GridColumn::Amount;
@@ -298,7 +384,6 @@ pub fn render_grid<R: GridRow>(
                   drag,
                   edit_cell,
                 );
-                let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
                   if editing {
@@ -326,15 +411,24 @@ pub fn render_grid<R: GridRow>(
                     }
                     if grid_text_field_committed(ui, &amount_resp, egui::Rect::NOTHING) {
                       let orig = edit_original.take().unwrap_or_default();
-                      if let Some(cents) = parse_amount_cents(rows[idx].row_amount_input()) {
+                      if let Some(magnitude) = parse_amount_cents(rows[idx].row_amount_input()) {
+                        // ponytail: sign is a function of category — debit
+                        // negative, Income positive. Excluded rows keep
+                        // their real amount (flag filters aggregation only).
+                        let sign = category_sign(categories, rows[idx].row_category());
+                        let cents = if sign == 1 { magnitude } else { -magnitude };
+                        rows[idx].set_row_amount_cents(cents);
                         let formatted = money(cents).replace('$', "");
                         *rows[idx].row_amount_input_mut() = formatted.clone();
-                        // propagate to selected rows
+                        // propagate to selected rows — each row signed by ITS category
                         let targets = grid_commit_targets(selection, column, idx);
                         for &t in &targets {
                           if t != idx {
                             if let Some(r) = rows.get_mut(t) {
-                              *r.row_amount_input_mut() = formatted.clone();
+                              let t_sign = category_sign(categories, r.row_category());
+                              let t_cents = if t_sign == 1 { magnitude } else { -magnitude };
+                              r.set_row_amount_cents(t_cents);
+                              *r.row_amount_input_mut() = money(t_cents).replace('$', "");
                             }
                           }
                           result.pending_field_updates.push((t, "amount"));
@@ -345,11 +439,10 @@ pub fn render_grid<R: GridRow>(
                       *edit_cell = None;
                     }
                   } else {
-                    let display = if let Some(cents) = parse_amount_cents(rows[idx].row_amount_input()) {
-                      money(cents)
-                    } else {
-                      rows[idx].row_amount_input().to_string()
-                    };
+                    // ponytail: genuinely-zero rows show a dash; positives
+                    // plain (no +), negatives carry the minus.
+                    let cents = rows[idx].row_amount_cents();
+                    let display = if cents == 0 { "—".to_string() } else { money(cents) };
                     let mut temp = display;
                     ui_grid_text_edit(ui, &mut temp, edit_original, edit_cell, cell_id_by_visual(column, visual_row_index), false);
                   }
@@ -359,11 +452,6 @@ pub fn render_grid<R: GridRow>(
               // ── MEMBER ──────────────────────────────────────────────────
               row_ui.col(|ui| {
                 let column = GridColumn::Member;
-                let member_bg = member_color_for(members, rows[idx].row_member());
-                if member_bg.a() > 0 && member_bg != Color32::TRANSPARENT {
-                  let muted = Color32::from_rgba_unmultiplied(member_bg.r(), member_bg.g(), member_bg.b(), 60);
-                  ui.painter().rect_filled(ui.max_rect(), 0.0, muted);
-                }
                 process_grid_column_cell(
                   ui,
                   column,
@@ -373,7 +461,6 @@ pub fn render_grid<R: GridRow>(
                   drag,
                   edit_cell,
                 );
-                let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                   let editing = grid_cell_editing(edit_cell, column, idx);
@@ -443,11 +530,6 @@ pub fn render_grid<R: GridRow>(
               // ── CATEGORY ────────────────────────────────────────────────
               row_ui.col(|ui| {
                 let column = GridColumn::Category;
-                let cat_bg = category_color_for(categories, rows[idx].row_category());
-                if cat_bg.a() > 0 && cat_bg != Color32::TRANSPARENT {
-                  let muted = Color32::from_rgba_unmultiplied(cat_bg.r(), cat_bg.g(), cat_bg.b(), 60);
-                  ui.painter().rect_filled(ui.max_rect(), 0.0, muted);
-                }
                 process_grid_column_cell(
                   ui,
                   column,
@@ -457,14 +539,13 @@ pub fn render_grid<R: GridRow>(
                   drag,
                   edit_cell,
                 );
-                let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                   let editing = grid_cell_editing(edit_cell, column, idx);
                   if editing && edit_original.is_none() {
                     *edit_original = Some(rows[idx].row_category().to_string());
                   }
-                  let cat_bg = category_color_for(categories, rows[idx].row_category());
+                  let cat_bg = cat_colors.get(rows[idx].row_category().trim()).copied().unwrap_or(Color32::TRANSPARENT);
                   let cell = category_cell_ui(ui, rows[idx].row_category_mut(), cat_bg, cell_id_by_visual(column, visual_row_index), editing);
                   if editing && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                     if let Some(orig) = edit_original.take() { *rows[idx].row_category_mut() = orig; }
@@ -494,7 +575,7 @@ pub fn render_grid<R: GridRow>(
                       return;
                     }
                     if let Some(cat) = find_category_by_label(categories, &category_name) {
-                      if ui.button("Edit color\u{2026}").clicked() {
+                      if styled_button(ui, "Edit color…", false).clicked() {
                         result.open_color_popup = Some((cat.id, category_name.clone(), cat_bg));
                         ui.close();
                       }
@@ -548,7 +629,6 @@ pub fn render_grid<R: GridRow>(
                   drag,
                   edit_cell,
                 );
-                let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
                   let response = ui_grid_text_edit(
@@ -599,7 +679,6 @@ pub fn render_grid<R: GridRow>(
                   drag,
                   edit_cell,
                 );
-                let _sel = grid_row_selected(selection, column, idx);
                 ui.horizontal(|ui| {
                   let editing = grid_cell_editing(edit_cell, column, idx);
                   let response = ui_grid_text_edit(
@@ -638,27 +717,27 @@ pub fn render_grid<R: GridRow>(
                 });
               });
 
-            }); // body row
-          } // for idx
+          }); // body row (virtualized)
         }); // body
     }); // TableBuilder
 
   scroll_y = scroll_response.state.offset.y;
-  grid_apply_shift_hand_pan(ui.ctx(), &mut scroll_y);
+  // ponytail: skip the Shift-pan handler while a cell drag-select is active —
+  // it calls set_dragged_id, stealing the drag from the cells mid-gesture.
+  if drag.is_none() {
+    grid_apply_shift_hand_pan(ui.ctx(), &mut scroll_y);
+  }
   *scroll_offset = scroll_y;
 
   // Type-to-start-edit.
-  // We inline the focus check here instead of using grid_try_start_edit_from_typing's
-  // broad `mem.focused().is_some()` guard — that guard blocks typeahead whenever ANY
-  // widget has focus (including the Window close button), breaking the import grid.
-  // Instead we only block typeahead if one of OUR grid TextEdit cells has focus.
+  // ponytail: nothing focused anywhere ⇒ no grid cell holds focus either, so
+  // one cheap memory read replaces the old O(selected rows) has_focus scan
+  // (which itself did an O(N) raw→visual position per row). Blocks typeahead
+  // whenever ANY widget has focus (grid cell, settings TextEdit, window
+  // button) — keystrokes go to the focused widget, never to typeahead.
   if edit_cell.is_none() {
-    let grid_cell_has_focus = selection.as_ref().is_some_and(|sel| {
-      sel.rows.iter().any(|&r| {
-        ui.ctx().memory(|m| m.has_focus(cell_id(sel.column, r)))
-      })
-    });
-    if !grid_cell_has_focus {
+    let any_widget_focused = ui.ctx().memory(|m| m.focused().is_some());
+    if !any_widget_focused {
       let _ = grid_try_start_edit_from_typing(ui, selection, edit_cell, typeahead);
     }
   }
@@ -712,6 +791,10 @@ pub fn render_grid<R: GridRow>(
           GridColumn::Description => {
             let value = rows.get(idx).map(|r| r.row_description().to_string()).unwrap_or_default();
             for &t in &targets { if let Some(r) = rows.get_mut(t) { *r.row_description_mut() = value.clone(); } result.pending_field_updates.push((t, "description")); }
+          }
+          GridColumn::Account => {
+            let value = rows.get(idx).map(|r| r.row_account().to_string()).unwrap_or_default();
+            for &t in &targets { if let Some(r) = rows.get_mut(t) { *r.row_account_mut() = value.clone(); } result.pending_field_updates.push((t, "account")); }
           }
         }
       }

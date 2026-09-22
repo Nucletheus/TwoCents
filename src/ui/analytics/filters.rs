@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32};
 use std::collections::HashSet;
 
 use crate::models::{Category, HouseholdMember};
@@ -10,13 +10,16 @@ pub fn render_filter_panel(
     categories: &[Category],
     members: &[HouseholdMember],
     available_vendors: &[String],
+    show_granularity: bool,
 ) -> bool {
     let mut changed = false;
-    
-    // Date preset buttons
+
+    // ponytail: row 1 — date preset buttons (themed). User picks a
+    // preset and the start/end dates are computed. The "Custom" option
+    // reveals a free-form date range below.
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Date Range:").strong());
-        
+        crate::ui::components::label_strong(ui, "Date Range:");
+
         let presets = [
             DatePreset::ThisMonth,
             DatePreset::LastMonth,
@@ -27,10 +30,10 @@ pub fn render_filter_panel(
             DatePreset::AllTime,
             DatePreset::Custom,
         ];
-        
+
         for preset in presets {
             let selected = state.date_preset == preset;
-            if ui.selectable_label(selected, preset.label()).clicked() {
+            if crate::ui::components::tab_label_button(ui, selected, preset.label()).clicked() {
                 state.date_preset = preset;
                 let (start, end) = preset.date_range();
                 state.date_start = start;
@@ -38,20 +41,12 @@ pub fn render_filter_panel(
                 changed = true;
             }
         }
-        
-        ui.add_space(8.0);
-        if ui.small_button("Clear").clicked() {
-            state.date_preset = DatePreset::Last3Months;
-            let (start, end) = DatePreset::Last3Months.date_range();
-            state.date_start = start;
-            state.date_end = end;
-            changed = true;
-        }
     });
-    
+
     // Custom date range (only shown when Custom is selected)
     if state.date_preset == DatePreset::Custom {
         ui.horizontal(|ui| {
+            ui.add_space(crate::ui::theme_tokens::SPACE_2);
             ui.label("Start:");
             if let Some(ref mut start) = state.date_start {
                 let mut date_str = start.format("%Y-%m-%d").to_string();
@@ -62,7 +57,8 @@ pub fn render_filter_panel(
                     }
                 }
             }
-            
+
+            ui.add_space(crate::ui::theme_tokens::SPACE_2);
             ui.label("End:");
             if let Some(ref mut end) = state.date_end {
                 let mut date_str = end.format("%Y-%m-%d").to_string();
@@ -75,44 +71,49 @@ pub fn render_filter_panel(
             }
         });
     }
-    
-    // Granularity and filters
+
+    // ponytail: row 2 — granularity + filter dropdowns. The Clear button
+    // here is the only "Clear" in the analytics page. It resets ALL filter
+    // state (granularity, categories, members, vendors) to defaults.
+    // It also resets the date range to "Last 3 Months". The previous
+    // version had two "Clear" buttons that did different things, which
+    // was confusing — consolidating them.
     ui.horizontal_wrapped(|ui| {
-        // Granularity dropdown
-        ui.label(RichText::new("Granularity:").strong());
-        egui::ComboBox::from_id_salt("granularity_combo")
-            .selected_text(state.granularity.label())
-            .show_ui(ui, |ui| {
-                let granularities = [
-                    AnalyticsGranularity::Daily,
-                    AnalyticsGranularity::Weekly,
-                    AnalyticsGranularity::Monthly,
-                    AnalyticsGranularity::Quarterly,
-                    AnalyticsGranularity::Yearly,
-                ];
-                
-                for g in granularities {
-                    if ui.selectable_label(state.granularity == g, g.label()).clicked() {
-                        state.granularity = g;
-                        changed = true;
+        // ponytail: granularity is only meaningful for the time-series
+        // chart (it controls how bars are bucketed along the x axis).
+        // The other charts either have no time axis (category
+        // breakdown) or use the user-supplied Period A/B presets
+        // (period comparison). Hide the dropdown on those tabs so
+        // changing it doesn't give the user the false impression that
+        // it has an effect.
+        if show_granularity {
+            ui.label("Granularity:");
+            egui::ComboBox::from_id_salt("granularity_combo")
+                .selected_text(state.granularity.label())
+                .show_ui(ui, |ui| {
+                    let granularities = [
+                        AnalyticsGranularity::Daily,
+                        AnalyticsGranularity::Weekly,
+                        AnalyticsGranularity::Monthly,
+                        AnalyticsGranularity::Quarterly,
+                        AnalyticsGranularity::Yearly,
+                    ];
+
+                    for g in granularities {
+                        if ui
+                            .selectable_label(state.granularity == g, g.label())
+                            .clicked()
+                        {
+                            state.granularity = g;
+                            changed = true;
+                        }
                     }
-                }
-            });
-        
-        if ui.small_button("Clear").clicked() {
-            state.granularity = AnalyticsGranularity::Monthly;
-            state.selected_categories.clear();
-            state.selected_members.clear();
-            state.selected_vendors.clear();
-            changed = true;
+                });
         }
-        
-        ui.separator();
-        
         // Category filter with colors
         let category_names: Vec<String> = categories.iter().map(|c| c.name.clone()).collect();
         let category_colors: Vec<Color32> = categories.iter().map(|c| c.color).collect();
-        ui.label(RichText::new("Categories:").strong());
+        ui.label("Categories:");
         if multi_select_dropdown_with_colors(
             ui,
             "categories_dropdown",
@@ -122,13 +123,13 @@ pub fn render_filter_panel(
         ) {
             changed = true;
         }
-        
+
         ui.separator();
-        
+
         // Member filter with colors
         let member_names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let member_colors: Vec<Color32> = members.iter().map(|m| m.color).collect();
-        ui.label(RichText::new("Members:").strong());
+        ui.label("Members:");
         if multi_select_dropdown_with_colors(
             ui,
             "members_dropdown",
@@ -138,11 +139,11 @@ pub fn render_filter_panel(
         ) {
             changed = true;
         }
-        
+
         ui.separator();
-        
+
         // Vendor filter (no colors)
-        ui.label(RichText::new("Vendors:").strong());
+        ui.label("Vendors:");
         if multi_select_dropdown_with_colors(
             ui,
             "vendors_dropdown",
@@ -152,8 +153,32 @@ pub fn render_filter_panel(
         ) {
             changed = true;
         }
+
+        if crate::ui::popups::styled_button(ui, "Clear filters", false).clicked() {
+            state.date_preset = DatePreset::Last3Months;
+            let (start, end) = DatePreset::Last3Months.date_range();
+            state.date_start = start;
+            state.date_end = end;
+            state.granularity = AnalyticsGranularity::Monthly;
+            state.selected_categories.clear();
+            state.selected_members.clear();
+            state.selected_vendors.clear();
+            changed = true;
+        }
+
+        ui.add_space(crate::ui::theme_tokens::SPACE_3);
+
+        // ponytail: "Reset View" restores every chart's zoom/pan to its
+        // default bounds on the next draw (handled inside each chart's
+        // plot closure via state.reset_view). Kept separate from "Clear
+        // filters" so the user can re-frame a chart without losing their
+        // filter selections.
+        if crate::ui::popups::styled_button(ui, "Reset View", false).clicked() {
+            state.reset_view = true;
+            changed = true;
+        }
     });
-    
+
     changed
 }
 
