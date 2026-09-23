@@ -21,7 +21,7 @@ impl TwoCentsApp {
     });
     ui.horizontal_wrapped(|ui| {
       ui.set_max_width(toolbar_width);
-      // ponytail: themed buttons instead of the default egui look. Subtle
+      // themed buttons instead of the default egui look. Subtle
       // outlined buttons read cleaner in a toolbar than filled defaults.
       if self.csv_import_rx.is_some() {
         let _ = styled_button(ui, "Importing...", false).on_hover_text("Waiting for file selection");
@@ -37,7 +37,7 @@ impl TwoCentsApp {
     expense_grid_selection_status(ui, &self.expense_grid_state.selection);
 
     ui.add_space(4.0);
-    // ponytail: real empty state when the household has no expenses. The
+    // real empty state when the household has no expenses. The
     // table-render path stays the same for non-empty cases.
     if self.expenses.is_empty() {
       crate::ui::components::empty_state(
@@ -47,7 +47,7 @@ impl TwoCentsApp {
       );
       return;
     }
-    // ponytail: clones guarded on editing — autocomplete only reads these
+    // clones guarded on editing — autocomplete only reads these
     // while a cell is open; the first frame of a new edit is the frame after
     // edit_cell is set, so the candidates are present when needed.
     let editing = self.expense_grid_state.edit_cell.is_some();
@@ -60,11 +60,11 @@ impl TwoCentsApp {
     let old_spacing = ui.spacing().item_spacing;
     ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
 
-    // ponytail: mem::take instead of a full O(N) Vec copy per frame —
+    // mem::take instead of a full O(N) Vec copy per frame —
     // nothing reads the cache while the grid render borrows it.
     let sorted_indices = std::mem::take(&mut self.cached_sorted_expense_indices);
 
-    // ponytail: shared grid_table_frame so the expense, import, and duplicates
+    // shared grid_table_frame so the expense, import, and duplicates
     // grids have identical chrome (1px border, 6px radius, 2px inner margin).
     let grid_res = crate::ui::components::grid_table_frame(ui)
       .show(ui, |ui| {
@@ -100,7 +100,7 @@ impl TwoCentsApp {
     }
 
     if let Some(rows_to_delete) = grid_res.force_delete_rows {
-      // ponytail: flush first — deferred edits reference indices that shift
+      // flush first — deferred edits reference indices that shift
       // once rows are removed.
       self.flush_deferred_expense_commits();
       self.delete_expenses_by_indices(&rows_to_delete);
@@ -126,7 +126,7 @@ impl TwoCentsApp {
     }
     self.autocomplete_selection = autocomplete_selection;
 
-    // ponytail: DB commits used to run per keystroke — a synchronous
+    // DB commits used to run per keystroke — a synchronous
     // BEGIN/UPDATE/COMMIT every frame while typing. Accumulate this frame's
     // changes and flush 400ms after the last change, or immediately when the
     // editing cell closes. In-memory rows are already correct; the DB just
@@ -206,7 +206,7 @@ impl TwoCentsApp {
         row.date = format_date(&row.date).unwrap_or_else(|| row.date.clone());
       }
       if field == "amount" {
-        // ponytail: sign is a function of category — debit negative,
+        // sign is a function of category — debit negative,
         // Income positive. Excluded rows keep their real amount.
         if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
           let sign = category_sign(&categories, &row.category);
@@ -257,7 +257,7 @@ impl TwoCentsApp {
       row.category = matched.full_label(&parents);
       let category = row.category.clone();
       let expense_id = row.id;
-      // ponytail: category change re-derives the amount's sign —
+      // category change re-derives the amount's sign —
       // recategorizing to/from Income flips credit/debit. Excluded rows
       // keep their real amount (flag filters aggregation only).
       let sign = category_sign(&categories, &category);
@@ -275,7 +275,7 @@ impl TwoCentsApp {
         params![category, expense_id, self.household_id],
       ) {
         Ok(_) => {
-          // ponytail: spreadsheet corrections teach the categorizer — upsert
+          // spreadsheet corrections teach the categorizer — upsert
           // the vendor rule so future imports use the fixed category. Skip
           // short vendors (< 3 chars) — they substring-match everything.
           if !row.vendor.is_empty() && row.vendor.trim().chars().count() >= 3 {

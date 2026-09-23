@@ -56,7 +56,7 @@ impl TwoCentsApp {
 
         // ── Header row ───────────────────────────────────────────────────────
         ui.horizontal(|ui| {
-          // ponytail: heading + secondary text, Notion hierarchy.
+          // heading + secondary text, Notion hierarchy.
           ui.vertical(|ui| {
             crate::ui::components::heading_lg(ui, "Review Possible Duplicates");
             crate::ui::components::label_muted(
@@ -91,7 +91,7 @@ impl TwoCentsApp {
         let description_candidates = self.cached_description_candidates.clone();
         let mut autocomplete_selection = self.autocomplete_selection;
 
-        // ponytail: shared grid_table_frame so the three grids have identical chrome.
+        // shared grid_table_frame so the three grids have identical chrome.
         let frame_resp = crate::ui::components::grid_table_frame(ui)
           .show(ui, |ui| {
             let old_spacing = ui.spacing().item_spacing;
@@ -171,7 +171,7 @@ impl TwoCentsApp {
                 }
                 if field == "amount" {
                   if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
-                    // ponytail: sign is a function of category; excluded rows
+                    // sign is a function of category; excluded rows
                     // keep their real amount.
                     let sign = category_sign(&categories, &row.category);
                     row.amount_cents = if sign == 1 { magnitude } else { -magnitude };
@@ -188,7 +188,7 @@ impl TwoCentsApp {
                   let typed = row.category.clone();
                   if let Some(matched) = find_category_by_label(&categories, &typed) {
                     row.category = matched.full_label(&parents);
-                    // ponytail: sign is a function of category — re-derive
+                    // sign is a function of category — re-derive
                     // on recategorize (same as grid/review commits), else
                     // resolving duplicates would save a stale sign. Excluded
                     // rows keep their real amount.

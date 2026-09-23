@@ -6,9 +6,8 @@
 //! nothing in this file ever changes at runtime.
 use eframe::egui::CornerRadius;
 
-// ponytail: these are the design-system values lifted from Notion. Tweaking any
-// of them is a 1-line change that propagates everywhere the component builders
-// are used.
+// Design-system values. Changing any of them is a one-line edit that
+// propagates to every component builder that uses it.
 
 // ---- Spacing (4-base scale, in points) ----
 pub const SPACE_1: f32 = 4.0;

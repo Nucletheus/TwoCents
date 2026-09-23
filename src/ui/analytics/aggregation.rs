@@ -43,7 +43,7 @@ pub struct CategoryComparison {
     pub color: eframe::egui::Color32,
 }
 
-/// ponytail: char-boundary-safe truncation. `&s[..17]` panicked on
+/// char-boundary-safe truncation. `&s[..17]` panicked on
 /// "Parent › Sub" labels (`›` is 3 bytes UTF-8); slice by chars instead.
 pub fn truncate_label(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
@@ -58,7 +58,7 @@ pub fn parse_expense_date(date_str: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
 }
 
-/// ponytail: the include/exclude category predicate, shared by
+/// the include/exclude category predicate, shared by
 /// `filter_expenses` and the Budget-vs-Actual budget-side filter — the
 /// budget bars never used to honor the selection, so clicking a category
 /// in that tab looked like a no-op. Empty selection passes everything.
@@ -82,7 +82,7 @@ pub fn filter_expenses(
 
     expenses.iter()
         .filter(|exp| {
-            // ponytail: analytics default to spending-only — income
+            // analytics default to spending-only — income
             // (positive rows) chart only where the caller opts in via
             // `state.include_income` (Period Comparison). Excluded
             // transfer/payment categories never chart.

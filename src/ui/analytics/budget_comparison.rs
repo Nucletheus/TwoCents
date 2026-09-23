@@ -30,7 +30,7 @@ pub fn render_budget_vs_actual_chart(
         return false;
     }
 
-    // ponytail: route through the shared filter like the other two charts —
+    // route through the shared filter like the other two charts —
     // raw expenses mixed income rows and excluded categories (transfers)
     // into the actuals. Date window = THIS budget period, not the global
     // filter range (same scope trick Period Comparison uses).
@@ -40,7 +40,7 @@ pub fn render_budget_vs_actual_chart(
     scope.date_end = Some(priced_budgets.end);
     let pool = filter_expenses(expenses, &scope, &excluded);
 
-    // ponytail: the budget side must honor the category selection too —
+    // the budget side must honor the category selection too —
     // unioning unfiltered budgets with filtered actuals left every budget
     // bar in place when you clicked a category (looked like a no-op).
     let filtered_budgets: std::collections::HashMap<String, i64> = priced_budgets
@@ -62,7 +62,7 @@ pub fn render_budget_vs_actual_chart(
         |c| c.actual,
     );
 
-    // ponytail: data/filters signature → Plot::reset() when it changes.
+    // data/filters signature → Plot::reset() when it changes.
     // egui_plot freezes auto-bounds on first pan/zoom, so a stale view
     // never re-fits new data; reset re-seeds auto-fit, manual zoom
     // persists until the next change (or the Reset View flag).
@@ -75,7 +75,7 @@ pub fn render_budget_vs_actual_chart(
     }
     let reseed = super::charts_common::take_reseed(&mut state.bva_sig, sh.finish(), state.reset_view);
 
-    // ponytail: picker rows come from a pool with the category selection
+    // picker rows come from a pool with the category selection
     // cleared (same trick as the Breakdown legend) — building them from the
     // filtered set collapsed the list down to what was already selected, so
     // you could never click the next row, and an empty filtered result
@@ -149,7 +149,7 @@ pub fn render_budget_vs_actual_chart(
     let error = crate::ui::theme::error();
     let fg_default = crate::ui::theme::fg_primary();
 
-    // ponytail: chart + right column take the whole remaining viewport —
+    // chart + right column take the whole remaining viewport —
     // the picker lives in the right column (under the summary card) now,
     // so nothing is reserved at the bottom.
     let avail = ui.available_size_before_wrap();
@@ -166,7 +166,7 @@ pub fn render_budget_vs_actual_chart(
                 ui.set_max_height(row_height);
                 ui.set_width(avail.x - 320.0);
 
-                // ponytail: the category filter can empty the chart side
+                // the category filter can empty the chart side
                 // (no budget/spend matches) while the picker rows above
                 // still list every category — show a message here instead
                 // of returning early, so the picker stays reachable.
@@ -236,7 +236,7 @@ pub fn render_budget_vs_actual_chart(
                             .fill(base)
                             .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(base, 0.18)))
                             .name("Actual");
-                        // ponytail: bar hover bypasses the plot-level
+                        // bar hover bypasses the plot-level
                         // label_formatter entirely (egui_plot 0.37 routes
                         // bars through add_rulers_and_text) — its default
                         // text showed the raw ln-space coordinate

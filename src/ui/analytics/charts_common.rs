@@ -3,7 +3,7 @@ use egui_plot::{GridInput, GridMark};
 
 use super::state::BudgetViewPeriod;
 
-/// ponytail: shared helpers for the horizontal analytics charts
+/// shared helpers for the horizontal analytics charts
 /// (Budget vs Actual, Period Comparison). Both plot ABS magnitudes on a
 /// log-ish value axis: bars feed `ln1p(v)` (0 → 0, monotonic, baseline
 /// intact — egui_plot has no native log transform) and the axis formatters
@@ -20,7 +20,7 @@ pub struct ChartPeriod {
     pub period: i32,
 }
 
-/// ponytail: 24 same-granularity periods ending with the current one —
+/// 24 same-granularity periods ending with the current one —
 /// "September 2026", "Q3 2026", "2026", "W39 2026" — so A and B are always
 /// comparable siblings instead of rolling DatePresets (a month could
 /// previously be compared against a 3-month window). Ranges come from the
@@ -180,7 +180,7 @@ pub fn category_grid_spacer(input: GridInput) -> Vec<GridMark> {
     out
 }
 
-/// ponytail: one-shot reseed decision for `Plot::reset()`. egui_plot
+/// one-shot reseed decision for `Plot::reset()`. egui_plot
 /// freezes auto-bounds on first pan/zoom (and `set_plot_bounds` never
 /// re-enables them) — dropping PlotMemory re-fits the new data; manual
 /// zoom persists until the data/filters change or Reset View fires.
@@ -190,7 +190,7 @@ pub fn take_reseed(prev: &mut u64, new_sig: u64, reset_view: bool) -> bool {
     changed || reset_view
 }
 
-/// Ponytail: x/y-axis label showing only the subcategory name (after the
+/// x/y-axis label showing only the subcategory name (after the
 /// " › " separator) so dense category lists don't overflow the axis. The
 /// full "Parent › Sub" name still shows in tooltips and the picker.
 pub fn subcategory_label(full: &str) -> String {

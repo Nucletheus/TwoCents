@@ -5,7 +5,7 @@ use crate::ui::popups::styled_button;
 use crate::ui::widgets::*;
 use crate::TwoCentsApp;
 
-/// ponytail: combo box for the statement account — arrow painted inside the
+/// combo box for the statement account — arrow painted inside the
 /// same field, ▾ shows the full past-account list, typing contains-searches,
 /// unknown names become new accounts at save. Returns state the caller
 /// applies (picked name, focus, toggle) so this stays a pure widget.
@@ -63,7 +63,7 @@ fn account_combo(
     egui::Rect::from_center_size(chevron_center, egui::vec2(10.0, 8.0)),
     crate::ui::theme::fg_secondary(),
   );
-  // ponytail: only the chevron sliver is click-sensitive here — the previous
+  // only the chevron sliver is click-sensitive here — the previous
   // design stacked overlapping full-box interacts and egui's hit-test let
   // the last one swallow the arrow clicks (the dropdown looked dead). Text
   // clicks go to the TextEdit itself; `anchor` (hover-only) spans the whole
@@ -87,7 +87,7 @@ fn account_combo(
     ui.memory_mut(|mem| mem.request_focus(text_id));
   }
   let picked = show_autocomplete_popup(ui, &response, name, candidates, *dropdown_open, &anchor);
-  // ponytail: Enter only confirms the name — importing stays exclusively
+  // Enter only confirms the name — importing stays exclusively
   // with the "Save Reviewed Import" button (an earlier Enter-to-save here
   // silently imported every staged row as soon as the name was confirmed).
   AccountComboOut {
@@ -148,7 +148,7 @@ impl TwoCentsApp {
         let mut dropdown_open = ui.ctx().data_mut(|d| d.get_temp::<bool>(dropdown_id).unwrap_or(false));
         let mut account_own_row = false;
         ui.horizontal(|ui| {
-          // ponytail: heading + secondary text, same hierarchy as the
+          // heading + secondary text, same hierarchy as the
           // Settings window. Was a single same-color label.
           ui.vertical(|ui| {
             crate::ui::components::heading_lg(ui, "Statement Import Review");
@@ -171,7 +171,7 @@ impl TwoCentsApp {
               // Statement-level account: prefilled from the CSV's Account
               // column when present; rename it freely before saving — the
               // detected value keeps mapping to the new name next import.
-              // ponytail: the combo never shrinks below ~200px — if the
+              // the combo never shrinks below ~200px — if the
               // header strip can't fit it, it drops to its own full-width
               // row under the header instead.
               let available = ui.available_width() - 60.0; // reserve for "Account:"
@@ -201,7 +201,7 @@ impl TwoCentsApp {
         });
         if account_own_row {
           ui.add_space(2.0);
-          // ponytail: right-aligned AND one row high — bare with_layout let
+          // right-aligned AND one row high — bare with_layout let
           // Align::Center float the picker in the window's leftover height
           // (huge gap); allocating the row pins it under the header.
           ui.allocate_ui_with_layout(
@@ -234,7 +234,7 @@ impl TwoCentsApp {
           dropdown_open = false;
           ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, false));
         }
-        // ponytail: the statement picker IS the account assignment — mirror
+        // the statement picker IS the account assignment — mirror
         // its value into every staged row so the grid's Account column shows
         // live what will be saved (typed names and dropdown picks alike).
         if !self.import_rows.is_empty() {
@@ -274,7 +274,7 @@ impl TwoCentsApp {
         let mut autocomplete_selection = self.autocomplete_selection;
 
 
-        // ponytail: shared grid_table_frame so the three grids have identical chrome.
+        // shared grid_table_frame so the three grids have identical chrome.
         let frame_resp = crate::ui::components::grid_table_frame(ui)
           .show(ui, |ui| {
             let old_spacing = ui.spacing().item_spacing;
@@ -331,7 +331,7 @@ impl TwoCentsApp {
               if field == "amount" {
                 if let Some(row) = self.import_rows.get_mut(idx) {
                   if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
-                    // ponytail: sign is a function of category; excluded rows
+                    // sign is a function of category; excluded rows
                     // keep their real amount (flag filters aggregation only).
                     let sign = category_sign(&self.categories, &row.category);
                     row.amount_cents = if sign == 1 { magnitude } else { -magnitude };
@@ -346,7 +346,7 @@ impl TwoCentsApp {
             }
             if !pending_category_commits.is_empty() {
               self.categories = load_categories(&self.conn, self.household_id).unwrap_or_default();
-              // ponytail: sign is a function of category — re-derive after
+              // sign is a function of category — re-derive after
               // re-categorization so the review grid never shows stale signs.
               self.sync_import_amounts();
             }
@@ -394,7 +394,7 @@ impl TwoCentsApp {
       Ok(rows) => {
         let duplicates = duplicate_import_count(&self.conn, self.household_id, &rows);
         let ready = rows.iter().filter(|row| import_row_status(row) == "ready").count();
-        // ponytail: prefill the account name from the CSV's Account column
+        // prefill the account name from the CSV's Account column
         // (most common non-empty value). A previously-mapped csv_name wins,
         // otherwise the raw value (rename it if you like); nothing detected
         // stays blank — save is blocked until a name is typed.
@@ -468,7 +468,7 @@ impl TwoCentsApp {
     let categories = self.categories.clone();
     for row in &mut self.import_rows {
       if let Some(magnitude) = parse_amount_cents(&row.amount_input) {
-        // ponytail: sign is a function of category; excluded rows keep
+        // sign is a function of category; excluded rows keep
         // their real amount (flag filters aggregation only).
         let sign = category_sign(&categories, &row.category);
         row.amount_cents = if sign == 1 { magnitude } else { -magnitude };

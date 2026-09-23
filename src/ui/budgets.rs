@@ -258,7 +258,7 @@ impl TwoCentsApp {
     ui.add_space(10.0);
 
     // 3. Compute Actual Spent per category dynamically based on active timeframe
-    // ponytail: spending = debit rows only, magnitude — income (positive) and
+    // spending = debit rows only, magnitude — income (positive) and
     // excluded transfer/payment categories never enter budget math.
     let excluded_categories = excluded_category_labels(&self.categories);
     let assignable_categories = category_assignable_labels(&self.categories);
@@ -320,7 +320,7 @@ impl TwoCentsApp {
     }
     let remaining_overall = total_budgeted - total_spent;
 
-    // ponytail: extracted summary-card helper. Three near-identical Frame::default
+    // extracted summary-card helper. Three near-identical Frame::default
     // blocks reduced to one helper called three times. Caller passes the
     // themed label + amount + optional color override for the amount.
     // Success/error overrides route through components::success_color/error_color
@@ -400,7 +400,7 @@ impl TwoCentsApp {
     }
 
     let mut entries: Vec<CatEntry> = Vec::new();
-    // ponytail: excluded categories (user-flagged) are skipped from the
+    // excluded categories (user-flagged) are skipped from the
     // budget list entirely — spent stays 0 via the aggregation filter too.
     let excluded = excluded_category_labels(&self.categories);
     for &pid in &parent_ids {
@@ -486,7 +486,7 @@ impl TwoCentsApp {
     }
 
     if rows.is_empty() {
-      // ponytail: real empty state, matches the rest of the app's empty
+      // real empty state, matches the rest of the app's empty
       // placeholders (icon + headline + subtext).
       crate::ui::components::empty_state(
         ui,
@@ -559,7 +559,7 @@ impl TwoCentsApp {
     };
 
     // ---- Header row (fixed) ----
-    // ponytail: bg_subtle matches the expense / import / duplicates grid
+    // bg_subtle matches the expense / import / duplicates grid
     // headers so all four tables in the app have the same header band.
     // 1px bottom stroke (was 1.5) to match the other borders in the table
     // and the design system.
@@ -622,9 +622,7 @@ impl TwoCentsApp {
                 let c3 = egui::Rect::from_min_size(egui::pos2(col_x(3), y0), egui::vec2(col_w[3], row_h));
 
                 let swatch_rect = egui::Rect::from_min_size(egui::pos2(left0 + 6.0, y0 + row_h / 2.0 - 5.0), egui::vec2(10.0, 10.0));
-                // ponytail: themed swatch with a 1px border. The previous
-                // version was a bare circle_filled, which read as flat
-                // against the tinted row background.
+                // Themed swatch with a 1px border so it reads against the tinted row background.
                 crate::ui::components::color_swatch_decorated(
                   ui.painter(),
                   swatch_rect,
@@ -639,7 +637,7 @@ impl TwoCentsApp {
                 clip_text(ui, c3, egui::pos2(col_x(3) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(rem_sum), egui::FontId::monospace(13.0), rem_col);
                 let bar_cell_w = col_w[4];
                 let bar_rect = egui::Rect::from_min_size(egui::pos2(col_x(4), y0), egui::vec2(bar_cell_w, row_h));
-                // ponytail: progress_bar now lives in components. Same
+                // progress_bar now lives in components. Same
                 // semantic (≤80% success, ≤100% warning, >100% error) but
                 // routes through the components palette.
                 crate::ui::components::progress_bar(ui, bar_rect, pct);
@@ -696,9 +694,7 @@ impl TwoCentsApp {
                 );
 
                 let swatch_rect = egui::Rect::from_min_size(egui::pos2(left0 + 6.0, y0 + row_h / 2.0 - 5.0), egui::vec2(10.0, 10.0));
-                // ponytail: themed swatch with a 1px border. The previous
-                // version was a bare circle_filled, which read as flat
-                // against the tinted row background.
+                // Themed swatch with a 1px border so it reads against the tinted row background.
                 crate::ui::components::color_swatch_decorated(
                   ui.painter(),
                   swatch_rect,
@@ -715,7 +711,7 @@ impl TwoCentsApp {
                 clip_text(ui, c2, egui::pos2(col_x(2) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(cat.spent),
                   egui::FontId::monospace(13.0), crate::ui::theme::fg_primary());
                 let rem = cat.limit - cat.spent;
-                // ponytail: live palette (theme::error) like the
+                // live palette (theme::error) like the
                 // parent/child rows, never a stale static.
                 let rem_col = if rem >= 0 { crate::ui::theme::fg_primary() } else { crate::ui::theme::error() };
                 clip_text(ui, c3, egui::pos2(col_x(3) + 8.0, y0 + row_h / 2.0), egui::Align2::LEFT_CENTER, &money(rem),
@@ -723,7 +719,7 @@ impl TwoCentsApp {
                 let pct = if cat.limit > 0 { (cat.spent as f32 / cat.limit as f32).clamp(0.0, 2.0) } else if cat.spent > 0 { 1.5 } else { 0.0 };
                 let bar_cell_w = col_w[4];
                 let bar_rect = egui::Rect::from_min_size(egui::pos2(col_x(4), y0), egui::vec2(bar_cell_w, row_h));
-                // ponytail: same progress_bar as parent/child rows so all three
+                // same progress_bar as parent/child rows so all three
                 // row shapes render the bar identically (track + fill + label).
                 crate::ui::components::progress_bar(ui, bar_rect, pct);
 
@@ -745,7 +741,7 @@ impl TwoCentsApp {
         Stroke::new(1.0_f32, crate::ui::theme::border()),
       );
       let hdr_labels = ["Category", "Allocated Limit", "Actual Spending", "Remaining", "Progress"];
-      // ponytail: small uppercase muted labels, same style as the other
+      // small uppercase muted labels, same style as the other
       // table headers in the app.
       let hdr_text = crate::ui::theme::fg_secondary();
       for (i, label) in hdr_labels.iter().enumerate() {

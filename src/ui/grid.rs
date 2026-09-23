@@ -126,7 +126,7 @@ pub fn render_grid<R: GridRow>(
   }
 
   // ── PENDING KEYBOARD EVENTS COMMITMENTS ──────────────────────────────────
-  // ponytail: candidate lists were cloned to owned Vecs every frame even with
+  // candidate lists were cloned to owned Vecs every frame even with
   // nothing being edited. The closure is only consumed by editing paths, so
   // clone lazily inside it.
   let editing_now = state.edit_cell.is_some();
@@ -181,7 +181,7 @@ pub fn render_grid<R: GridRow>(
     *typeahead = None; // discard if no edit cell
   }
 
-  // ponytail: menu width measured once per (prefix, category count) and
+  // menu width measured once per (prefix, category count) and
   // cached in egui temp data — layout_no_wrap per category per frame was
   // pure waste; the measurement can only change when categories change.
   let menu_w_id = egui::Id::new((cell_id_prefix, "cat_menu_w", categories.len()));
@@ -196,7 +196,7 @@ pub fn render_grid<R: GridRow>(
   let member_count     = members.len();
   let member_scroll    = if member_count > 10 { Some(member_picker_max_height(member_count)) } else { None };
 
-  // ponytail: label→color map built once per frame — the old path rebuilt a
+  // label→color map built once per frame — the old path rebuilt a
   // HashMap + format!-ed every candidate full label PER CATEGORY CELL.
   let parents_map = category_parent_map(categories);
   let mut cat_colors: std::collections::HashMap<String, Color32> = std::collections::HashMap::with_capacity(categories.len() * 2);
@@ -210,7 +210,7 @@ pub fn render_grid<R: GridRow>(
 
   // Helper closures to make cell egui::Id stable based on visual row positions
   let cell_id_by_visual = |col: GridColumn, visual_row: usize| -> egui::Id {
-    // ponytail: hash the (prefix, column, row) tuple directly — format!-ing
+    // hash the (prefix, column, row) tuple directly — format!-ing
     // the enum was 12 String allocations per row per frame.
     egui::Id::new((cell_id_prefix, col as u8, visual_row))
   };
@@ -252,7 +252,7 @@ pub fn render_grid<R: GridRow>(
         egui::vec2(w * fractions[i], GRID_HEADER_HEIGHT),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-          // ponytail: paint the header fill FIRST, then the separator on
+          // paint the header fill FIRST, then the separator on
           // top — the old order let grid_header's opaque rect_filled bury
           // its own column border (worst at fractional widths).
           if grid_header(ui, label).clicked() {
@@ -291,7 +291,7 @@ pub fn render_grid<R: GridRow>(
 
       builder
         .body(|body| {
-          // ponytail: body.rows virtualizes — only the visible window of rows
+          // body.rows virtualizes — only the visible window of rows
           // runs their cell closures. The old `for … body.row()` loop ran all
           // N rows every frame even though egui clipped the painting only.
           body.rows(GRID_ROW_HEIGHT, sorted_indices.len(), |mut row_ui| {
@@ -343,7 +343,7 @@ pub fn render_grid<R: GridRow>(
                     result.active_cell = Some((column, idx));
                   }
                 });
-                // ponytail: separators painted AFTER content — the opaque
+                // separators painted AFTER content — the opaque
                 // selection/ghost fill in process_grid_column_cell used to
                 // bury them, erasing borders along selected rows.
                 paint_row_separator_top(ui, show_row_separator);
@@ -361,7 +361,7 @@ pub fn render_grid<R: GridRow>(
                   drag,
                   edit_cell,
                 );
-                // ponytail: review grid's Account is statement-level — the
+                // review grid's Account is statement-level — the
                 // picker in the header owns it, so the cell is read-only.
                 if cell_id_prefix == "import_cell" {
                   if edit_cell.map(|(col, _)| col) == Some(column) {
@@ -441,7 +441,7 @@ pub fn render_grid<R: GridRow>(
                     if grid_text_field_committed(ui, &amount_resp, egui::Rect::NOTHING) {
                       let orig = edit_original.take().unwrap_or_default();
                       if let Some(magnitude) = parse_amount_cents(rows[idx].row_amount_input()) {
-                        // ponytail: sign is a function of category — debit
+                        // sign is a function of category — debit
                         // negative, Income positive. Excluded rows keep
                         // their real amount (flag filters aggregation only).
                         let sign = category_sign(categories, rows[idx].row_category());
@@ -468,7 +468,7 @@ pub fn render_grid<R: GridRow>(
                       *edit_cell = None;
                     }
                   } else {
-                    // ponytail: genuinely-zero rows show a dash; positives
+                    // genuinely-zero rows show a dash; positives
                     // plain (no +), negatives carry the minus.
                     let cents = rows[idx].row_amount_cents();
                     let display = if cents == 0 { "—".to_string() } else { money(cents) };
@@ -761,7 +761,7 @@ pub fn render_grid<R: GridRow>(
     }); // TableBuilder
 
   scroll_y = scroll_response.state.offset.y;
-  // ponytail: skip the Shift-pan handler while a cell drag-select is active —
+  // skip the Shift-pan handler while a cell drag-select is active —
   // it calls set_dragged_id, stealing the drag from the cells mid-gesture.
   if drag.is_none() {
     grid_apply_shift_hand_pan(ui.ctx(), &mut scroll_y);
@@ -769,7 +769,7 @@ pub fn render_grid<R: GridRow>(
   *scroll_offset = scroll_y;
 
   // Type-to-start-edit.
-  // ponytail: nothing focused anywhere ⇒ no grid cell holds focus either, so
+  // nothing focused anywhere ⇒ no grid cell holds focus either, so
   // one cheap memory read replaces the old O(selected rows) has_focus scan
   // (which itself did an O(N) raw→visual position per row). Blocks typeahead
   // whenever ANY widget has focus (grid cell, settings TextEdit, window

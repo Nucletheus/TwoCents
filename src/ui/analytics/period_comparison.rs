@@ -122,7 +122,7 @@ pub fn render_period_comparison_chart(
 
     ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
-    // ponytail: label -> color lookup so each bar is filled with the
+    // label -> color lookup so each bar is filled with the
     // user-assigned category color, matching the picker swatches below.
     let cat_parents = category_parent_map(categories);
     let mut cat_color: HashMap<String, eframe::egui::Color32> = HashMap::new();
@@ -130,7 +130,7 @@ pub fn render_period_comparison_chart(
         let label = category.full_label(&cat_parents);
         cat_color.insert(label, category.color);
     }
-    // ponytail: shared chart chrome colors, resolved up-front (can't
+    // shared chart chrome colors, resolved up-front (can't
     // borrow ui inside plot closures).
     let fallback_color = crate::ui::theme::fg_secondary();
     let zero_color = crate::ui::theme::border_strong();
@@ -138,7 +138,7 @@ pub fn render_period_comparison_chart(
     let error = crate::ui::theme::error();
     let fg_default = crate::ui::theme::fg_primary();
 
-    // ponytail: PC opts into income (positive) rows — the one chart that
+    // PC opts into income (positive) rows — the one chart that
     // shows them; every other analytics tab stays spending-only. Date
     // window comes from each period's range; excluded categories and the
     // category/member/vendor selections still apply.
@@ -150,7 +150,7 @@ pub fn render_period_comparison_chart(
     scope.include_income = true;
     let pool = filter_expenses(expenses, &scope, &excluded);
 
-    // ponytail: picker rows come from a pool with the category selection
+    // picker rows come from a pool with the category selection
     // cleared (same trick as the Breakdown legend) — rows built from the
     // filtered set collapsed to whatever was already selected, so the
     // whole list vanished the moment you clicked one. Member/vendor/date
@@ -184,7 +184,7 @@ pub fn render_period_comparison_chart(
     let mut data = aggregate_period_comparison(&filtered_a, &filtered_b, &labels.0, &labels.1, categories);
     let mut picker_data = aggregate_period_comparison(&picker_a, &picker_b, &labels.0, &labels.1, categories);
 
-    // ponytail: empty state keys off the UNFILTERED rows — an empty
+    // empty state keys off the UNFILTERED rows — an empty
     // *filtered* result still renders the shell + picker below so the
     // user can unclick the selection (returning early here is what made
     // the whole list disappear on click).
@@ -215,7 +215,7 @@ pub fn render_period_comparison_chart(
         |c| c.period_b_amount,
     );
 
-    // ponytail: data/filters signature → Plot::reset() when it changes
+    // data/filters signature → Plot::reset() when it changes
     // (see take_reseed). Labels catch granularity/period switches; the
     // per-category amounts catch every filter change.
     let mut sh = std::collections::hash_map::DefaultHasher::new();
@@ -347,7 +347,7 @@ fn render_summary_strip(ui: &mut egui::Ui, data: &PeriodComparisonData) {
         );
         ui.separator();
 
-        // ponytail: A == B leaves a float-epsilon difference that rendered
+        // A == B leaves a float-epsilon difference that rendered
         // as a red "-$0.00 (0.0%)" — below half a cent is zero, and zero
         // is neutral, not error. Totals mix income + spending categories,
         // so the overall difference has NO single good direction — it stays
@@ -456,7 +456,7 @@ fn render_paired_chart(
                 .fill(base)
                 .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(base, 0.18)))
                 .name("B");
-            // ponytail: bar hover bypasses the plot-level label_formatter
+            // bar hover bypasses the plot-level label_formatter
             // (egui_plot 0.37 routes bars through add_rulers_and_text) —
             // its default text showed the raw ln-space coordinate.
             // element_formatter is the only hook for bars; A/B dollar

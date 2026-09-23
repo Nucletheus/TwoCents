@@ -89,7 +89,7 @@ impl AnalyticsChart {
     }
 }
 
-/// ponytail: shared Category/Cost row ordering for ALL three analytics
+/// shared Category/Cost row ordering for ALL three analytics
 /// charts (breakdown legend, BvA picker/chart, PC picker/chart) — one
 /// selection so switching tabs keeps your sort. Not persisted — no
 /// schema migration; defaults to Category ascending each launch.
@@ -132,31 +132,31 @@ pub struct AnalyticsState {
     pub selected_members: HashSet<String>,
     pub selected_vendors: HashSet<String>,
     pub active_chart: AnalyticsChart,
-    /// ponytail: Period Comparison includes income (positive) rows; the
+    /// Period Comparison includes income (positive) rows; the
     /// other charts stay spending-only. Set on PC's scope clone only.
     pub include_income: bool,
-    /// ponytail: Period Comparison granularity + selected indices into the
+    /// Period Comparison granularity + selected indices into the
     /// generated period list (see `period_comparison.rs`). Not persisted —
     /// same precedent as legend_sort/budget_view_period; defaults to
     /// Month, A = previous month, B = current month each launch.
     pub comparison_granularity: BudgetViewPeriod,
     pub comparison_period_a: usize,
     pub comparison_period_b: usize,
-    /// ponytail: one-shot flag. When set, every analytics chart resets
+    /// one-shot flag. When set, every analytics chart resets
     /// its zoom/pan to the default bounds on its next draw, then clears
     /// the flag. Driven by the "Reset View" button so it works across
     /// all charts (the button lives outside the plot closures).
     pub reset_view: bool,
-    /// ponytail: which budget period Budget vs Actual compares against —
+    /// which budget period Budget vs Actual compares against —
     /// granularity tab + index into the 24-entry `comparison_periods`
     /// list (0 = current). Not persisted — same precedent as
     /// comparison_period_a/b; defaults to Month, current period, each
     /// launch.
     pub budget_view_period: BudgetViewPeriod,
     pub budget_period_index: usize,
-    /// ponytail: Category Breakdown legend ordering.
+    /// Category Breakdown legend ordering.
     pub legend_sort: LegendSort,
-    /// ponytail: plot reseed signatures (NOT persisted). egui_plot freezes
+    /// plot reseed signatures (NOT persisted). egui_plot freezes
     /// auto-bounds on first pan/zoom; when the data behind a chart changes
     /// we call Plot::reset() so bounds auto-fit the new data again. Manual
     /// zoom persists until the next change or the Reset View flag.
@@ -214,7 +214,7 @@ impl AnalyticsState {
     pub fn from_row(row: &AnalyticsFilterRow) -> Self {
         let date_preset = str_to_date_preset(&row.date_preset);
 
-        // ponytail: rolling presets must be recomputed at load, not
+        // rolling presets must be recomputed at load, not
         // restored — a saved "This Month" from Aug 15 reopened in Sep
         // still showing August dates. Saved strings are honored only
         // for Custom, where the user picked the exact bounds.

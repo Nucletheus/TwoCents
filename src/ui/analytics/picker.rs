@@ -21,7 +21,7 @@ pub fn toggle_category_filter(state: &mut AnalyticsState, category: &str) {
     }
 }
 
-/// ponytail: THE Category/Cost sort row — shared by all three analytics
+/// THE Category/Cost sort row — shared by all three analytics
 /// tabs so one selection orders every chart (and follows you when you
 /// switch tabs). Two buttons, each click toggles its direction.
 pub fn render_legend_sort(ui: &mut egui::Ui, state: &mut AnalyticsState) -> bool {
@@ -66,13 +66,13 @@ pub fn render_legend_sort(ui: &mut egui::Ui, state: &mut AnalyticsState) -> bool
     changed
 }
 
-/// ponytail: shared row ordering for all three charts' category lists
-/// (chart rows AND picker rows both ride this). Category = the parent→sub
-/// tree walk (orphans appended by cost desc, whole vec reversed on Desc —
-/// the original breakdown behavior); Cost = |cost| descending/ascending
-/// with a name tie-break. Costs are magnitudes — the breakdown's
-/// signed-negative amounts used to float the SMALLEST spends to the top
-/// on Cost ↓.
+/// shared row ordering for the analytics category lists (chart rows and
+/// picker rows both ride this). Category = the parent→sub tree walk
+/// (orphans appended by cost desc, whole vec reversed on Desc — the
+/// original breakdown behavior); Cost = |cost| descending/ascending with
+/// a name tie-break. Costs are magnitudes, otherwise the breakdown's
+/// signed-negative amounts would float the smallest spends to the top on
+/// Cost ↓.
 pub fn order_rows_by_legend_sort<T>(
     categories: &[Category],
     rows: &mut Vec<T>,
@@ -135,7 +135,7 @@ pub fn order_rows_by_legend_sort<T>(
     }
 }
 
-/// ponytail: the one category selector for every analytics tab, rendered
+/// the one category selector for every analytics tab, rendered
 /// in a right-hand side column (Category Breakdown next to the donut,
 /// Budget vs Actual under its summary card, Period Comparison next to the
 /// chart). The caller passes the column's fill height; rows are

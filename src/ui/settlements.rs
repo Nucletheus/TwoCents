@@ -59,7 +59,7 @@ impl super::super::TwoCentsApp {
     crate::ui::components::heading_lg(ui, "Who Owes Whom");
     ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
-    // ponytail: settlements are about shared spending — debit rows only,
+    // settlements are about shared spending — debit rows only,
     // magnitude; income (credits) and excluded transfer/payment rows are
     // not household payments and never enter the math.
     let excluded = excluded_category_labels(&categories);
@@ -67,7 +67,7 @@ impl super::super::TwoCentsApp {
       if exp.amount_cents < 0 && !excluded.contains(&exp.category) { -exp.amount_cents } else { 0 }
     };
 
-    // ponytail: Who Owes Whom counts ONLY split-covered categories — any
+    // Who Owes Whom counts ONLY split-covered categories — any
     // category with at least one non-zero allocation. No equal-split
     // fallback: it dragged every unassigned expense into the math (±$36k
     // with one split category configured). Categories whose splits are all
@@ -127,7 +127,7 @@ impl super::super::TwoCentsApp {
     creditors.sort_by(|a, b| b.1.cmp(&a.1));
 
     let two_or_more = members.len() >= 2;
-    // ponytail: single column — balances, then suggested payments directly
+    // single column — balances, then suggested payments directly
     // under them (was a side-by-side columns(2) split).
     crate::ui::components::label_muted(ui, "Balances");
     if !two_or_more {
@@ -146,7 +146,7 @@ impl super::super::TwoCentsApp {
         ui.horizontal(|ui| {
           let (rect, _) = ui.allocate_exact_size(egui::vec2(SWATCH_R * 2.0, SWATCH_R * 2.0), egui::Sense::hover());
           ui.painter().circle_filled(rect.center(), SWATCH_R, m.color);
-          // ponytail: egui hardwires strong() text to widgets.active's
+          // egui hardwires strong() text to widgets.active's
           // fg_stroke (contrast-on-accent = near-black here), so strong
           // labels must carry an explicit palette color.
           ui.label(RichText::new(&m.name).strong().color(crate::ui::theme::fg_primary()));
@@ -164,7 +164,7 @@ impl super::super::TwoCentsApp {
       while di < debtors.len() && ci < creditors.len() {
         let amount = debtors[di].1.min(creditors[ci].1);
         if amount > 0 {
-          // ponytail: explicit fg_default — this line previously used egui's
+          // explicit fg_default — this line previously used egui's
           // default text stroke, which is also what muted backgrounds show;
           // in light variants it rendered washed-out (light-on-light).
           ui.label(
@@ -209,7 +209,7 @@ impl super::super::TwoCentsApp {
         let block_w = (w - BLOCK_GAP * (cols - 1) as f32) / cols as f32;
 
 // Build blocks: header (parent) + data rows (subs; the parent itself when childless)
-        // ponytail: excluded categories (user-flagged) get no block at all —
+        // excluded categories (user-flagged) get no block at all —
         // their rows never enter the math either (shared_spend filters them).
         let excluded = excluded_category_labels(&categories);
         let mut blocks: Vec<(BlockRow, Vec<BlockRow>)> = Vec::new();

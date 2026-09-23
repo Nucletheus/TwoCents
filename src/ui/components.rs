@@ -5,15 +5,14 @@
 //! Every card, button, modal, and input in the app should be built through
 //! these helpers — never construct a raw `egui::Frame` for chrome.
 //!
-//! ponytail: if a primitive isn't here, add it here. Don't `Frame::default()`
-//! a card at a call site.
+//! Add new chrome primitives here rather than constructing `egui::Frame` at call sites.
 use eframe::egui::{self, Color32, Frame, Margin, Stroke, Vec2};
 use crate::ui::theme;
 use crate::ui::theme_tokens::*;
 
 // ---- Color access -----------------------------------------------------------
 //
-// ponytail: colors live ONLY in `theme::palette()`. The chrome builders below
+// colors live ONLY in `theme::palette()`. The chrome builders below
 // read the private helper; UI call sites use `crate::ui::theme::*` directly.
 
 fn palette() -> theme::Palette { theme::palette() }
@@ -46,8 +45,8 @@ pub fn card_subtle(_ui: &egui::Ui) -> Frame {
     .inner_margin(Margin::same(SPACE_3 as i8))
 }
 
-/// ponytail: shim that ignores the &Style arg for `themed_panel_frame` callers
-/// that already have a Style in hand but don't have a Ui.
+/// Wrapper for `themed_panel_frame` callers that hold a `&Style`
+/// but have no `Ui` to read the palette from.
 pub fn card_subtle_dummy() -> Frame {
   card_subtle_dummy_inner()
 }
@@ -60,7 +59,7 @@ fn card_subtle_dummy_inner() -> Frame {
     .inner_margin(Margin::symmetric(SPACE_3 as i8, SPACE_2 as i8))
 }
 
-/// ponytail: shared chrome for the expense / import / duplicates grid tables.
+/// shared chrome for the expense / import / duplicates grid tables.
 /// All three call sites previously built their own Frame inline; this guarantees
 /// the three grids have identical chrome (1px border, 6px radius, 2px inner
 /// margin) so the user can't tell them apart visually until they read the data.
@@ -154,7 +153,7 @@ pub fn input_ghost(ui: &egui::Ui) -> Frame {
 // `egui::Button` already supports fill/stroke/text_color. These helpers return
 // the visual configuration; call sites do `ui.add(egui::Button::new(label).fill(...))`.
 //
-// ponytail: button is just (fill, stroke, text_color, padding). Five flavors:
+// button is just (fill, stroke, text_color, padding). Five flavors:
 //   * `button_subtle` — default 13-theme secondary look
 //   * `button_primary` — accent fill, white text
 //   * `button_ghost`   — borderless, hover-only background
@@ -238,11 +237,9 @@ pub fn tab_underline(ui: &egui::Ui, rect: egui::Rect, active: bool) {
   );
 }
 
-/// ponytail: complete Notion-style tab button — themed label + 2px accent
-/// underline when `active` is true. Replaces the manual `Frame::NONE +
-/// Label + tab_underline` triplet that was duplicated at every tab strip
-/// call site. The caller is responsible for laying these out in a
-/// `horizontal()` row.
+/// Complete tab button: themed label with a 2px accent underline when
+/// `active` is true. Keeps every tab strip visually identical; the caller
+/// lays these out in a `horizontal()` row.
 pub fn tab_label_button(ui: &mut egui::Ui, active: bool, label: &str) -> egui::Response {
   let padding = egui::Margin::symmetric(SPACE_2 as i8, 0);
   let frame = egui::Frame::NONE.inner_margin(padding);
@@ -263,7 +260,7 @@ pub fn tab_label_button(ui: &mut egui::Ui, active: bool, label: &str) -> egui::R
 
 // ---- Progress bar -----------------------------------------------------------
 
-/// ponytail: return a color `amount` darker (in HSVA value space)
+/// return a color `amount` darker (in HSVA value space)
 /// than the input. Used by `progress_bar` and the chart bars so each
 /// colored segment's outline matches its own hue rather than the
 /// theme's neutral border. Clamp at 0.10 so very dark colors don't
@@ -274,7 +271,7 @@ pub fn darker(color: Color32, amount: f32) -> Color32 {
   Color32::from(hsva)
 }
 
-/// ponytail: progress bar component. Pure data-in, paint-out — caller picks
+/// progress bar component. Pure data-in, paint-out — caller picks
 /// the rect, this draws the track + fill + percent label. Used by the budget
 /// sheet's per-row and parent-row progress cells. The bar fill color shifts:
 /// ≤80% → success, ≤100% → warning, >100% → error.
@@ -304,7 +301,7 @@ pub fn progress_bar(ui: &mut egui::Ui, cell_rect: egui::Rect, percent: f32) {
     } else {
       p.error
     };
-    // ponytail: 1px outline on the colored fill in the same color,
+    // 1px outline on the colored fill in the same color,
     // 18% darker. Defines the leading edge of the bar and gives a
     // clean silhouette when the bar reaches 100% (track no longer
     // visible behind it). The track itself stays borderless.
@@ -328,7 +325,7 @@ pub fn progress_bar(ui: &mut egui::Ui, cell_rect: egui::Rect, percent: f32) {
   );
 }
 
-/// ponytail: visual swatch with a 1px themed border. Used in the budget
+/// visual swatch with a 1px themed border. Used in the budget
 /// parent-row and the per-row swatches. Not interactive — for visual identity
 /// only. The interactive version (in households/popups) is `color_swatch_button`
 /// in `widgets.rs`.
@@ -340,7 +337,7 @@ pub fn color_swatch_decorated(painter: &egui::Painter, rect: egui::Rect, color: 
 
 #[allow(dead_code)]
 fn _components_use_no_dead_warning() {
-  // ponytail: silence "unused" if both color_swatch_decorated and
+  // silence "unused" if both color_swatch_decorated and
   // progress_bar aren't reached from a call site yet.
   let _ = (color_swatch_decorated, progress_bar);
 }
@@ -367,7 +364,7 @@ pub fn empty_state(ui: &mut egui::Ui, headline: &str, subtext: &str) {
 
 // ---- Text styles ------------------------------------------------------------
 //
-// ponytail: these are the *only* places that should pick a font size. A
+// these are the *only* places that should pick a font size. A
 // 14-point body is a 14-point body everywhere.
 
 pub fn text_xs(ui: &egui::Ui) -> egui::RichText {

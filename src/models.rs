@@ -377,7 +377,7 @@ pub struct CategorySplit {
 
 // ---- Excluded categories ----------------------------------------------------
 //
-// ponytail: any category can be flagged "excluded" in Settings (children
+// any category can be flagged "excluded" in Settings (children
 // inherit via the tree walk). Excluded rows store 0 and show "—" — they
 // never enter budgets, analytics, or settlements. INCOME_PARENT is special
 // for signs only: anything under it is a positive credit.
@@ -448,7 +448,7 @@ pub fn budget_period_date_range(gran: BudgetGranularity, year: i32, period: i32)
 }
 
 /// Sign for a stored amount given its category label: +1 (income credit),
-/// −1 (debit). ponytail: excluded categories keep their real amount — the
+/// −1 (debit). Excluded categories keep their real amount — the
 /// flag only removes rows from aggregation math (budgets/analytics/
 /// settlements), never from the grid or duplicate matching.
 pub fn category_sign(categories: &[Category], label: &str) -> i64 {

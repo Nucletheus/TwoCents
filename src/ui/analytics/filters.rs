@@ -13,7 +13,7 @@ pub fn render_filter_panel(
 ) -> bool {
     let mut changed = false;
 
-    // ponytail: row 1 — date preset buttons (themed). User picks a
+    // row 1 — date preset buttons (themed). User picks a
     // preset and the start/end dates are computed. The "Custom" option
     // reveals a free-form date range below. Hidden on the Period
     // Comparison tab, whose dates come from its own A/B combos.
@@ -46,7 +46,7 @@ pub fn render_filter_panel(
 
         // Custom date range (only shown when Custom is selected)
         if state.date_preset == DatePreset::Custom {
-            // ponytail: Custom reached with no stored dates (e.g. via
+            // Custom reached with no stored dates (e.g. via
             // AllTime → Custom) used to leave Start/End unusable — the
             // fields didn't render. Seed a sane default window instead.
             if state.date_start.is_none() && state.date_end.is_none() {
@@ -83,14 +83,11 @@ pub fn render_filter_panel(
         }
     }
 
-    // ponytail: row 2 — filter dropdowns. The Clear button
-    // here is the only "Clear" in the analytics page. It resets ALL filter
-    // state (categories, members, vendors) to defaults.
-    // It also resets the date range to "Last 3 Months". The previous
-    // version had two "Clear" buttons that did different things, which
-    // was confusing — consolidating them.
+    // Row 2: filter dropdowns. The Clear button is the only "Clear" in
+    // the analytics page. It resets all filter state (categories, members,
+    // vendors) to defaults and the date range to "Last 3 Months".
     ui.horizontal_wrapped(|ui| {
-        // ponytail: no category dropdown here — it matched `c.name` against
+        // no category dropdown here — it matched `c.name` against
         // a set of full "Parent › Sub" labels (phantom "N selected", and
         // checked entries the filter never matched). Category selection is
         // the shared picker on each chart tab.
@@ -136,7 +133,7 @@ pub fn render_filter_panel(
 
         ui.add_space(crate::ui::theme_tokens::SPACE_3);
 
-        // ponytail: "Reset View" restores every chart's zoom/pan to its
+        // "Reset View" restores every chart's zoom/pan to its
         // default bounds on the next draw (handled inside each chart's
         // plot closure via state.reset_view). Kept separate from "Clear
         // filters" so the user can re-frame a chart without losing their

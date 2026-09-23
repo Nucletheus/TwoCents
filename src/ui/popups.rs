@@ -55,7 +55,7 @@ pub fn styled_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::Res
   }
 }
 
-// ponytail: contrast picking lives in theme::contrast_text (single copy).
+// contrast picking lives in theme::contrast_text (single copy).
 
 /// Renders the category picker dropdown menu and returns the picked label, if any.
 /// Extracted from TwoCentsApp::ui_category_picker_menu so it can be called without &self.
@@ -135,9 +135,9 @@ impl TwoCentsApp {
         .default_width(320.0)
         .frame(crate::ui::components::modal())
         .show(ctx, |ui| {
-          // ponytail: heading + muted description, Notion hierarchy. Same
-          // shape as Import / Duplicates / Settings modals. Replaces the
-          // OS title bar so the modal is consistent across the app.
+          // Heading + muted description, same shape as the Import /
+          // Duplicates / Settings modals; the custom header bar replaces
+          // the OS title bar so modals look consistent across the app.
           ui.horizontal(|ui| {
             crate::ui::components::heading_md(ui, "Pick a color");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -230,7 +230,7 @@ impl TwoCentsApp {
   }
 
   fn delete_category(&mut self, category_id: i64) {
-    // ponytail: the Income root drives the credit/debit sign convention —
+    // the Income root drives the credit/debit sign convention —
     // deleting it would strand income rows. Everything else is deletable;
     // exclusion is a user-set flag now, not name-based protection.
     let is_income_root = self.categories.iter()
@@ -319,7 +319,7 @@ impl TwoCentsApp {
           {
             start_add_sub = Some(parent.id);
           }
-          // ponytail: user-set exclusion — children inherit via the tree
+          // user-set exclusion — children inherit via the tree
           // walk; excluded rows drop out of budgets/analytics/settlements.
           let mut parent_excluded = parent.excluded;
           if ui.checkbox(&mut parent_excluded, "Excluded").changed() {
@@ -421,7 +421,7 @@ impl TwoCentsApp {
     }
   }
 
-  // ponytail: the old floating "Settings" window now lives inline on the
+  // the old floating "Settings" window now lives inline on the
   // Household tab, wrapped in a household_panel by the caller.
   pub fn ui_category_settings_section(&mut self, ui: &mut egui::Ui) {
     let mut add_parent = false;
@@ -476,7 +476,7 @@ impl TwoCentsApp {
         .default_width(320.0)
         .frame(crate::ui::components::modal())
         .show(ctx, |ui| {
-          // ponytail: heading + muted description, Notion hierarchy. Same
+          // heading + muted description, Notion hierarchy. Same
           // shape as the member-color picker and the other modals.
           ui.horizontal(|ui| {
             crate::ui::components::heading_md(ui, "Pick a color");
@@ -527,8 +527,7 @@ impl TwoCentsApp {
             }
           });
           ui.vertical_centered(|ui| {
-            // ponytail: heading + secondary text. Replaces the lone
-            // "⚠ Warning" RichText label.
+            // Heading + secondary text instead of a lone warning label.
             crate::ui::components::heading_md(ui, "Confirm Deletion");
             ui.add_space(crate::ui::theme_tokens::SPACE_2);
             ui.label(
@@ -549,7 +548,7 @@ impl TwoCentsApp {
 
             ui.horizontal(|ui| {
               ui.columns(2, |cols| {
-                // ponytail: Delete on the left per user preference.
+                // Delete on the left per user preference.
                 cols[0].vertical_centered(|ui| {
               let err = theme::error();
               let on_err = theme::contrast_text(err);
@@ -624,7 +623,7 @@ impl TwoCentsApp {
             
             ui.horizontal(|ui| {
               ui.columns(2, |cols| {
-                // ponytail: Remove on the left per user preference.
+                // Remove on the left per user preference.
                 cols[0].vertical_centered(|ui| {
                   let sel_bg = crate::ui::theme::accent();
                   let on_sel = theme::contrast_text(sel_bg);
@@ -657,7 +656,7 @@ fn settings_new_parent_name_id() -> Id {
   Id::new("settings_new_parent_category_name")
 }
 
-/// ponytail: egui's title-bar X is a ~16px hit target — too precise to click.
+/// egui's title-bar X is a ~16px hit target — too precise to click.
 /// This paints a 28×24 close glyph with a full-rect click area. Windows drop
 /// `.open()` and render this in their content instead. The X is drawn with
 /// two line segments — the ✕ text glyph is missing from egui's default fonts

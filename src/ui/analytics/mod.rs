@@ -19,7 +19,7 @@ use budget_comparison::{render_budget_vs_actual_chart, BudgetPeriodBudgets};
 use period_comparison::render_period_comparison_chart;
 
 impl TwoCentsApp {
-    /// ponytail: Budget vs Actual re-prices each category's envelope for
+    /// Budget vs Actual re-prices each category's envelope for
     /// the SELECTED analytics period (the shared `self.budgets` map only
     /// covers the Budgets tab's currently-selected period). Lives here
     /// because the snapshot cache + cap lookup (`compute_budget_for`)
@@ -35,7 +35,7 @@ impl TwoCentsApp {
             BudgetViewPeriod::Year => BudgetGranularity::Yearly,
         };
         let (start, end) = (entry.start, entry.end);
-        // ponytail: year-honest snapshots — one load per frame for the
+        // year-honest snapshots — one load per frame for the
         // viewed year (the Budgets-tab cache only covers its own year).
         let snaps = if entry.year == self.budget_year {
             std::borrow::Cow::Borrowed(&self.cached_budget_snapshots[..])
@@ -62,7 +62,7 @@ impl TwoCentsApp {
     }
 
     pub fn ui_analytics(&mut self, ui: &mut egui::Ui) {
-        // ponytail: drop selected categories whose labels no longer exist
+        // drop selected categories whose labels no longer exist
         // (renames/deletes) — persisted stale entries silently filtered
         // everything else out while showing up as a phantom "N selected".
         {
@@ -77,7 +77,7 @@ impl TwoCentsApp {
                 .retain(|c| full_labels.contains(c));
         }
 
-        // ponytail: page heading + muted description. Matches the rest of
+        // page heading + muted description. Matches the rest of
         // the app's heading hierarchy.
         crate::ui::components::heading_lg(ui, "Analytics");
         crate::ui::components::label_muted(
@@ -108,14 +108,14 @@ impl TwoCentsApp {
         ui.separator();
         ui.add_space(8.0);
 
-        // Filter panel. ponytail: the date-preset row is hidden on the two
+        // Filter panel. The date-preset row is hidden on the two
         // charts that own their own date story (Budget vs Actual → its
         // period toggle; Period Comparison → its A/B combos) — one date
         // story per tab. Category/member/vendor filters still apply on
         // all three. Category selection is the shared right-column picker
         // on each chart tab (no dropdown here).
         let show_date_range = self.analytics_state.active_chart == AnalyticsChart::CategoryBreakdown;
-        // ponytail: HashSet iteration order is randomized per instance —
+        // HashSet iteration order is randomized per instance —
         // rebuilding it every frame made the vendor dropdown rows reshuffle
         // frame-to-frame ("scrolling all over the place"). Sort for a stable
         // order; drop blank vendors (expenses with no vendor set).
@@ -167,7 +167,7 @@ impl TwoCentsApp {
             }
         }
 
-        // ponytail: Reset View is one-shot. The active chart reads it
+        // Reset View is one-shot. The active chart reads it
         // inside its plot closure this frame; clear it afterwards so it
         // doesn't re-fire on every subsequent frame.
         if self.analytics_state.reset_view {

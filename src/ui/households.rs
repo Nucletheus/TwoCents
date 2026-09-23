@@ -23,7 +23,7 @@ impl TwoCentsApp {
       .inner_margin(egui::Margin::symmetric(20, 14))
       .show(ui, |ui| {
         ui.set_max_width(560.0);
-        // ponytail: heading + muted description, Notion hierarchy.
+        // heading + muted description, Notion hierarchy.
         crate::ui::components::heading_lg(ui, "Household");
         crate::ui::components::label_muted(
           ui,

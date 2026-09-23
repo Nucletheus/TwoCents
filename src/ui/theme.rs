@@ -5,7 +5,7 @@ use std::sync::Mutex;
 pub enum VariantMode { Dark, Light, System }
 
 impl VariantMode {
-  /// ponytail: stable storage key for app_settings persistence.
+  /// stable storage key for app_settings persistence.
   pub fn as_key(&self) -> &'static str {
     match self {
       Self::Dark => "dark",
@@ -342,15 +342,15 @@ fn theme_pair(t: ThemePreset) -> ThemePair {
   }
 }
 
-// ---- The palette (THE one color source) ------------------------------------
+// ---- The palette (the one color source) ------------------------------------
 //
-// ponytail: the ONLY place the app gets colors. Raw preset fields feed a
-// derive() step that produces every token the UI is allowed to touch —
+// The only place the app gets colors. Raw preset fields feed a
+// derive() step that produces every token the UI is allowed to touch:
 // primary/secondary text, primary/secondary background, hover/active
 // surfaces, border, accent, and the three status colors. No other module
 // may pick a color: no `ui.visuals()` reads, no fallback hex, no literals.
-// (Alpha/lerp variants of a palette token at the point of use are fine —
-// they are still derived FROM the palette.)
+// (Alpha/lerp variants of a palette token at the point of use are fine,
+// they are still derived from the palette.)
 
 /// The full token set, derived once per theme change from a preset's raw
 /// fields. `pub` fields for chrome builders that need several at once.
@@ -382,7 +382,7 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
   Color32::from_rgb(r, g, bl)
 }
 
-/// ponytail: THE derivation — raw preset fields in, every UI token out.
+/// THE derivation — raw preset fields in, every UI token out.
 /// Secondary text/bg tokens are mix-derived here (the 13 presets only
 /// provide one text + two surfaces each); this is the single documented
 /// tradeoff, and it lives here and nowhere else.
@@ -408,7 +408,7 @@ fn derive(c: &ThemeColors, is_dark: bool) -> Palette {
   }
 }
 
-/// ponytail: one global, replaced wholesale by `configure_theme` on theme
+/// one global, replaced wholesale by `configure_theme` on theme
 /// change (its LAST_APPLIED gate makes that cheap). First access before the
 /// first frame derives the default preset through the same derive() — never
 /// a scattered fallback hex.
@@ -442,20 +442,15 @@ pub fn active_is_dark() -> bool {
 }
 
 
-/// ponytail: the ONE contrast pick — black or white text for legibility on a
-/// given bg (rec.601 luminance, 150 threshold). All other copies of this idea
-/// were deduped into this function.
-/// ponytail: the ONE text-on-fill contrast helper. All swatch/picker/tint
-/// labels must route through this so black-on-dark / white-on-light can't
-/// recur per call site with diverging thresholds.
-/// ponytail: the ONE text-on-fill contrast helper. All swatch/picker/tint
-/// labels and accent-filled buttons must route through this so text legibility
-/// can't diverge per call site. WCAG-style sRGB relative luminance
-/// (gamma-linearized channels), threshold 0.25 — the old rec.601/120 formula
-/// scored mid-dark accents like One Dark's blue #3b82f6 at 121.9 and picked
-/// black text on accent-blue buttons (unreadable); linearized luminance
-/// separates cleanly (blue-500 ≈ 0.24 → white; pale accents, yellows,
-/// oranges, teals ≥ 0.37 → black).
+/// Text-on-fill contrast helper: picks black or white text for legibility
+/// on a given background. All swatch, picker, and tint labels and
+/// accent-filled buttons route through this so legibility can't diverge
+/// per call site. Uses WCAG-style sRGB relative luminance (gamma-linearized
+/// channels) with a 0.25 threshold; the previous rec.601/120 formula scored
+/// mid-dark accents like One Dark's blue #3b82f6 at 121.9 and picked black
+/// text on accent-blue buttons. Linearized luminance separates cleanly:
+/// blue-500 (≈0.24) gets white text; pale accents, yellows, oranges, and
+/// teals (≥0.37) get black.
 pub fn contrast_text(bg: Color32) -> Color32 {
   let lin = |c: u8| -> f32 {
     let v = c as f32 / 255.0;
@@ -488,7 +483,7 @@ fn apply_visuals(visuals: &mut Visuals, p: &Palette) {
   visuals.widgets.noninteractive.fg_stroke.color = p.text_primary;
   visuals.widgets.inactive.fg_stroke.color = p.text_primary;
   visuals.widgets.hovered.fg_stroke.color = p.text_primary;
-  // ponytail: active/open widget states sit on accent backgrounds — their
+  // active/open widget states sit on accent backgrounds — their
   // text must contrast with the accent, not text_primary (which is near-black
   // in light themes → the black-on-blue button bug class).
   visuals.widgets.active.fg_stroke.color = p.selection_fg;
@@ -499,7 +494,7 @@ fn apply_visuals(visuals: &mut Visuals, p: &Palette) {
   visuals.hyperlink_color = p.accent;
   visuals.warn_fg_color = p.warning;
   visuals.error_fg_color = p.error;
-  // ponytail: the wrong-font-color bug class — unstyled RichText used to
+  // the wrong-font-color bug class — unstyled RichText used to
   // inherit egui's default text color, which could diverge from the theme.
   // Forcing the override means EVERY label without an explicit color gets
   // the palette's primary text.
@@ -508,7 +503,7 @@ fn apply_visuals(visuals: &mut Visuals, p: &Palette) {
 }
 
 pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool) {
-  // ponytail: skip the rebuild unless the theme actually changed — this ran
+  // skip the rebuild unless the theme actually changed — this ran
   // every frame (Visuals alloc + set_visuals Arc swap + palette store) for
   // values that only change on user action.
   static LAST_APPLIED: Mutex<Option<(ThemePreset, bool)>> = Mutex::new(None);
@@ -540,7 +535,7 @@ pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool)
     color: Color32::from_black_alpha(200),
   };
 
-  // ponytail: egui keeps TWO style slots (dark_style/light_style) and picks
+  // egui keeps TWO style slots (dark_style/light_style) and picks
   // the active one via theme_preference, which defaults to System (follows
   // the OS) — independent of this app's variant logic. set_visuals writes
   // only the active slot, so the other slot kept STOCK egui visuals and
@@ -553,7 +548,7 @@ pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool)
   ctx.set_theme(egui::ThemePreference::from(theme));
   ctx.all_styles_mut(|s| s.visuals = visuals.clone());
   *PALETTE.lock().expect("theme palette mutex poisoned") = Some(p);
-  // ponytail: style writes go through Context::write, which does NOT request
+  // style writes go through Context::write, which does NOT request
   // a repaint — without this, a theme change with the mouse idle kept
   // showing the last-painted frame until the next input event.
   ctx.request_repaint();

@@ -14,7 +14,7 @@ pub fn render_category_breakdown_chart(
     let mut state_changed = false;
     let excluded = excluded_category_labels(categories);
 
-    // ponytail: the legend's source must NOT be filtered by the category
+    // the legend's source must NOT be filtered by the category
     // selection — it aggregates with date/member/vendor filters only.
     // Filtering it by selection erased every other row the moment you
     // clicked one, making multi-select impossible (the rows you'd click
@@ -52,7 +52,7 @@ pub fn render_category_breakdown_chart(
         .collect();
 
     let total: f64 = donut_used.iter().map(|c| c.amount).sum();
-    // ponytail: expense amounts are negative (spend), so the signed total
+    // expense amounts are negative (spend), so the signed total
     // is <= 0 and the old `total > 0` gate drew zero slices. Wedge shares
     // and legend percentages use the ABS sum — a spending donut is shares
     // of magnitude, not of the signed net. The footer Total stays signed.
@@ -60,7 +60,7 @@ pub fn render_category_breakdown_chart(
     let abs_total: f64 = donut_used.iter().map(|c| c.amount.abs()).sum();
     let legend_abs: f64 = legend_totals.iter().map(|c| c.amount.abs()).sum();
 
-    // ponytail: picker fills the container height — available minus the
+    // picker fills the container height — available minus the
     // fixed chrome above (heading/hint/sort) and below (separator/Total/
     // status) the list, so no white space is left at the bottom.
     let avail = ui.available_size_before_wrap();
@@ -123,7 +123,7 @@ pub fn render_category_breakdown_chart(
                 crate::ui::theme::fg_primary(),
             );
 
-            // ponytail: pointer hit-test — angle (atan2, normalized against
+            // pointer hit-test — angle (atan2, normalized against
             // the same -π/2 start) + radius decide which slice is hovered.
             // The donut is painter-drawn, so egui can't tooltip it for us.
             if let Some(pos) = donut_response.hover_pos() {
@@ -193,7 +193,7 @@ pub fn render_category_breakdown_chart(
             
             // Total
             ui.horizontal(|ui| {
-                // ponytail: egui hardwires strong() text to widgets.active's
+                // egui hardwires strong() text to widgets.active's
                 // fg_stroke (contrast-on-accent = near-black here), so strong
                 // labels must carry an explicit palette color.
                 ui.label(RichText::new("Total:").strong().color(crate::ui::theme::fg_primary()));
@@ -259,7 +259,7 @@ fn draw_donut_slice(
     // Close the shape
     points.push(points[0]);
 
-    // ponytail: 1px outline on each slice in the same color, 18%
+    // 1px outline on each slice in the same color, 18%
     // darker. Defines the slice boundary so adjacent wedges read
     // as distinct slices, not as a smooth gradient.
     let slice_outline = crate::ui::components::darker(color, 0.18);

@@ -84,7 +84,7 @@ pub fn open_database() -> rusqlite::Result<Connection> {
   migrate_demo_cleanup_v11(&conn)?;
   migrate_category_exclusion_v12(&conn)?;
 
-  // ponytail: legacy DBs carry UNIQUE(vendor_pattern) only — the vendor-rule
+  // legacy DBs carry UNIQUE(vendor_pattern) only — the vendor-rule
   // upserts target (household_id, vendor_pattern), which matches nothing and
   // fails every import with "ON CONFLICT clause does not match...". One
   // idempotent index fixes both upsert sites (import + grid learning).
@@ -118,7 +118,7 @@ pub fn load_active_household(conn: &Connection) -> rusqlite::Result<(i64, String
   })
 }
 
-/// ponytail: tiny app-wide key/value settings (theme preset, variant
+/// tiny app-wide key/value settings (theme preset, variant
 /// mode) — persisted immediately on change so relaunch resumes on last
 /// session's theme instead of the hardcoded default.
 pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
@@ -316,7 +316,7 @@ pub fn load_accounts(conn: &Connection, household_id: i64) -> rusqlite::Result<V
   rows
 }
 
-/// ponytail: accounts are born from imports — the CSV's detected account
+/// accounts are born from imports — the CSV's detected account
 /// value maps to a user-named account via csv_name, so the next import
 /// detecting the same value auto-selects the same account. Renames propagate.
 pub fn resolve_or_create_account(conn: &Connection, household_id: i64, detected: &str, name: &str) -> rusqlite::Result<i64> {
@@ -626,9 +626,8 @@ pub fn accent_palette_swatches_from(base: Color32) -> Vec<Color32> {
     .map(|i| {
       let mut hsva = base_hsva;
       hsva.h = (base_hsva.h + i as f32 / ACCENT_PALETTE_COUNT as f32) % 1.0;
-      // ponytail: vibrant palette — saturation 0.65..0.85, value 0.78..0.92.
-      // Replaces the previous muted clamps (s 0.45..0.62, v 0.55..0.78)
-      // that produced pastel/washed-out swatches.
+      // Vibrant swatch palette: saturation 0.65..0.85, value 0.78..0.92.
+      // Milder clamps produce pastel, washed-out swatches.
       hsva.s = (0.65 + (i % 3) as f32 * 0.07).clamp(0.65, 0.85);
       hsva.v = (0.80 + ((i / 3) % 3) as f32 * 0.05).clamp(0.80, 0.92);
       Color32::from(hsva)
@@ -655,9 +654,8 @@ pub fn subcategory_color_from_parent(parent: Color32, sub_index: usize, sub_coun
   let idx = sub_index as f32;
   let mut sub = hsva;
   sub.h = (sub.h + (idx / n) * 0.06 + idx * 0.01) % 1.0;
-  // ponytail: vibrant subcategory clamp — s 0.60..0.92, v 0.72..0.95.
-  // Replaces the previous muted clamps (s 0.40..0.75, v 0.50..0.85)
-  // so children stay recognizably vivid against the new parent palette.
+  // Vibrant subcategory clamp: s 0.60..0.92, v 0.72..0.95, so children
+  // stay recognizably vivid against the parent palette.
   sub.s = (sub.s * (0.95 + idx * 0.04 / n)).clamp(0.60, 0.92);
   sub.v = (sub.v * (1.00 - idx * 0.02 / n)).clamp(0.72, 0.95);
   Color32::from(sub)
@@ -1015,7 +1013,7 @@ pub fn insert_default_category_tree(conn: &Connection, household_id: i64) -> rus
     }
   }
 
-  // ponytail: protected parents — seeding removed; exclusion is now a
+  // protected parents — seeding removed; exclusion is now a
   // user-set flag on any category (see migrate_category_exclusion_v12).
   Ok(())
 }
@@ -1049,7 +1047,7 @@ pub fn save_import_rows(conn: &Connection, household_id: i64, rows: &[ImportRow]
     } else {
       String::new()
     };
-    // ponytail: sign is a function of category — debits negative, Income
+    // sign is a function of category — debits negative, Income
     // positive. Excluded rows keep their real amount; the flag only filters
     // them out of aggregation math.
     let sign = category_sign(&categories, &category);
@@ -1067,7 +1065,7 @@ pub fn save_import_rows(conn: &Connection, household_id: i64, rows: &[ImportRow]
         row.date
       ],
     )?;
-    // ponytail: upsert instead of INSERT OR IGNORE — a rule was learned once
+    // upsert instead of INSERT OR IGNORE — a rule was learned once
     // and never updated, so corrections on later imports never stuck. Skip
     // short vendors: learning from vendor "e" poisoned every future match.
     if !category.is_empty() && !category.contains("Uncategorized") && row.vendor.trim().chars().count() >= 3 {
@@ -1139,7 +1137,7 @@ pub fn normalize_date(raw: &str) -> String {
 }
 
 pub fn normalize_vendor(description: &str) -> String {
-  // ponytail: no '-' split — "E-TRANSFER 12345" collapsed to vendor "e",
+  // no '-' split — "E-TRANSFER 12345" collapsed to vendor "e",
   // which was learned as a rule and matched every vendor containing 'e'.
   description
     .split(['*', '#'])
@@ -1161,7 +1159,7 @@ pub fn find_column(headers: &[String], candidates: &[&str]) -> Option<usize> {
 }
 
 pub fn category_for_vendor(conn: &Connection, household_id: i64, vendor: &str) -> String {
-  // ponytail: recency-first — the user's most recent correction wins. The old
+  // recency-first — the user's most recent correction wins. The old
   // order matched rules oldest-first and short-circuited before history was
   // ever consulted, so re-categorizations never stuck.
   // 1) Most recent non-empty category for this exact vendor.
@@ -1195,7 +1193,7 @@ pub fn category_for_vendor(conn: &Connection, household_id: i64, vendor: &str) -
       .unwrap_or_default();
     if let Some(category) = rules
       .into_iter()
-      // ponytail: short patterns like the learned 'e' rule substring-match
+      // short patterns like the learned 'e' rule substring-match
       // nearly every vendor — never match on anything under 3 chars.
       .filter(|(pattern, _)| pattern.trim().chars().count() >= 3)
       .find_map(|(pattern, category)| normalized.contains(&pattern.to_lowercase()).then_some(category))
@@ -1392,7 +1390,7 @@ pub fn load_budget_snapshots_for_year(
 // ── Analytics Filters v7 ─────────────────────────────────────────────────
 
 pub fn migrate_category_palette_vibrant_v8(conn: &Connection) -> rusqlite::Result<()> {
-  // ponytail: re-derive every existing category's color with the new
+  // re-derive every existing category's color with the new
   // vibrant palette. recolor_household_categories uses the live
   // accent_palette_swatches_from + subcategory_color_from_parent, so
   // calling it after the palette function changed re-derives colors
@@ -1476,7 +1474,7 @@ pub fn save_analytics_state(
   state: &AnalyticsFilterRow,
 ) -> rusqlite::Result<()> {
   conn.execute(
-    // ponytail: the table's unused granularity/candlestick columns stay in
+    // the table's unused granularity/candlestick columns stay in
     // the schema (NOT NULL with defaults) — omitted from the insert, so the
     // defaults apply and no migration is needed.
     "INSERT INTO analytics_filters (
@@ -1566,14 +1564,14 @@ pub fn load_category_splits(conn: &Connection, household_id: i64) -> rusqlite::R
 
 pub const SIGN_PROTECTED_V10_MIGRATION: &str = "sign_protected_categories_v10";
 
-/// ponytail: idempotent re-sign of legacy amounts (stored all-positive) to
+/// idempotent re-sign of legacy amounts (stored all-positive) to
 /// the new signed convention. (Formerly also seeded protected parents.)
 pub fn migrate_sign_protected_v10(conn: &Connection) -> rusqlite::Result<()> {
   ensure_migrations_table(conn)?;
   if migration_applied(conn, SIGN_PROTECTED_V10_MIGRATION)? {
     return Ok(());
   }
-  // ponytail: idempotent re-sign — legacy rows stored all-positive debits,
+  // idempotent re-sign — legacy rows stored all-positive debits,
   // so a blind flip breaks on re-run and on income rows. Normalize magnitude
   // first, then sign by category: Income tree = credit, everything else =
   // debit (excluded rows keep magnitude, filtered out by label downstream).
@@ -1587,7 +1585,7 @@ pub fn migrate_sign_protected_v10(conn: &Connection) -> rusqlite::Result<()> {
      )",
     [],
   )?;
-  // ponytail: protected-parent seeding removed — exclusion is a user-set
+  // protected-parent seeding removed — exclusion is a user-set
   // flag now (migrate_category_exclusion_v12). Kept as a no-op marker so
   // already-migrated DBs don't re-run the sign normalization.
   mark_migration_applied(conn, SIGN_PROTECTED_V10_MIGRATION)?;
@@ -1596,7 +1594,7 @@ pub fn migrate_sign_protected_v10(conn: &Connection) -> rusqlite::Result<()> {
 
 pub const DEMO_CLEANUP_V11_MIGRATION: &str = "demo_data_cleanup_v11";
 
-/// ponytail: one-time purge of fake demo data (seeded accounts/expenses/
+/// one-time purge of fake demo data (seeded accounts/expenses/
 /// starter rules) and poisoned vendor rules — single-letter and
 /// transaction-type patterns like 'e' or 'bill payment' substring-match
 /// nearly every vendor. Also adds accounts.csv_name so imports remember
@@ -1638,7 +1636,7 @@ pub fn migrate_demo_cleanup_v11(conn: &Connection) -> rusqlite::Result<()> {
 
 pub const CATEGORY_EXCLUSION_V12_MIGRATION: &str = "category_exclusion_v12";
 
-/// ponytail: exclusion becomes a user-set flag on any category instead of
+/// exclusion becomes a user-set flag on any category instead of
 /// name-matched "protected" parents. Adds categories.excluded, flags the
 /// known transfer/payment categories, drops the v10-seeded (now unused)
 /// 'Credit Card Payments' root, and re-signs expenses idempotently so

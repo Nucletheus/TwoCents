@@ -16,7 +16,7 @@ pub fn grid_header(ui: &mut egui::Ui, label: &str) -> egui::Response {
   let width = ui.available_width().max(1.0);
   let (rect, response) = ui.allocate_exact_size(egui::vec2(width, GRID_HEADER_HEIGHT), egui::Sense::click());
 
-  // ponytail: header sits INSIDE grid_table_frame (1px stroke, 6px radius,
+  // header sits INSIDE grid_table_frame (1px stroke, 6px radius,
   // 2px inner margin). The frame already owns the top, left, and right
   // edges — drawing our own top border put a 1px line directly under the
   // frame's 1px stroke, producing a visible 2px doubled line. Drop the
@@ -109,7 +109,7 @@ pub fn selection_range(sorted_indices: &[usize], anchor: usize, end: usize) -> V
       } else {
         (end_pos, anchor_pos)
       };
-      // ponytail: rows must be ascending raw indices — every membership
+      // rows must be ascending raw indices — every membership
       // check below binary_searches them, and the visual-order slice is
       // scrambled once the grid is sorted by any non-identity column.
       let mut rows = sorted_indices[lo..=hi].to_vec();
@@ -151,7 +151,7 @@ pub fn grid_text_field_committed(ui: &egui::Ui, response: &egui::Response, blur_
 }
 
 pub fn grid_row_selected(selection: &Option<GridSelection>, column: GridColumn, row: usize) -> bool {
-  // ponytail: binary_search — valid because selection_range() sorts rows
+  // binary_search — valid because selection_range() sorts rows
   // ascending; contains() was O(k) per cell per frame during drag-select.
   selection
     .as_ref()
@@ -233,7 +233,7 @@ pub fn paint_grid_cell_highlight(
   if !ui.is_rect_visible(cell_rect) {
     return;
   }
-  // ponytail: route cell-paint colors through the components palette so
+  // route cell-paint colors through the components palette so
   // every cell reacts to the same theme changes as the rest of the UI.
   let sel = crate::ui::theme::accent();
   if dragging && selected {
@@ -308,7 +308,7 @@ pub fn process_grid_column_cell(
     ui.ctx().request_repaint();
   }
 
-  // ponytail: start a drag only when none is active — a second cell firing
+  // start a drag only when none is active — a second cell firing
   // drag_started mid-gesture re-anchored the drag (anchor/end reset,
   // selection collapse, "skipping"). ender removed: egui can reassign the
   // dragged id mid-gesture, firing spurious drag_stopped that killed the
@@ -560,7 +560,7 @@ pub fn show_cell_autocomplete_popup(
   picked
 }
 
-/// ponytail: combo-style autocomplete — same interaction as the grid cell
+/// combo-style autocomplete — same interaction as the grid cell
 /// popup, but empty text lists EVERY candidate, typing switches to
 /// contains-search, and `force_open` (a ▾ toggle) shows the list without
 /// focus. Selection index lives in egui temp state, so callers need no
@@ -577,7 +577,7 @@ pub fn show_autocomplete_popup(
     return None;
   }
   let prefix = value.trim().to_lowercase();
-  // ponytail: ▾ (force_open) always lists every candidate — a combo's arrow
+  // ▾ (force_open) always lists every candidate — a combo's arrow
   // ignores the current text; typed search stays contains-based.
   let suggestions: Vec<String> = if force_open {
     candidates.iter().filter(|candidate| !candidate.trim().is_empty()).cloned().collect()
@@ -862,8 +862,9 @@ pub fn household_panel<R>(ui: &mut egui::Ui, title: &str, add_contents: impl FnO
   crate::ui::components::card_subtle(ui)
     .inner_margin(egui::Margin::symmetric(crate::ui::theme_tokens::SPACE_3 as i8, crate::ui::theme_tokens::SPACE_2 as i8))
     .show(ui, |ui| {
-      // ponytail: section_header reads as a quiet marker. The old strong+fg_default
-      // label was visually identical to the page heading, which fought the hierarchy.
+      // section_header reads as a quiet marker; a strong fg_default label
+      // here is visually identical to the page heading and flattens the
+      // hierarchy.
       crate::ui::components::section_header(ui, title);
       ui.add_space(crate::ui::theme_tokens::SPACE_2);
       add_contents(ui)
@@ -907,7 +908,7 @@ pub fn sorted_grid_indices<R: GridRow>(
 }
 
 pub fn text_on_bg(bg: Color32) -> Color32 {
-  // ponytail: delegates to the single contrast helper — the old local
+  // delegates to the single contrast helper — the old local
   // threshold drifted from theme::contrast_text's, producing mismatched
   // text-on-swatch colors between pickers and the rest of the app.
   crate::ui::theme::contrast_text(bg)
@@ -993,7 +994,7 @@ pub fn ui_grid_date_edit(
 
 
 /// Modal window frame: 1px border, 8px radius, 24px padding, drop shadow.
-/// ponytail: thin shim over `components::modal` so existing call sites
+/// Wrapper over `components::modal` so existing call sites
 /// keep their `&ctx` signature.
 pub fn themed_modal_frame(ctx: &egui::Context) -> egui::Frame {
   let _ = ctx;
@@ -1001,8 +1002,8 @@ pub fn themed_modal_frame(ctx: &egui::Context) -> egui::Frame {
 }
 
 pub fn themed_panel_frame(_style: &egui::Style) -> egui::Frame {
-  // ponytail: shim over `components::card_subtle` for backwards compat.
-  // The Style arg is ignored; the active palette supplies the colors.
+  // Compatibility wrapper: the frame comes from `components::card_subtle`;
+  // the Style arg is ignored and colors come from the active palette.
   crate::ui::components::card_subtle_dummy()
 }
 
@@ -1164,7 +1165,7 @@ pub fn viewport_needs_reposition(ctx: &egui::Context) -> bool {
       return true;
     }
     if let Some(outer) = vp.outer_rect {
-      // ponytail: eframe's persisted size restores verbatim and bypasses
+      // eframe's persisted size restores verbatim and bypasses
       // min_inner_size (only clamped to 64pt in egui-winit) — a tiny size
       // saved by an old build kept relaunching squished. Anything under the
       // app's min (720×560) counts as broken and gets re-sized.

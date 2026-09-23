@@ -1,6 +1,6 @@
-// ponytail: audit found 0 correctness warnings. All 42 clippy findings are
-// cosmetic nits (needless_borrow, collapsible_if, dead_code, etc.) — allow
-// globally; remove this attribute when each lint is addressed.
+// Lint relaxations: the remaining clippy findings are cosmetic
+// (needless_borrow, collapsible_if, dead_code, etc.). Allowed globally;
+// remove each from this list as it gets addressed.
 #![allow(clippy::needless_borrow, clippy::needless_borrows_for_generic_args, clippy::collapsible_if, clippy::empty_line_after_doc_comments, clippy::manual_flatten, clippy::manual_is_multiple_of, clippy::needless_lifetimes, clippy::needless_range_loop, clippy::redundant_pattern_matching, clippy::unnecessary_cast, clippy::unnecessary_map_or, clippy::unnecessary_sort_by, clippy::while_let_on_iterator, clippy::clone_on_copy, clippy::ptr_arg, clippy::upper_case_acronyms, dead_code, unused_variables)]
 
 use chrono::Datelike;
@@ -134,9 +134,10 @@ struct TwoCentsApp {
   week_cache: Option<WeekCountCache>,
   cached_budget_snapshots: Vec<BudgetSnapshot>,
   pub category_splits: Vec<CategorySplit>,
-  /// ponytail: grid edits commit to SQLite per keystroke was a synchronous
-  /// write per frame while typing — changes accumulate here and flush 400ms
-  /// after the last change, or immediately when the editing cell closes.
+  /// Deferred grid edits: committing to SQLite on every keystroke caused a
+  /// synchronous write each frame while typing. Changes accumulate here and
+  /// flush 400ms after the last change, or immediately when the editing
+  /// cell closes.
   deferred_field_updates: Vec<(usize, &'static str)>,
   deferred_category_commits: Vec<usize>,
   deferred_member_commits: Vec<usize>,
@@ -252,7 +253,7 @@ fn main() -> eframe::Result<()> {
       .with_active(true)
       .with_visible(true)
       .with_icon(icon),
-    // ponytail: centered is off — with the persistence feature it would
+    // centered is off — with the persistence feature it would
     // stomp the remembered window position on every launch. First launch
     // falls back to the OS default placement.
     ..Default::default()
@@ -269,7 +270,7 @@ fn main() -> eframe::Result<()> {
       // (`Style::debug` itself only exists in debug builds.)
       #[cfg(debug_assertions)]
       cc.egui_ctx.all_styles_mut(|s| s.debug.warn_if_rect_changes_id = false);
-      // ponytail: egui's proportional chain is Ubuntu-Light → emojis (no
+      // egui's proportional chain is Ubuntu-Light → emojis (no
       // Hack), and ↑↓ — used in the sort labels and variance values — only
       // exist in Hack, so they rendered as tofu. Per-glyph fallback: Ubuntu-Light
       // still wins where it has glyphs; Hack supplies the rest.
@@ -287,7 +288,7 @@ impl TwoCentsApp {
   fn new(_cc: &eframe::CreationContext<'_>) -> Self {
     let conn = open_database().expect("open local SQLite database");
     let (household_id, household_name) = load_active_household(&conn).expect("load default household");
-    // ponytail: restore last session's theme before the first frame —
+    // restore last session's theme before the first frame —
     // the old hardcoded init reset to One Dark every launch.
     let selected_theme = get_setting(&conn, "theme_preset")
       .and_then(|v| theme::ThemePreset::from_name(&v))
@@ -347,7 +348,7 @@ impl TwoCentsApp {
       duplicate_sort: ExpenseSort::default(),
       duplicate_deleted_ids: std::collections::HashSet::new(),
       budgets: std::collections::HashMap::new(),
-      // ponytail: default to the current period at app start so the
+      // default to the current period at app start so the
       // Budgets tab opens on the right month / week / quarter. The user
       // can then change the view and the new value sticks for the rest
       // of the session.
@@ -385,7 +386,7 @@ impl TwoCentsApp {
 
 
   fn reload(&mut self) {
-    // ponytail: pending grid edits reference expense indices; flush before
+    // pending grid edits reference expense indices; flush before
     // the row vec is rebuilt or they'd hit the wrong rows.
     self.flush_deferred_expense_commits();
     self.accounts = load_accounts(&self.conn, self.household_id).unwrap_or_else(|err| {
@@ -483,7 +484,7 @@ impl TwoCentsApp {
   // ── Budget Snapshot Computation ──────────────────────────────────────
 
   fn delete_expenses_by_indices(&mut self, indices: &[usize]) {
-    // ponytail: flush deferred grid edits BEFORE deleting — they reference
+    // flush deferred grid edits BEFORE deleting — they reference
     // indices into self.expenses, which shift the moment rows are removed.
     self.flush_deferred_expense_commits();
     let mut sorted_indices = indices.to_vec();
@@ -548,7 +549,7 @@ impl eframe::App for TwoCentsApp {
         }
       }
 
-      // ponytail: handle_raw_input early-returns unless a cell is active;
+      // handle_raw_input early-returns unless a cell is active;
       // guard here so the 4 candidate-Vec clones don't happen every frame
       // with nothing being edited.
       if self.import_grid_state.active_cell.is_some() {
@@ -597,7 +598,7 @@ impl eframe::App for TwoCentsApp {
           self.process_csv_file(&path);
         }
       }
-      // ponytail: 50ms poll instead of a max-fps repaint loop while the
+      // 50ms poll instead of a max-fps repaint loop while the
       // native file dialog is open.
       ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
@@ -656,7 +657,7 @@ impl TwoCentsApp {
         ui.heading(crate::ui::components::heading_xl_text(ui, "TwoCents"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
           let vm = &mut self.variant_mode;
-          // ponytail: ☾/☀/⚙ glyphs are missing from the app's font set and
+          // ☾/☀/⚙ glyphs are missing from the app's font set and
           // render blank (especially in dark mode) — plain words always show.
           let btn_label = match vm {
             theme::VariantMode::Dark => "Dark",
@@ -681,7 +682,7 @@ impl TwoCentsApp {
         });
       });
     });
-    // ponytail: persist immediately when the pick changes — theme must
+    // persist immediately when the pick changes — theme must
     // survive relaunch (crash-safe; no reliance on exit hooks).
     if self.selected_theme != prev_theme || self.variant_mode != prev_variant {
       let _ = set_setting(&self.conn, "theme_preset", self.selected_theme.name());
@@ -741,7 +742,7 @@ impl TwoCentsApp {
     if modal_open {
       let screen = ctx.content_rect();
       let bg_layer = egui::LayerId::new(egui::Order::Background, egui::Id::new("import_blocker"));
-      // ponytail: theme-aware dim overlay. Solid black/white at 50% alpha
+      // theme-aware dim overlay. Solid black/white at 50% alpha
       // instead of multiplying the panel color (which was muddy on every
       // theme). In dark mode the dim is a translucent black; in light mode
       // a translucent dark gray.
@@ -831,7 +832,7 @@ impl TwoCentsApp {
       .unwrap_or(0)
   }
 
-  /// ponytail: pure pricing core, extracted so the year-honest rule is
+  /// pure pricing core, extracted so the year-honest rule is
   /// testable without a TwoCentsApp. Pricing a year with no rows (empty
   /// snaps, cap 0) yields $0 — budgets never bleed across years.
   fn price_budget(
@@ -852,7 +853,7 @@ impl TwoCentsApp {
     self.compute_budget_for(category, self.budget_granularity, self.budget_year, None, &self.cached_budget_snapshots)
   }
 
-  /// ponytail: period-parameterized budget lookup so the analytics Budget
+  /// period-parameterized budget lookup so the analytics Budget
   /// vs Actual panel can price ANY week/month/quarter/year, not just the
   /// Budgets tab's currently-selected one. `period` overrides the
   /// self.budget_* fields (analytics passes its own view period). `snaps`
@@ -1290,7 +1291,7 @@ impl TwoCentsApp {
   }
 }
 
-// ponytail: underline-style tab (Notion). Active tab gets a 2px accent
+// underline-style tab (Notion). Active tab gets a 2px accent
 // underline; inactive tabs are muted. No fill, no pill.
 fn tab_button(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
   let selected = *current == tab;
