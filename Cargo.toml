@@ -2,7 +2,7 @@
 name = "twocents-desktop"
 version = "0.1.0"
 edition = "2021"
-description = "Local-first household finance and budgeting for couples — Rust + egui + SQLite, fully offline"
+description = "Local-first household finance and budgeting for couples. Rust + egui + SQLite, fully offline"
 repository = "https://github.com/Nucletheus/TwoCents"
 default-run = "twocents-desktop"
 
