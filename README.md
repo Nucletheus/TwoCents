@@ -1,4 +1,11 @@
-# TwoCents
+<table width="100%">
+  <tr>
+    <td><h1>TwoCents</h1></td>
+    <td align="right">
+      <a href="https://www.buymeacoffee.com/Nucletheus"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
   <img src="docs/logo.png" alt="TwoCents logo" width="60%">
@@ -10,7 +17,9 @@
 
 TwoCents is a personal finance desktop app for couples. It tracks shared expenses, splits categories between household members, manages budgets, and calculates who owes whom. It runs fully offline and stores everything in one local SQLite file.
 
-[![Platform](https://img.shields.io/badge/platform-Windows-blue)](#) [![Rust](https://img.shields.io/badge/made%20with-Rust-orange)](#) [![Storage](https://img.shields.io/badge/storage-local%20SQLite-green)](#) [![Tracking](https://img.shields.io/badge/tracking-none-success)](#) [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/Nucletheus)
+<p align="center">
+  [![Platform](https://img.shields.io/badge/platform-Windows-blue)](#) [![Rust](https://img.shields.io/badge/made%20with-Rust-orange)](#) [![Storage](https://img.shields.io/badge/storage-local%20SQLite-green)](#) [![Tracking](https://img.shields.io/badge/tracking-none-success)](#)
+</p>
 
 <!-- TODO: demo video embed goes here -->
 
