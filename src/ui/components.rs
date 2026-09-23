@@ -1,113 +1,22 @@
 //! Component builders — the only place chrome is constructed.
 //!
-//! Spacing/geometry live in `theme_tokens`; colors come from `theme::current_*`
-//! (which are filled in once per frame by `theme::configure_theme`). Every
-//! card, button, modal, and input in the app should be built through these
-//! helpers — never construct a raw `egui::Frame` for chrome.
+//! Spacing/geometry live in `theme_tokens`; ALL colors come from `theme`
+//! (the palette is declared and derived there — the app's one color source).
+//! Every card, button, modal, and input in the app should be built through
+//! these helpers — never construct a raw `egui::Frame` for chrome.
 //!
 //! ponytail: if a primitive isn't here, add it here. Don't `Frame::default()`
 //! a card at a call site.
 use eframe::egui::{self, Color32, Frame, Margin, Stroke, Vec2};
+use crate::ui::theme;
 use crate::ui::theme_tokens::*;
 
-// ---- Color accessors --------------------------------------------------------
+// ---- Color access -----------------------------------------------------------
 //
-// `theme::configure_theme` stores the active palette once per frame. These
-// accessors are the only place those globals are read by chrome, so swapping
-// the storage strategy is one edit.
+// ponytail: colors live ONLY in `theme::palette()`. The chrome builders below
+// read the private helper; UI call sites use `crate::ui::theme::*` directly.
 
-// ponytail: cache the derived Palette — from_active() ran 4 mix() allocations
-// per color-accessor call, hundreds of times per frame during scroll. The
-// cache key is the raw 10-color tuple + dark flag; a theme change misses it.
-fn palette() -> Palette {
-  type RawColors = (
-    Color32, Color32, Color32, Color32, Color32,
-    Color32, Color32, Color32, Color32, Color32,
-  );
-  static CACHE: std::sync::Mutex<Option<((RawColors, bool), Palette)>> = std::sync::Mutex::new(None);
-  let key = (crate::ui::theme::active_raw(), crate::ui::theme::active_is_dark());
-  if let Ok(guard) = CACHE.lock() {
-    if let Some((cached_key, cached)) = guard.as_ref() {
-      if *cached_key == key {
-        return *cached;
-      }
-    }
-  }
-  let built = Palette::from_active();
-  if let Ok(mut guard) = CACHE.lock() {
-    *guard = Some((key, built));
-  }
-  built
-}
-
-#[derive(Clone, Copy)]
-struct Palette {
-  bg_canvas: Color32,
-  bg_subtle: Color32,
-  bg_hover: Color32,
-  bg_active: Color32,
-  fg_default: Color32,
-  fg_muted: Color32,
-  fg_faint: Color32,
-  border_default: Color32,
-  border_strong: Color32,
-  accent: Color32,
-  accent_hover: Color32,
-  success: Color32,
-  warning: Color32,
-  error: Color32,
-  selection_bg: Color32,
-  selection_fg: Color32,
-  is_dark: bool,
-}
-
-impl Palette {
-  fn from_active() -> Self {
-    use crate::ui::theme;
-    // ponytail: read the struct via the same fields egui set on the visuals.
-    // We don't try to be clever about pulling this from the egui Visuals
-    // object because some of our needs (bg_subtle, fg_faint) aren't stored
-    // on Visuals at all in the existing 13-theme set.
-    let (panel, window, faint, hover, text, border, accent, success, warning, error) = theme::active_raw();
-    let is_dark = theme::active_is_dark();
-    // Compute the muted/faint variants. We use a simple luminance delta for
-    // both muted and faint because the 13 source themes only provide one
-    // text color — we derive the rest.
-    let lum = 0.299 * text.r() as f32 + 0.587 * text.g() as f32 + 0.114 * text.b() as f32;
-    let fg_muted = mix(text, if is_dark { Color32::WHITE } else { Color32::BLACK }, 0.35);
-    let fg_faint = mix(text, if is_dark { Color32::WHITE } else { Color32::BLACK }, 0.55);
-    // For accent text (selection foreground), pick a contrasting color.
-    let selection_fg = crate::ui::theme::contrast_text(accent);
-    // bg_subtle is what the page background "should" be. In the current 13
-    // themes, that's `window_fill` for dark, `faint_bg` for light. The Notion
-    // pattern is "page is slightly tinted" — that's what faint_bg gives us.
-    let bg_canvas = panel;
-    let bg_subtle = if is_dark { window } else { faint };
-    let bg_hover = hover;
-    let bg_active = if is_dark { hover } else { mix(hover, accent, 0.12) };
-    let border_default = border;
-    let border_strong = mix(border, accent, 0.35);
-    let accent_hover = mix(accent, if is_dark { Color32::WHITE } else { Color32::BLACK }, 0.10);
-    let _ = lum; // suppress unused if no other derivations
-    Self {
-      bg_canvas, bg_subtle, bg_hover, bg_active,
-      fg_default: text, fg_muted, fg_faint,
-      border_default, border_strong,
-      accent, accent_hover,
-      success, warning, error,
-      selection_bg: accent, selection_fg,
-      is_dark,
-    }
-  }
-}
-
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-  let t = t.clamp(0.0, 1.0);
-  let r = (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8;
-  let g = (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8;
-  let bl = (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8;
-  Color32::from_rgb(r, g, bl)
-}
+fn palette() -> theme::Palette { theme::palette() }
 
 // ---- Spacing helpers --------------------------------------------------------
 
@@ -121,8 +30,8 @@ pub fn hspace(amount: f32) -> f32 { amount }
 pub fn card(ui: &egui::Ui) -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_canvas)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_primary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_md())
     .inner_margin(Margin::same(SPACE_3 as i8))
 }
@@ -131,8 +40,8 @@ pub fn card(ui: &egui::Ui) -> Frame {
 pub fn card_subtle(_ui: &egui::Ui) -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_subtle)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_secondary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_md())
     .inner_margin(Margin::same(SPACE_3 as i8))
 }
@@ -145,8 +54,8 @@ pub fn card_subtle_dummy() -> Frame {
 fn card_subtle_dummy_inner() -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_subtle)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_secondary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_md())
     .inner_margin(Margin::symmetric(SPACE_3 as i8, SPACE_2 as i8))
 }
@@ -160,18 +69,31 @@ pub fn grid_table_frame(ui: &egui::Ui) -> Frame {
   // Use the table's `extreme_bg` (the deepest surface in the theme) so the
   // grid reads as a recessed plane relative to the surrounding card chrome.
   Frame::NONE
-    .fill(ui.visuals().extreme_bg_color)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(theme::bg_primary())
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_md())
     .inner_margin(Margin::same(2))
+}
+
+/// Repaint a [`grid_table_frame`]'s border over its content: scrolled inner
+/// rows can bleed past the scroll clip (clip_rect_margin) and cover the
+/// frame's bottom edge when the table is scrolled to the end. Call this with
+/// the frame's `Response::rect` after `.show(...)`.
+pub fn repaint_grid_frame_stroke(ui: &egui::Ui, outer_rect: egui::Rect) {
+  ui.painter().rect_stroke(
+    outer_rect,
+    radius_md(),
+    Stroke::new(BORDER_W, palette().border),
+    egui::StrokeKind::Inside,
+  );
 }
 
 /// Filled "well" — used for the terminal dock at the bottom.
 pub fn well(ui: &egui::Ui) -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_subtle)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_secondary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_sm())
     .inner_margin(Margin { left: SPACE_2 as i8, right: SPACE_2 as i8, top: SPACE_1 as i8, bottom: SPACE_1 as i8 })
 }
@@ -184,8 +106,8 @@ pub fn well(ui: &egui::Ui) -> Frame {
 pub fn modal() -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_canvas)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_primary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_lg())
     .inner_margin(Margin::same(SPACE_5 as i8))
     .shadow(egui::Shadow {
@@ -200,8 +122,8 @@ pub fn modal() -> Frame {
 pub fn modal_header(ui: &egui::Ui) -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_canvas)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_primary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .inner_margin(Margin { left: 0, right: 0, top: SPACE_3 as i8, bottom: SPACE_3 as i8 })
 }
 
@@ -211,8 +133,8 @@ pub fn modal_header(ui: &egui::Ui) -> Frame {
 pub fn input(ui: &egui::Ui) -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_canvas)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_primary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_sm())
     .inner_margin(Margin { left: SPACE_2 as i8, right: SPACE_2 as i8, top: 6, bottom: 6 })
 }
@@ -221,8 +143,8 @@ pub fn input(ui: &egui::Ui) -> Frame {
 pub fn input_ghost(ui: &egui::Ui) -> Frame {
   let p = palette();
   Frame::NONE
-    .fill(p.bg_subtle)
-    .stroke(Stroke::new(BORDER_W, p.border_default))
+    .fill(p.bg_secondary)
+    .stroke(Stroke::new(BORDER_W, p.border))
     .corner_radius(radius_sm())
     .inner_margin(Margin { left: SPACE_2 as i8, right: SPACE_2 as i8, top: 6, bottom: 6 })
 }
@@ -249,9 +171,9 @@ pub struct ButtonStyle {
 pub fn button_subtle(ui: &egui::Ui) -> ButtonStyle {
   let p = palette();
   ButtonStyle {
-    fill: p.bg_subtle,
-    stroke: Stroke::new(BORDER_W, p.border_default),
-    text_color: p.fg_default,
+    fill: p.bg_secondary,
+    stroke: Stroke::new(BORDER_W, p.border),
+    text_color: p.text_primary,
     padding: Vec2::new(SPACE_3, SPACE_2),
   }
 }
@@ -271,7 +193,7 @@ pub fn button_ghost(ui: &egui::Ui) -> ButtonStyle {
   ButtonStyle {
     fill: Color32::TRANSPARENT,
     stroke: Stroke::NONE,
-    text_color: p.fg_muted,
+    text_color: p.text_secondary,
     padding: Vec2::new(SPACE_2, SPACE_1),
   }
 }
@@ -279,7 +201,7 @@ pub fn button_ghost(ui: &egui::Ui) -> ButtonStyle {
 pub fn button_danger(ui: &egui::Ui) -> ButtonStyle {
   let p = palette();
   ButtonStyle {
-    fill: p.bg_subtle,
+    fill: p.bg_secondary,
     stroke: Stroke::new(BORDER_W, p.error),
     text_color: p.error,
     padding: Vec2::new(SPACE_3, SPACE_2),
@@ -291,7 +213,7 @@ pub fn button_icon(ui: &egui::Ui) -> ButtonStyle {
   ButtonStyle {
     fill: Color32::TRANSPARENT,
     stroke: Stroke::NONE,
-    text_color: p.fg_muted,
+    text_color: p.text_secondary,
     padding: Vec2::splat(SPACE_1),
   }
 }
@@ -302,7 +224,7 @@ pub fn button_icon(ui: &egui::Ui) -> ButtonStyle {
 // so the call site can render them with a manual underline.
 pub fn tab_label(ui: &egui::Ui, text: &str, active: bool) -> egui::RichText {
   let p = palette();
-  let color = if active { p.fg_default } else { p.fg_muted };
+  let color = if active { p.text_primary } else { p.text_secondary };
   egui::RichText::new(text).size(14.0).color(color)
 }
 
@@ -396,7 +318,7 @@ pub fn progress_bar(ui: &mut egui::Ui, cell_rect: egui::Rect, percent: f32) {
     )));
   }
   let pct_label = format!("{:.0}%", percent * 100.0);
-  let pct_color = if percent > 1.0 { p.error } else { p.fg_default };
+  let pct_color = if percent > 1.0 { p.error } else { p.text_primary };
   ui.painter().text(
     egui::pos2(bar_rect.right() + 4.0, bar_rect.center().y),
     egui::Align2::LEFT_CENTER,
@@ -434,11 +356,11 @@ pub fn empty_state(ui: &mut egui::Ui, headline: &str, subtext: &str) {
     // 64x64 muted icon placeholder — uses a hollow circle to stand in for an
     // empty-state illustration without a new icon dependency.
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(SPACE_7), egui::Sense::hover());
-    ui.painter().circle_stroke(rect.center(), 24.0, Stroke::new(1.5_f32, p.fg_faint));
+    ui.painter().circle_stroke(rect.center(), 24.0, Stroke::new(1.5_f32, p.text_faint));
     ui.add_space(SPACE_2);
-    ui.label(egui::RichText::new(headline).size(16.0).strong().color(p.fg_default));
+    ui.label(egui::RichText::new(headline).size(16.0).strong().color(p.text_primary));
     ui.add_space(SPACE_1);
-    ui.label(egui::RichText::new(subtext).size(13.0).color(p.fg_muted));
+    ui.label(egui::RichText::new(subtext).size(13.0).color(p.text_secondary));
     ui.add_space(SPACE_4);
   });
 }
@@ -449,60 +371,60 @@ pub fn empty_state(ui: &mut egui::Ui, headline: &str, subtext: &str) {
 // 14-point body is a 14-point body everywhere.
 
 pub fn text_xs(ui: &egui::Ui) -> egui::RichText {
-  egui::RichText::new("").size(11.0).color(palette().fg_muted)
+  egui::RichText::new("").size(11.0).color(palette().text_secondary)
 }
 
 pub fn text_sm(ui: &egui::Ui) -> egui::RichText {
-  egui::RichText::new("").size(13.0).color(palette().fg_default)
+  egui::RichText::new("").size(13.0).color(palette().text_primary)
 }
 
 pub fn text_body(ui: &egui::Ui) -> egui::RichText {
-  egui::RichText::new("").size(14.0).color(palette().fg_default)
+  egui::RichText::new("").size(14.0).color(palette().text_primary)
 }
 
 pub fn text_md(ui: &egui::Ui) -> egui::RichText {
-  egui::RichText::new("").size(15.0).strong().color(palette().fg_default)
+  egui::RichText::new("").size(15.0).strong().color(palette().text_primary)
 }
 
 pub fn text_lg(ui: &egui::Ui) -> egui::RichText {
-  egui::RichText::new("").size(20.0).strong().color(palette().fg_default)
+  egui::RichText::new("").size(20.0).strong().color(palette().text_primary)
 }
 
 pub fn text_xl(ui: &egui::Ui) -> egui::RichText {
-  egui::RichText::new("").size(28.0).strong().color(palette().fg_default)
+  egui::RichText::new("").size(28.0).strong().color(palette().text_primary)
 }
 
 pub fn text_2xl(ui: &egui::Ui) -> egui::RichText {
-  egui::RichText::new("").size(40.0).strong().color(palette().fg_default)
+  egui::RichText::new("").size(40.0).strong().color(palette().text_primary)
 }
 
 // Convenience: call-site wants a label, not a builder pattern.
 pub fn label(ui: &mut egui::Ui, text: &str) -> egui::Response {
-  ui.label(egui::RichText::new(text).size(14.0).color(palette().fg_default))
+  ui.label(egui::RichText::new(text).size(14.0).color(palette().text_primary))
 }
 
 pub fn label_muted(ui: &mut egui::Ui, text: &str) -> egui::Response {
-  ui.label(egui::RichText::new(text).size(13.0).color(palette().fg_muted))
+  ui.label(egui::RichText::new(text).size(13.0).color(palette().text_secondary))
 }
 
 pub fn label_faint(ui: &mut egui::Ui, text: &str) -> egui::Response {
-  ui.label(egui::RichText::new(text).size(11.0).color(palette().fg_faint))
+  ui.label(egui::RichText::new(text).size(11.0).color(palette().text_faint))
 }
 
 pub fn label_strong(ui: &mut egui::Ui, text: &str) -> egui::Response {
-  ui.label(egui::RichText::new(text).size(15.0).strong().color(palette().fg_default))
+  ui.label(egui::RichText::new(text).size(15.0).strong().color(palette().text_primary))
 }
 
 pub fn heading_md(ui: &mut egui::Ui, text: &str) -> egui::Response {
-  ui.label(egui::RichText::new(text).size(15.0).strong().color(palette().fg_default))
+  ui.label(egui::RichText::new(text).size(15.0).strong().color(palette().text_primary))
 }
 
 pub fn heading_md_text(ui: &egui::Ui, text: &str) -> egui::RichText {
-  egui::RichText::new(text).size(15.0).strong().color(palette().fg_default)
+  egui::RichText::new(text).size(15.0).strong().color(palette().text_primary)
 }
 
 pub fn heading_lg(ui: &mut egui::Ui, text: &str) -> egui::Response {
-  ui.label(egui::RichText::new(text).size(20.0).strong().color(palette().fg_default))
+  ui.label(egui::RichText::new(text).size(20.0).strong().color(palette().text_primary))
 }
 
 /// Small uppercase section header. Reads as a quiet marker, not a title.
@@ -512,35 +434,20 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
     egui::RichText::new(text.to_uppercase())
       .size(11.0)
       .strong()
-      .color(palette().fg_muted)
+      .color(palette().text_secondary)
       .extra_letter_spacing(0.5),
   );
 }
 
 pub fn heading_lg_text(ui: &egui::Ui, text: &str) -> egui::RichText {
-  egui::RichText::new(text).size(20.0).strong().color(palette().fg_default)
+  egui::RichText::new(text).size(20.0).strong().color(palette().text_primary)
 }
 
 pub fn heading_xl(ui: &mut egui::Ui, text: &str) -> egui::Response {
-  ui.label(egui::RichText::new(text).size(28.0).strong().color(palette().fg_default))
+  ui.label(egui::RichText::new(text).size(28.0).strong().color(palette().text_primary))
 }
 
 pub fn heading_xl_text(ui: &egui::Ui, text: &str) -> egui::RichText {
-  egui::RichText::new(text).size(28.0).strong().color(palette().fg_default)
+  egui::RichText::new(text).size(28.0).strong().color(palette().text_primary)
 }
 
-// ---- Status colors ----------------------------------------------------------
-
-pub fn success_color(ui: &egui::Ui) -> Color32 { palette().success }
-pub fn warning_color(ui: &egui::Ui) -> Color32 { palette().warning }
-pub fn error_color(ui: &egui::Ui) -> Color32 { palette().error }
-pub fn accent_color(ui: &egui::Ui) -> Color32 { palette().accent }
-pub fn fg_default(ui: &egui::Ui) -> Color32 { palette().fg_default }
-pub fn fg_muted(ui: &egui::Ui) -> Color32 { palette().fg_muted }
-pub fn fg_faint(ui: &egui::Ui) -> Color32 { palette().fg_faint }
-pub fn border_default(ui: &egui::Ui) -> Color32 { palette().border_default }
-pub fn border_strong(ui: &egui::Ui) -> Color32 { palette().border_strong }
-pub fn bg_canvas(ui: &egui::Ui) -> Color32 { palette().bg_canvas }
-pub fn bg_subtle(ui: &egui::Ui) -> Color32 { palette().bg_subtle }
-pub fn bg_hover(ui: &egui::Ui) -> Color32 { palette().bg_hover }
-pub fn bg_active(ui: &egui::Ui) -> Color32 { palette().bg_active }

@@ -1,7 +1,27 @@
 use eframe::egui::{self, Color32, Visuals, Stroke};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantMode { Dark, Light, System }
+
+impl VariantMode {
+  /// ponytail: stable storage key for app_settings persistence.
+  pub fn as_key(&self) -> &'static str {
+    match self {
+      Self::Dark => "dark",
+      Self::Light => "light",
+      Self::System => "system",
+    }
+  }
+
+  pub fn from_key(key: &str) -> Self {
+    match key {
+      "dark" => Self::Dark,
+      "light" => Self::Light,
+      _ => Self::System,
+    }
+  }
+}
 
 pub fn system_is_dark() -> bool {
   // Cache the result since the OS theme rarely changes mid-session
@@ -44,6 +64,15 @@ impl ThemePreset {
       (Self::Gruvbox, "Gruvbox"), (Self::Kanagawa, "Kanagawa"),
       (Self::Ayu, "Ayu"), (Self::Matrix, "Matrix"),
     ]
+  }
+
+  /// Display name — also the stable app_settings storage key.
+  pub fn name(&self) -> &'static str {
+    Self::all().iter().find(|(t, _)| t == self).map(|(_, n)| *n).unwrap_or("One Dark")
+  }
+
+  pub fn from_name(name: &str) -> Option<Self> {
+    Self::all().iter().find(|(_, n)| *n == name).map(|(t, _)| *t)
   }
 }
 
@@ -313,108 +342,169 @@ fn theme_pair(t: ThemePreset) -> ThemePair {
   }
 }
 
-// ---- Global theme palette (set every frame by configure_theme) ----
-use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
-static THEME_PALETTE: Mutex<Option<ThemeColors>> = Mutex::new(None);
-static THEME_IS_DARK: AtomicBool = AtomicBool::new(true);
+// ---- The palette (THE one color source) ------------------------------------
+//
+// ponytail: the ONLY place the app gets colors. Raw preset fields feed a
+// derive() step that produces every token the UI is allowed to touch —
+// primary/secondary text, primary/secondary background, hover/active
+// surfaces, border, accent, and the three status colors. No other module
+// may pick a color: no `ui.visuals()` reads, no fallback hex, no literals.
+// (Alpha/lerp variants of a palette token at the point of use are fine —
+// they are still derived FROM the palette.)
 
-fn store_palette(c: &ThemeColors) {
-  if let Ok(mut g) = THEME_PALETTE.lock() { *g = Some(ThemeColors { ..*c }); }
+/// The full token set, derived once per theme change from a preset's raw
+/// fields. `pub` fields for chrome builders that need several at once.
+#[derive(Clone, Copy)]
+pub struct Palette {
+  pub text_primary: Color32,
+  pub text_secondary: Color32,
+  pub text_faint: Color32,
+  pub bg_primary: Color32,
+  pub bg_secondary: Color32,
+  pub bg_hover: Color32,
+  pub bg_active: Color32,
+  pub border: Color32,
+  pub border_strong: Color32,
+  pub accent: Color32,
+  pub accent_hover: Color32,
+  pub success: Color32,
+  pub warning: Color32,
+  pub error: Color32,
+  pub selection_fg: Color32,
+  pub is_dark: bool,
 }
 
-/// ponytail: read the 9 raw fields the 13 source themes provide. The new
-/// `components` module derives its Notion token names (bg_subtle, fg_faint,
-/// border_strong, etc.) from these by mixing toward black/white. Tradeoff
-/// documented in `components::Palette::from_active`.
-pub fn active_raw() -> (
-  Color32, // panel_fill
-  Color32, // window_fill
-  Color32, // faint_bg
-  Color32, // hovered_bg
-  Color32, // text_primary
-  Color32, // border
-  Color32, // accent
-  Color32, // success
-  Color32, // warning
-  Color32, // error
-) {
-  THEME_PALETTE.lock().ok().and_then(|g| {
-    g.as_ref().map(|c| {
-      (c.panel_fill, c.window_fill, c.faint_bg, c.hovered_bg,
-       c.text_primary, c.border, c.accent, c.success, c.warning, c.error)
-    })
-  }).unwrap_or((
-    Color32::from_rgb(30, 30, 30), Color32::from_rgb(40, 40, 40),
-    Color32::from_rgb(40, 40, 40), Color32::from_rgb(60, 60, 60),
-    Color32::from_rgb(230, 230, 230), Color32::from_rgb(60, 60, 60),
-    Color32::from_rgb(0, 122, 255),
-    Color32::from_rgb(0, 180, 140), Color32::from_rgb(230, 140, 0), Color32::from_rgb(220, 80, 80),
-  ))
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+  let t = t.clamp(0.0, 1.0);
+  let r = (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8;
+  let g = (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8;
+  let bl = (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8;
+  Color32::from_rgb(r, g, bl)
 }
+
+/// ponytail: THE derivation — raw preset fields in, every UI token out.
+/// Secondary text/bg tokens are mix-derived here (the 13 presets only
+/// provide one text + two surfaces each); this is the single documented
+/// tradeoff, and it lives here and nowhere else.
+fn derive(c: &ThemeColors, is_dark: bool) -> Palette {
+  let toward = if is_dark { Color32::WHITE } else { Color32::BLACK };
+  Palette {
+    text_primary: c.text_primary,
+    text_secondary: mix(c.text_primary, toward, 0.35),
+    text_faint: mix(c.text_primary, toward, 0.55),
+    bg_primary: c.panel_fill,
+    bg_secondary: c.window_fill,
+    bg_hover: c.hovered_bg,
+    bg_active: if is_dark { c.hovered_bg } else { mix(c.hovered_bg, c.accent, 0.12) },
+    border: c.border,
+    border_strong: mix(c.border, c.accent, 0.35),
+    accent: c.accent,
+    accent_hover: mix(c.accent, toward, 0.10),
+    success: c.success,
+    warning: c.warning,
+    error: c.error,
+    selection_fg: contrast_text(c.accent),
+    is_dark,
+  }
+}
+
+/// ponytail: one global, replaced wholesale by `configure_theme` on theme
+/// change (its LAST_APPLIED gate makes that cheap). First access before the
+/// first frame derives the default preset through the same derive() — never
+/// a scattered fallback hex.
+static PALETTE: Mutex<Option<Palette>> = Mutex::new(None);
+
+pub fn palette() -> Palette {
+  let mut guard = PALETTE.lock().expect("theme palette mutex poisoned");
+  if guard.is_none() {
+    *guard = Some(derive(&theme_pair(ThemePreset::OneDark).dark, true));
+  }
+  *guard.as_ref().unwrap()
+}
+
+/// Single-field accessors — the API every UI feature calls.
+pub fn fg_primary() -> Color32 { palette().text_primary }
+pub fn fg_secondary() -> Color32 { palette().text_secondary }
+pub fn fg_faint() -> Color32 { palette().text_faint }
+pub fn bg_primary() -> Color32 { palette().bg_primary }
+pub fn bg_secondary() -> Color32 { palette().bg_secondary }
+pub fn bg_hover() -> Color32 { palette().bg_hover }
+pub fn bg_active() -> Color32 { palette().bg_active }
+pub fn border() -> Color32 { palette().border }
+pub fn border_strong() -> Color32 { palette().border_strong }
+pub fn accent() -> Color32 { palette().accent }
+pub fn success() -> Color32 { palette().success }
+pub fn warning() -> Color32 { palette().warning }
+pub fn error() -> Color32 { palette().error }
 
 pub fn active_is_dark() -> bool {
-  THEME_IS_DARK.load(std::sync::atomic::Ordering::Relaxed)
+  palette().is_dark
 }
 
-pub fn current_accent() -> Color32 {
-  THEME_PALETTE.lock().ok().and_then(|g| g.as_ref().map(|c| c.accent)).unwrap_or(crate::db::DEFAULT_ACCENT)
-}
-
-pub fn current_success() -> Color32 {
-  THEME_PALETTE.lock().ok().and_then(|g| g.as_ref().map(|c| c.success)).unwrap_or(Color32::from_rgb(0, 180, 140))
-}
-
-pub fn current_warning() -> Color32 {
-  THEME_PALETTE.lock().ok().and_then(|g| g.as_ref().map(|c| c.warning)).unwrap_or(Color32::from_rgb(230, 140, 0))
-}
-
-pub fn current_error() -> Color32 {
-  THEME_PALETTE.lock().ok().and_then(|g| g.as_ref().map(|c| c.error)).unwrap_or(Color32::from_rgb(220, 80, 80))
-}
 
 /// ponytail: the ONE contrast pick — black or white text for legibility on a
 /// given bg (rec.601 luminance, 150 threshold). All other copies of this idea
 /// were deduped into this function.
+/// ponytail: the ONE text-on-fill contrast helper. All swatch/picker/tint
+/// labels must route through this so black-on-dark / white-on-light can't
+/// recur per call site with diverging thresholds.
+/// ponytail: the ONE text-on-fill contrast helper. All swatch/picker/tint
+/// labels and accent-filled buttons must route through this so text legibility
+/// can't diverge per call site. WCAG-style sRGB relative luminance
+/// (gamma-linearized channels), threshold 0.25 — the old rec.601/120 formula
+/// scored mid-dark accents like One Dark's blue #3b82f6 at 121.9 and picked
+/// black text on accent-blue buttons (unreadable); linearized luminance
+/// separates cleanly (blue-500 ≈ 0.24 → white; pale accents, yellows,
+/// oranges, teals ≥ 0.37 → black).
 pub fn contrast_text(bg: Color32) -> Color32 {
-  let lum = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
-  if lum > 150.0 { Color32::BLACK } else { Color32::WHITE }
+  let lin = |c: u8| -> f32 {
+    let v = c as f32 / 255.0;
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+  };
+  let lum = 0.2126 * lin(bg.r()) + 0.7152 * lin(bg.g()) + 0.0722 * lin(bg.b());
+  if lum > 0.25 { Color32::BLACK } else { Color32::WHITE }
 }
 
-fn apply_visuals(visuals: &mut Visuals, c: &ThemeColors) {
-  visuals.panel_fill = c.panel_fill;
-  visuals.window_fill = c.window_fill;
-  visuals.extreme_bg_color = c.extreme_bg;
-  visuals.faint_bg_color = c.faint_bg;
-  visuals.text_edit_bg_color = Some(c.panel_fill);
-  visuals.widgets.noninteractive.bg_fill = c.window_fill;
-  visuals.widgets.inactive.bg_fill = c.window_fill;
-  visuals.widgets.inactive.weak_bg_fill = c.hovered_bg;
-  visuals.widgets.hovered.bg_fill = c.hovered_bg;
-  visuals.widgets.active.bg_fill = c.accent;
-  visuals.widgets.open.bg_fill = c.accent;
-  visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, c.border);
-  visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, c.border);
-  visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, c.border);
-  visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, c.accent);
-  visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, c.accent);
-  visuals.widgets.noninteractive.fg_stroke.color = c.text_primary;
-  visuals.widgets.inactive.fg_stroke.color = c.text_primary;
-  visuals.widgets.hovered.fg_stroke.color = c.text_primary;
-  let on_accent = contrast_text(c.accent);
+fn apply_visuals(visuals: &mut Visuals, p: &Palette) {
+  visuals.panel_fill = p.bg_primary;
+  visuals.window_fill = p.bg_secondary;
+  // All 26 preset definitions satisfy extreme_bg == panel_fill and
+  // faint_bg == window_fill, so these two map onto the primary/secondary
+  // backgrounds with zero visual change.
+  visuals.extreme_bg_color = p.bg_primary;
+  visuals.faint_bg_color = p.bg_secondary;
+  visuals.text_edit_bg_color = Some(p.bg_primary);
+  visuals.widgets.noninteractive.bg_fill = p.bg_secondary;
+  visuals.widgets.inactive.bg_fill = p.bg_secondary;
+  visuals.widgets.inactive.weak_bg_fill = p.bg_hover;
+  visuals.widgets.hovered.bg_fill = p.bg_hover;
+  visuals.widgets.active.bg_fill = p.accent;
+  visuals.widgets.open.bg_fill = p.accent;
+  visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border);
+  visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border);
+  visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.border);
+  visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.accent);
+  visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, p.accent);
+  visuals.widgets.noninteractive.fg_stroke.color = p.text_primary;
+  visuals.widgets.inactive.fg_stroke.color = p.text_primary;
+  visuals.widgets.hovered.fg_stroke.color = p.text_primary;
   // ponytail: active/open widget states sit on accent backgrounds — their
   // text must contrast with the accent, not text_primary (which is near-black
   // in light themes → the black-on-blue button bug class).
-  visuals.widgets.active.fg_stroke.color = on_accent;
-  visuals.widgets.open.fg_stroke.color = on_accent;
-  visuals.selection.bg_fill = c.accent;
-  visuals.selection.stroke = Stroke::new(1.0_f32, on_accent);
-  visuals.text_cursor.stroke = Stroke::new(2.5_f32, c.text_primary);
-  visuals.hyperlink_color = c.accent;
-  visuals.warn_fg_color = c.warning;
-  visuals.error_fg_color = c.error;
-  visuals.override_text_color = None;
-  visuals.window_stroke = Stroke::new(1.0_f32, c.border);
+  visuals.widgets.active.fg_stroke.color = p.selection_fg;
+  visuals.widgets.open.fg_stroke.color = p.selection_fg;
+  visuals.selection.bg_fill = p.accent;
+  visuals.selection.stroke = Stroke::new(1.0_f32, p.selection_fg);
+  visuals.text_cursor.stroke = Stroke::new(2.5_f32, p.text_primary);
+  visuals.hyperlink_color = p.accent;
+  visuals.warn_fg_color = p.warning;
+  visuals.error_fg_color = p.error;
+  // ponytail: the wrong-font-color bug class — unstyled RichText used to
+  // inherit egui's default text color, which could diverge from the theme.
+  // Forcing the override means EVERY label without an explicit color gets
+  // the palette's primary text.
+  visuals.override_text_color = Some(p.text_primary);
+  visuals.window_stroke = Stroke::new(1.0_f32, p.border);
 }
 
 pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool) {
@@ -433,10 +523,11 @@ pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool)
 
   let pair = theme_pair(preset);
   let c = if use_dark { &pair.dark } else { &pair.light };
+  let p = derive(c, use_dark);
 
   let mut visuals = if use_dark { Visuals::dark() } else { Visuals::light() };
   visuals.dark_mode = use_dark;
-  apply_visuals(&mut visuals, c);
+  apply_visuals(&mut visuals, &p);
 
   visuals.text_cursor.on_duration = 0.65;
   visuals.text_cursor.off_duration = 0.35;
@@ -449,21 +540,33 @@ pub fn configure_theme(ctx: &egui::Context, preset: ThemePreset, use_dark: bool)
     color: Color32::from_black_alpha(200),
   };
 
-  ctx.set_visuals(visuals);
-  THEME_IS_DARK.store(use_dark, std::sync::atomic::Ordering::Relaxed);
-  store_palette(c);
+  // ponytail: egui keeps TWO style slots (dark_style/light_style) and picks
+  // the active one via theme_preference, which defaults to System (follows
+  // the OS) — independent of this app's variant logic. set_visuals writes
+  // only the active slot, so the other slot kept STOCK egui visuals and
+  // surfaced them whenever egui's slot choice disagreed with ours (OS theme
+  // flip, variant != OS) — "the theme switch only applies to parts of the
+  // app". Fix: write BOTH slots, and pin egui's preference to this app's
+  // variant so slot choice is deterministic (and the native title bar
+  // follows the in-app variant).
+  let theme = if use_dark { egui::Theme::Dark } else { egui::Theme::Light };
+  ctx.set_theme(egui::ThemePreference::from(theme));
+  ctx.all_styles_mut(|s| s.visuals = visuals.clone());
+  *PALETTE.lock().expect("theme palette mutex poisoned") = Some(p);
+  // ponytail: style writes go through Context::write, which does NOT request
+  // a repaint — without this, a theme change with the mouse idle kept
+  // showing the last-painted frame until the next input event.
+  ctx.request_repaint();
   if let Ok(mut guard) = LAST_APPLIED.lock() {
     *guard = Some((preset, use_dark));
   }
 }
 
-pub fn sel_text(ui: &egui::Ui, selected: bool, label: &str) -> egui::RichText {
+pub fn sel_text(_ui: &egui::Ui, selected: bool, label: &str) -> egui::RichText {
   if selected {
-    let bg = ui.visuals().selection.bg_fill;
-    let lum = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
-    egui::RichText::new(label).color(if lum > 150.0 { egui::Color32::BLACK } else { egui::Color32::WHITE })
+    egui::RichText::new(label).color(contrast_text(palette().accent))
   } else {
-    egui::RichText::new(label).color(ui.visuals().text_color())
+    egui::RichText::new(label).color(palette().text_primary)
   }
 }
 
@@ -473,12 +576,38 @@ pub fn sel_text(ui: &egui::Ui, selected: bool, label: &str) -> egui::RichText {
 
 pub fn theme_selector_ui(preset: &mut ThemePreset, ui: &mut egui::Ui) {
   let current_name = ThemePreset::all().iter().find(|(t, _)| t == preset).map(|(_, n)| *n).unwrap_or("One Dark");
+  let use_dark = active_is_dark();
   ui.menu_button(current_name, |ui| {
     for &(t, name) in ThemePreset::all() {
-      if ui.selectable_label(*preset == t, sel_text(ui, *preset == t, name)).clicked() {
+      let resp = ui.selectable_label(*preset == t, sel_text(ui, *preset == t, name));
+      // Live preview: repaint the whole app in the hovered preset. On
+      // un-hover / menu-dismiss the selected preset comes back automatically
+      // (main re-applies it every frame; configure_theme's cache makes that
+      // a no-op unless it actually changed).
+      if resp.hovered() {
+        configure_theme(ui.ctx(), t, use_dark);
+      }
+      if resp.clicked() {
         *preset = t;
         ui.close();
       }
     }
   });
+}
+
+#[cfg(test)]
+mod contrast_tests {
+  use super::*;
+
+  #[test]
+  fn contrast_picks_white_on_mid_dark_accents() {
+    // One Dark accent blue #3b82f6 — the old formula scored it 121.9 > 120
+    // and put black text on the accent-filled buttons.
+    assert_eq!(contrast_text(hex(0x3b82f6)), Color32::WHITE);
+    // Nord pale cyan accent and One Dark warning orange stay black.
+    assert_eq!(contrast_text(hex(0x88c0d0)), Color32::BLACK);
+    assert_eq!(contrast_text(hex(0xd19a66)), Color32::BLACK);
+    // Salmon-red error fill keeps its current black text (no regression).
+    assert_eq!(contrast_text(hex(0xe06c75)), Color32::BLACK);
+  }
 }

@@ -31,9 +31,6 @@ impl TwoCentsApp {
       if styled_button(ui, "Duplicates", false).clicked() {
         self.find_duplicates();
       }
-      if styled_button(ui, "Settings", false).clicked() {
-        self.show_category_settings = true;
-      }
     });
     crate::ui::components::label_muted(ui,
       "Click or drag in a column to select rows. Hold Shift and drag to pan. Type to edit; Enter applies to all selected rows; Tab or Enter picks autocomplete and moves right; Escape clears.");
@@ -86,7 +83,10 @@ impl TwoCentsApp {
           "expense_cell",
           true,
         )
-      }).inner;
+      });
+    // Frame stroke on top of the scrolled content (clip_rect_margin bleed).
+    crate::ui::components::repaint_grid_frame_stroke(ui, grid_res.response.rect);
+    let grid_res = grid_res.inner;
     self.cached_sorted_expense_indices = sorted_indices;
 
     self.expense_grid_state.active_cell = grid_res.active_cell;

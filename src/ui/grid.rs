@@ -41,6 +41,32 @@ pub struct GridResult {
 // Main entry point
 // ---------------------------------------------------------------------------
 
+/// Thin row separator painted at the top of a table cell. Called at the top
+/// of every column's cell closure so the lines join into full-width row
+/// separators (painting it only in the first column left the Date column
+/// looking boxed while the rest of the table was borderless).
+fn paint_row_separator_top(ui: &egui::Ui, show: bool) {
+  if !show {
+    return;
+  }
+  let r = ui.max_rect();
+  ui.painter().line_segment(
+    [egui::pos2(r.left(), r.top()), egui::pos2(r.right(), r.top())],
+    egui::Stroke::new(1.0_f32, crate::ui::theme::border()),
+  );
+}
+
+/// Thin vertical separator painted at the left edge of a table cell. Called
+/// for every column except the first, in both the header and the body, so
+/// the per-row segments join into full-height column separators.
+fn paint_col_separator_left(ui: &egui::Ui) {
+  let r = ui.max_rect();
+  ui.painter().line_segment(
+    [egui::pos2(r.left(), r.top()), egui::pos2(r.left(), r.bottom())],
+    egui::Stroke::new(1.0_f32, crate::ui::theme::border()),
+  );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_grid<R: GridRow>(
   ui: &mut egui::Ui,
@@ -226,8 +252,14 @@ pub fn render_grid<R: GridRow>(
         egui::vec2(w * fractions[i], GRID_HEADER_HEIGHT),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+          // ponytail: paint the header fill FIRST, then the separator on
+          // top — the old order let grid_header's opaque rect_filled bury
+          // its own column border (worst at fractional widths).
           if grid_header(ui, label).clicked() {
             result.clicked_sort_column = Some(sort_cols[i]);
+          }
+          if i > 0 {
+            paint_col_separator_left(ui);
           }
         },
       );
@@ -235,11 +267,15 @@ pub fn render_grid<R: GridRow>(
   });
 
   // Scrollable body
-  #[allow(deprecated)]
   let scroll_response = egui::ScrollArea::vertical()
     .id_salt(format!("{cell_id_prefix}_scroll"))
     .auto_shrink([false, false])
-    .drag_to_scroll(false)
+    // drag_to_scroll was removed in egui 0.36 — ScrollSource.drag now
+    // defaults to OnTouch; pin Never so mouse-drag stays cell-selection.
+    .scroll_source(egui::containers::scroll_area::ScrollSource {
+      drag: egui::containers::scroll_area::DragScroll::Never,
+      ..Default::default()
+    })
     .scroll_offset(egui::vec2(0.0, scroll_y))
     .show(ui, |ui| {
       ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
@@ -266,19 +302,6 @@ pub fn render_grid<R: GridRow>(
               row_ui.col(|ui| {
                 let column = GridColumn::Date;
                 let cell_rect = ui.max_rect();
-                if show_row_separator {
-                  // ponytail: paint the row separator at the TOP of the cell
-                  // (the boundary between the previous row and this one)
-                  // instead of the bottom. The previous version drew it at
-                  // the bottom, which got covered by the next row's striped
-                  // background. Drawing at top puts the line on top of the
-                  // previous row's background but below this row's content.
-                  ui.painter().line_segment(
-                    [egui::pos2(cell_rect.left(), cell_rect.top()),
-                     egui::pos2(cell_rect.right(), cell_rect.top())],
-                    egui::Stroke::new(1.0_f32, crate::ui::components::border_default(ui)),
-                  );
-                }
                 row_drag_bands.push((idx, cell_rect.top(), cell_rect.bottom()));
                 process_grid_column_cell(
                   ui,
@@ -320,6 +343,10 @@ pub fn render_grid<R: GridRow>(
                     result.active_cell = Some((column, idx));
                   }
                 });
+                // ponytail: separators painted AFTER content — the opaque
+                // selection/ghost fill in process_grid_column_cell used to
+                // bury them, erasing borders along selected rows.
+                paint_row_separator_top(ui, show_row_separator);
               });
 
               // ── ACCOUNT ─────────────────────────────────────────────────
@@ -341,7 +368,7 @@ pub fn render_grid<R: GridRow>(
                     *edit_cell = None;
                     *edit_original = None;
                   }
-                  let text = RichText::new(rows[idx].row_account()).color(crate::ui::components::fg_default(ui));
+                  let text = RichText::new(rows[idx].row_account()).color(crate::ui::theme::fg_primary());
                   ui.add_sized([ui.available_width(), GRID_ROW_HEIGHT], egui::Label::new(text).truncate());
                 } else {
                 ui.horizontal(|ui| {
@@ -370,6 +397,8 @@ pub fn render_grid<R: GridRow>(
                   }
                 });
                 }
+                paint_row_separator_top(ui, show_row_separator);
+                paint_col_separator_left(ui);
               });
 
               // ── AMOUNT ──────────────────────────────────────────────────
@@ -447,6 +476,8 @@ pub fn render_grid<R: GridRow>(
                     ui_grid_text_edit(ui, &mut temp, edit_original, edit_cell, cell_id_by_visual(column, visual_row_index), false);
                   }
                 });
+                paint_row_separator_top(ui, show_row_separator);
+                paint_col_separator_left(ui);
               });
 
               // ── MEMBER ──────────────────────────────────────────────────
@@ -525,6 +556,8 @@ pub fn render_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
+                paint_row_separator_top(ui, show_row_separator);
+                paint_col_separator_left(ui);
               });
 
               // ── CATEGORY ────────────────────────────────────────────────
@@ -615,6 +648,8 @@ pub fn render_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
+                paint_row_separator_top(ui, show_row_separator);
+                paint_col_separator_left(ui);
               });
 
               // ── VENDOR ──────────────────────────────────────────────────
@@ -665,6 +700,8 @@ pub fn render_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
+                paint_row_separator_top(ui, show_row_separator);
+                paint_col_separator_left(ui);
               });
 
               // ── DESCRIPTION ─────────────────────────────────────────────
@@ -715,6 +752,8 @@ pub fn render_grid<R: GridRow>(
                     *edit_original = None;
                   }
                 });
+                paint_row_separator_top(ui, show_row_separator);
+                paint_col_separator_left(ui);
               });
 
           }); // body row (virtualized)

@@ -27,7 +27,6 @@ pub const CATEGORY_LABEL_SEP: &str = " › ";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
-  Dashboard,
   Accounts,
   Expenses,
   Budgets,
@@ -407,6 +406,45 @@ pub fn excluded_category_labels(categories: &[Category]) -> HashSet<String> {
     }
   }
   out
+}
+
+/// Date window of a budget period, for clamping analytics actuals to
+/// the same span the budget envelope covers. `(start, end)` inclusive.
+/// Was `TwoCentsApp::budget_period_date_range` in main.rs — lifted here so
+/// Period Comparison can build its granularity period lists without an app.
+pub fn budget_period_date_range(gran: BudgetGranularity, year: i32, period: i32) -> (chrono::NaiveDate, chrono::NaiveDate) {
+  use chrono::{Datelike, NaiveDate, Duration};
+  match gran {
+    BudgetGranularity::Yearly => (
+      NaiveDate::from_ymd_opt(year, 1, 1).unwrap(),
+      NaiveDate::from_ymd_opt(year, 12, 31).unwrap(),
+    ),
+    BudgetGranularity::Quarterly => {
+      let start_month = ((period - 1) * 3 + 1) as u32;
+      let end_month = start_month + 2;
+      let end = if end_month == 12 {
+        NaiveDate::from_ymd_opt(year, 12, 31).unwrap()
+      } else {
+        NaiveDate::from_ymd_opt(year, (end_month + 1) as u32, 1).unwrap() - Duration::days(1)
+      };
+      (NaiveDate::from_ymd_opt(year, start_month, 1).unwrap(), end)
+    }
+    BudgetGranularity::Monthly => {
+      let end = if period == 12 {
+        NaiveDate::from_ymd_opt(year, 12, 31).unwrap()
+      } else {
+        NaiveDate::from_ymd_opt(year, (period + 1) as u32, 1).unwrap() - Duration::days(1)
+      };
+      (NaiveDate::from_ymd_opt(year, period as u32, 1).unwrap(), end)
+    }
+    BudgetGranularity::Weekly => {
+      // ISO week: Monday..Sunday of the given ISO week/year.
+      let max_week = NaiveDate::from_ymd_opt(year, 12, 28).unwrap().iso_week().week() as i32;
+      let week = period.clamp(1, max_week);
+      let start = NaiveDate::from_isoywd_opt(year, week as u32, chrono::Weekday::Mon).unwrap();
+      (start, start + Duration::days(6))
+    }
+  }
 }
 
 /// Sign for a stored amount given its category label: +1 (income credit),

@@ -2,21 +2,17 @@
 name = "twocents-desktop"
 version = "0.1.0"
 edition = "2021"
-description = "TwoCents — Slint UI + plotters (migrates features from the web app)"
+description = "Local-first household finance and budgeting for couples — Rust + egui + SQLite, fully offline"
+repository = "https://github.com/Nucletheus/TwoCents"
 default-run = "twocents-desktop"
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 csv = "1.3"
 rfd = "0.15"
-plotters = { version = "0.3.5", default-features = false, features = [
-  "bitmap_backend",
-  "line_series",
-  "ttf",
-] }
-eframe = "0.34.2"
-egui_extras = { version = "0.34.2", features = ["datepicker"] }
-egui_plot = "0.35"
+eframe = { version = "0.36.2", features = ["persistence"] }
+egui_extras = { version = "0.36.2", features = ["datepicker", "serde"] }
+egui_plot = "0.37"
 chrono = "0.4.44"
 jiff = "0.2.24"
 log = "0.4"

@@ -7,6 +7,7 @@ use crate::TwoCentsApp;
 impl TwoCentsApp {
   pub fn ui_households(&mut self, ui: &mut egui::Ui) {
     let mut save_self = false;
+    let mut save_household = false;
     let mut delete_member: Option<i64> = None;
     let mut status_message: Option<String> = None;
     let mut member_color_pick: Option<(i64, String, Color32)> = None;
@@ -23,22 +24,30 @@ impl TwoCentsApp {
       .show(ui, |ui| {
         ui.set_max_width(560.0);
         // ponytail: heading + muted description, Notion hierarchy.
-        crate::ui::components::heading_lg(ui, "Households");
+        crate::ui::components::heading_lg(ui, "Household");
         crate::ui::components::label_muted(
           ui,
-          "Manage your household, members, and member colors.",
+          "Manage your household, members, and categories.",
         );
         ui.add_space(crate::ui::theme_tokens::SPACE_4);
 
         household_panel(ui, "Active household", |ui| {
-          ui.label(RichText::new(&self.household_name).size(16.0).color(crate::ui::components::fg_default(ui)));
+          let name_field = grid_text_edit_cell(
+            ui,
+            &mut self.editing_household_name,
+            Id::new("editing_household_name"),
+            true,
+          );
+          if name_field.lost_focus() {
+            save_household = true;
+          }
         });
 
         household_panel(ui, "You", |ui| {
           ui.label(
             RichText::new("Default member for new expenses")
               .small()
-              .color(crate::ui::components::fg_muted(ui)),
+              .color(crate::ui::theme::fg_secondary()),
           );
           ui.add_space(4.0);
           ui.horizontal(|ui| {
@@ -61,14 +70,14 @@ impl TwoCentsApp {
             .max_height(140.0)
             .show(ui, |ui| {
               if other_members.is_empty() {
-                ui.label(RichText::new("No other members yet.").color(crate::ui::components::fg_muted(ui)));
+                ui.label(RichText::new("No other members yet.").color(crate::ui::theme::fg_secondary()));
               }
               for member in other_members {
                 ui.horizontal(|ui| {
                   if color_swatch_button(ui, member.color).clicked() {
                     member_color_pick = Some((member.id, member.name.clone(), member.color));
                   }
-                  ui.label(RichText::new(&member.name).color(crate::ui::components::fg_default(ui)));
+                  ui.label(RichText::new(&member.name).color(crate::ui::theme::fg_primary()));
                   ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::ui::popups::styled_button(ui, "Remove", false).clicked() {
                       delete_member = Some(member.id);
@@ -89,13 +98,13 @@ impl TwoCentsApp {
                 .id_salt("new_household_member")
                 .desired_width(field_width)
                 .margin(egui::Margin::symmetric(4, 2))
-                .text_color(crate::ui::components::fg_default(ui))
-                .background_color(ui.visuals().panel_fill),
+                .text_color(crate::ui::theme::fg_primary())
+                .background_color(crate::ui::theme::bg_primary()),
             );
             let add_clicked = ui
               .add(
-                egui::Button::new(RichText::new("Add").color(crate::ui::theme::contrast_text(crate::ui::components::accent_color(ui))))
-                  .fill(crate::ui::components::accent_color(ui))
+                egui::Button::new(RichText::new("Add").color(crate::ui::theme::contrast_text(crate::ui::theme::accent())))
+                  .fill(crate::ui::theme::accent())
                   .min_size(egui::vec2(96.0, 30.0)),
               )
               .clicked();
@@ -121,20 +130,37 @@ impl TwoCentsApp {
           ui.label(
             RichText::new("Type a name, press Enter, or click Add.")
               .small()
-              .color(crate::ui::components::fg_muted(ui)),
+              .color(crate::ui::theme::fg_secondary()),
           );
         });
 
         if let Some(message) = &status_message {
           ui.add_space(8.0);
-          ui.label(RichText::new(message).color(crate::ui::components::accent_color(ui)));
+          ui.label(RichText::new(message).color(crate::ui::theme::accent()));
         }
+
+        ui.add_space(crate::ui::theme_tokens::SPACE_3);
+        household_panel(ui, "Categories", |ui| {
+          crate::ui::components::label_muted(
+            ui,
+            "Categories marked \"Excluded\" are left out of budgets, analytics, and settlements.",
+          );
+          ui.add_space(crate::ui::theme_tokens::SPACE_2);
+          self.ui_category_settings_section(ui);
+        });
       });
 
     if let Some((id, name, color)) = member_color_pick {
       self.open_member_color_popup(id, name, color);
     }
 
+    if save_household {
+      let name = self.editing_household_name.trim().to_string();
+      if !name.is_empty() && update_household_name(&self.conn, self.household_id, &name).is_ok() {
+        self.household_name = name;
+        self.reload();
+      }
+    }
     if save_self {
       let name = self.editing_self_name.trim().to_string();
       if !name.is_empty() {

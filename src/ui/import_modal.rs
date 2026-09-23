@@ -29,12 +29,12 @@ fn account_combo(
   painter.rect_filled(
     rect,
     crate::ui::theme_tokens::RADIUS_SM,
-    ui.visuals().extreme_bg_color,
+    crate::ui::theme::bg_primary(),
   );
   painter.rect_stroke(
     rect,
     crate::ui::theme_tokens::RADIUS_SM,
-    ui.visuals().widgets.inactive.bg_stroke,
+    egui::Stroke::new(1.0, crate::ui::theme::border()),
     egui::StrokeKind::Middle,
   );
   // Frameless text edit fills the left side; chevron lives inside the right
@@ -61,7 +61,7 @@ fn account_combo(
   paint_chevron_down(
     &ui.painter(),
     egui::Rect::from_center_size(chevron_center, egui::vec2(10.0, 8.0)),
-    crate::ui::components::fg_muted(ui),
+    crate::ui::theme::fg_secondary(),
   );
   // ponytail: only the chevron sliver is click-sensitive here — the previous
   // design stacked overlapping full-box interacts and egui's hit-test let
@@ -111,11 +111,19 @@ impl TwoCentsApp {
     }
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("is_rendering_import_grid"), true));
 
-    let screen_rect = ctx.screen_rect();
-    let pad_x = if screen_rect.width() < 900.0 { 16.0 } else { 60.0 };
-    let pad_y = if screen_rect.height() < 600.0 { 16.0 } else { 60.0 };
-    let win_w = (screen_rect.width() - pad_x * 2.0).clamp(320.0, 1200.0);
-    let win_h = (screen_rect.height() - pad_y * 2.0).clamp(300.0, 800.0);
+    let screen_rect = ctx.content_rect();
+    let pad_x = if screen_rect.width() < 900.0 { 21.0 } else { 60.0 };
+    let pad_y = if screen_rect.height() < 600.0 { 21.0 } else { 60.0 };
+    // fixed_size constrains the CONTENT; the modal frame wraps it in its own
+    // inner margin + stroke. Subtract that chrome or the panel is wider than
+    // the window (pad 42 < chrome 50 → the panel sat flush on both edges).
+    let frame = themed_modal_frame(ctx);
+    let chrome_x = (frame.inner_margin.left + frame.inner_margin.right) as f32
+      + 2.0 * crate::ui::theme_tokens::BORDER_W;
+    let chrome_y = (frame.inner_margin.top + frame.inner_margin.bottom) as f32
+      + 2.0 * crate::ui::theme_tokens::BORDER_W;
+    let win_w = (screen_rect.width() - pad_x * 2.0 - chrome_x).clamp(320.0, 1200.0);
+    let win_h = (screen_rect.height() - pad_y * 2.0 - chrome_y).clamp(300.0, 800.0);
 
     // Use title_bar(false) to suppress the draggable title bar and × close button.
     // Those interactive elements competed for keyboard focus with the grid cells,
@@ -127,7 +135,7 @@ impl TwoCentsApp {
       .collapsible(false)
       .fixed_size([win_w, win_h])
       .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-      .frame(themed_modal_frame(ctx))
+      .frame(frame)
       .show(ctx, |ui| {
         // ── Header row (our own title bar replacement) ───────────────────────
         let account_candidates: Vec<String> = self.accounts.iter()
@@ -267,7 +275,7 @@ impl TwoCentsApp {
 
 
         // ponytail: shared grid_table_frame so the three grids have identical chrome.
-        crate::ui::components::grid_table_frame(ui)
+        let frame_resp = crate::ui::components::grid_table_frame(ui)
           .show(ui, |ui| {
             let old_spacing = ui.spacing().item_spacing;
             ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
@@ -348,6 +356,8 @@ impl TwoCentsApp {
             }
             ui.spacing_mut().item_spacing = old_spacing;
           });
+        // Frame stroke on top of the scrolled content (clip_rect_margin bleed).
+        crate::ui::components::repaint_grid_frame_stroke(ui, frame_resp.response.rect);
         self.autocomplete_selection = autocomplete_selection;
       });
 

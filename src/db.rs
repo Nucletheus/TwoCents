@@ -58,6 +58,10 @@ pub fn open_database() -> rusqlite::Result<Connection> {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(household_id, vendor_pattern)
     );
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
     ",
   )?;
   let _ = conn.execute("ALTER TABLE expenses ADD COLUMN vendor TEXT", []);
@@ -112,6 +116,24 @@ pub fn load_active_household(conn: &Connection) -> rusqlite::Result<(i64, String
   conn.query_row("SELECT id, name FROM households ORDER BY id LIMIT 1", [], |row| {
     Ok((row.get(0)?, row.get(1)?))
   })
+}
+
+/// ponytail: tiny app-wide key/value settings (theme preset, variant
+/// mode) — persisted immediately on change so relaunch resumes on last
+/// session's theme instead of the hardcoded default.
+pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
+  conn
+    .query_row("SELECT value FROM app_settings WHERE key = ?1", params![key], |row| row.get(0))
+    .ok()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+  conn.execute(
+    "INSERT INTO app_settings (key, value) VALUES (?1, ?2) \
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    params![key, value],
+  )?;
+  Ok(())
 }
 
 pub fn migrate_household_members(conn: &Connection) -> rusqlite::Result<()> {
@@ -203,6 +225,14 @@ pub fn update_self_member_name(conn: &Connection, household_id: i64, name: &str)
   conn.execute(
     "UPDATE expenses SET member = ?1 WHERE household_id = ?2 AND member = ?3",
     params![name, household_id, old_name],
+  )?;
+  Ok(())
+}
+
+pub fn update_household_name(conn: &Connection, household_id: i64, name: &str) -> rusqlite::Result<()> {
+  conn.execute(
+    "UPDATE households SET name = ?1 WHERE id = ?2",
+    params![name, household_id],
   )?;
   Ok(())
 }
@@ -585,10 +615,9 @@ pub fn migrate_category_colors(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 pub const ACCENT_PALETTE_COUNT: usize = 12;
-pub const DEFAULT_ACCENT: Color32 = Color32::from_rgb(0x3f, 0x44, 0x47);
 
 pub fn accent_palette_swatches() -> Vec<Color32> {
-  accent_palette_swatches_from(crate::ui::theme::current_accent())
+  accent_palette_swatches_from(crate::ui::theme::accent())
 }
 
 pub fn accent_palette_swatches_from(base: Color32) -> Vec<Color32> {
@@ -1416,10 +1445,9 @@ pub fn load_analytics_state(
   conn: &Connection,
 ) -> rusqlite::Result<Option<AnalyticsFilterRow>> {
   let mut stmt = conn.prepare(
-    "SELECT date_preset, date_start, date_end, granularity, active_chart,
+    "SELECT date_preset, date_start, date_end, active_chart,
             category_filter_mode, selected_categories, selected_members,
-            selected_vendors, candlestick_year, candlestick_period,
-            comparison_mode, comparison_date_preset
+            selected_vendors, comparison_mode, comparison_date_preset
      FROM analytics_filters WHERE id = 1",
   )?;
   let mut rows = stmt.query_map([], |row| {
@@ -1427,16 +1455,13 @@ pub fn load_analytics_state(
       date_preset: row.get(0)?,
       date_start: row.get(1)?,
       date_end: row.get(2)?,
-      granularity: row.get(3)?,
-      active_chart: row.get(4)?,
-      category_filter_mode: row.get(5)?,
-      selected_categories: row.get(6)?,
-      selected_members: row.get(7)?,
-      selected_vendors: row.get(8)?,
-      candlestick_year: row.get(9)?,
-      candlestick_period: row.get(10)?,
-      comparison_mode: row.get(11)?,
-      comparison_date_preset: row.get(12)?,
+      active_chart: row.get(3)?,
+      category_filter_mode: row.get(4)?,
+      selected_categories: row.get(5)?,
+      selected_members: row.get(6)?,
+      selected_vendors: row.get(7)?,
+      comparison_mode: row.get(8)?,
+      comparison_date_preset: row.get(9)?,
     })
   })?;
   match rows.next() {
@@ -1451,40 +1476,36 @@ pub fn save_analytics_state(
   state: &AnalyticsFilterRow,
 ) -> rusqlite::Result<()> {
   conn.execute(
+    // ponytail: the table's unused granularity/candlestick columns stay in
+    // the schema (NOT NULL with defaults) — omitted from the insert, so the
+    // defaults apply and no migration is needed.
     "INSERT INTO analytics_filters (
-       id, date_preset, date_start, date_end, granularity, active_chart,
+       id, date_preset, date_start, date_end, active_chart,
        category_filter_mode, selected_categories, selected_members,
-       selected_vendors, candlestick_year, candlestick_period,
-       comparison_mode, comparison_date_preset
+       selected_vendors, comparison_mode, comparison_date_preset
      ) VALUES (
-       1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+       1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
      )
      ON CONFLICT(id) DO UPDATE SET
        date_preset = excluded.date_preset,
        date_start = excluded.date_start,
        date_end = excluded.date_end,
-       granularity = excluded.granularity,
        active_chart = excluded.active_chart,
        category_filter_mode = excluded.category_filter_mode,
        selected_categories = excluded.selected_categories,
        selected_members = excluded.selected_members,
        selected_vendors = excluded.selected_vendors,
-       candlestick_year = excluded.candlestick_year,
-       candlestick_period = excluded.candlestick_period,
        comparison_mode = excluded.comparison_mode,
        comparison_date_preset = excluded.comparison_date_preset",
     params![
       state.date_preset,
       state.date_start,
       state.date_end,
-      state.granularity,
       state.active_chart,
       state.category_filter_mode,
       state.selected_categories,
       state.selected_members,
       state.selected_vendors,
-      state.candlestick_year,
-      state.candlestick_period,
       state.comparison_mode,
       state.comparison_date_preset,
     ],
@@ -1496,14 +1517,11 @@ pub struct AnalyticsFilterRow {
   pub date_preset: String,
   pub date_start: Option<String>,
   pub date_end: Option<String>,
-  pub granularity: String,
   pub active_chart: String,
   pub category_filter_mode: String,
   pub selected_categories: String,
   pub selected_members: String,
   pub selected_vendors: String,
-  pub candlestick_year: i32,
-  pub candlestick_period: String,
   pub comparison_mode: String,
   pub comparison_date_preset: String,
 }

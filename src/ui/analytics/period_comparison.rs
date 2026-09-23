@@ -1,23 +1,36 @@
 use eframe::egui::{self, RichText};
-use egui_plot::{Bar, BarChart, Plot};
+use egui_plot::{Bar, BarChart, Line, Plot};
 use chrono::NaiveDate;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use crate::models::*;
 use super::aggregation::*;
 use super::state::*;
+use super::charts_common::{comparison_periods, period_text};
 use super::empty_state::render_empty_state;
+use super::picker::{render_category_picker, render_legend_sort, PickerRow};
 
-/// ponytail: human-readable label for a DatePreset + the date range it
-/// resolves to. "Last 3 Months (Apr 23 – Jul 23)" reads better than
-/// just "Last 3 Months" when the user is choosing which period to
-/// compare against.
-fn preset_label_with_range(preset: DatePreset) -> String {
-    let (start, end) = preset.date_range();
-    match (start, end) {
-        (Some(s), Some(e)) => format!("{} ({} – {})", preset.label(), s.format("%b %d"), e.format("%b %d")),
-        _ => preset.label().to_string(),
+/// Direction color: green = movement in the category's good direction —
+/// spending down, income up. Near-equal rows are neutral.
+fn direction_color(
+    categories: &[Category],
+    label: &str,
+    a: f64,
+    b: f64,
+    success: eframe::egui::Color32,
+    error: eframe::egui::Color32,
+    neutral: eframe::egui::Color32,
+) -> eframe::egui::Color32 {
+    if (b - a).abs() < 0.005 {
+        return neutral;
     }
+    let good = if category_sign(categories, label) == 1 {
+        b > a
+    } else {
+        b < a
+    };
+    if good { success } else { error }
 }
 
 pub fn render_period_comparison_chart(
@@ -25,516 +38,449 @@ pub fn render_period_comparison_chart(
     expenses: &[Expense],
     categories: &[Category],
     state: &mut AnalyticsState,
-) {
+) -> bool {
+    let mut changed = false;
+
     if expenses.is_empty() {
         render_empty_state(
             ui,
-            "No expenses recorded",
-            Some("Add some expenses to compare periods"),
+            "No transactions recorded",
+            Some("Add some income or expenses to compare periods"),
         );
-        return;
+        return false;
     }
 
-    // ponytail: themed label helpers for the Period A/B/Mode row.
-    ui.horizontal(|ui| {
+    // Granularity tabs. Indices are clamped below — every granularity
+    // builds the same list length, so switching never invalidates them.
+    ui.horizontal_wrapped(|ui| {
+        crate::ui::components::label_strong(ui, "Granularity:");
+        for gran in [
+            BudgetViewPeriod::Week,
+            BudgetViewPeriod::Month,
+            BudgetViewPeriod::Quarter,
+            BudgetViewPeriod::Year,
+        ] {
+            if crate::ui::components::tab_label_button(
+                ui,
+                state.comparison_granularity == gran,
+                gran.label(),
+            )
+            .clicked()
+            {
+                state.comparison_granularity = gran;
+                changed = true;
+            }
+        }
+    });
+
+    // Built AFTER the granularity row so a switch this frame shows fresh
+    // labels immediately.
+    let periods = comparison_periods(state.comparison_granularity);
+    state.comparison_period_a = state.comparison_period_a.min(periods.len() - 1);
+    state.comparison_period_b = state.comparison_period_b.min(periods.len() - 1);
+    let pa = periods[state.comparison_period_a].clone();
+    let pb = periods[state.comparison_period_b].clone();
+
+    ui.horizontal_wrapped(|ui| {
         crate::ui::components::label_strong(ui, "Period A:");
-        egui::ComboBox::from_id_salt("period_a_preset")
-            .selected_text(preset_label_with_range(state.comparison_period_a_preset))
+        egui::ComboBox::from_id_salt("period_a_sel")
+            .selected_text(period_text(&pa.label, pa.start, pa.end))
             .show_ui(ui, |ui| {
-                let presets = [
-                    DatePreset::ThisMonth,
-                    DatePreset::LastMonth,
-                    DatePreset::Last3Months,
-                    DatePreset::Last6Months,
-                    DatePreset::YTD,
-                    DatePreset::LastYear,
-                    DatePreset::AllTime,
-                ];
-                for preset in presets {
-                    let label = preset_label_with_range(preset);
+                for (i, p) in periods.iter().enumerate() {
                     if ui
-                        .selectable_label(state.comparison_period_a_preset == preset, label)
+                        .selectable_label(
+                            state.comparison_period_a == i,
+                            period_text(&p.label, p.start, p.end),
+                        )
                         .clicked()
                     {
-                        state.comparison_period_a_preset = preset;
+                        state.comparison_period_a = i;
+                        changed = true;
                     }
                 }
             });
 
         ui.add_space(crate::ui::theme_tokens::SPACE_3);
         crate::ui::components::label_strong(ui, "Period B:");
-        egui::ComboBox::from_id_salt("period_b_preset")
-            .selected_text(preset_label_with_range(state.comparison_period_b_preset))
+        egui::ComboBox::from_id_salt("period_b_sel")
+            .selected_text(period_text(&pb.label, pb.start, pb.end))
             .show_ui(ui, |ui| {
-                let presets = [
-                    DatePreset::ThisMonth,
-                    DatePreset::LastMonth,
-                    DatePreset::Last3Months,
-                    DatePreset::Last6Months,
-                    DatePreset::YTD,
-                    DatePreset::LastYear,
-                    DatePreset::AllTime,
-                ];
-                for preset in presets {
-                    let label = preset_label_with_range(preset);
+                for (i, p) in periods.iter().enumerate() {
                     if ui
-                        .selectable_label(state.comparison_period_b_preset == preset, label)
+                        .selectable_label(
+                            state.comparison_period_b == i,
+                            period_text(&p.label, p.start, p.end),
+                        )
                         .clicked()
                     {
-                        state.comparison_period_b_preset = preset;
+                        state.comparison_period_b = i;
+                        changed = true;
                     }
                 }
-            });
-
-        ui.add_space(crate::ui::theme_tokens::SPACE_3);
-        crate::ui::components::label_strong(ui, "Mode:");
-        egui::ComboBox::from_id_salt("comparison_mode")
-            .selected_text(state.comparison_mode.label())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.comparison_mode, ComparisonMode::SideBySide, "Side-by-Side");
-                ui.selectable_value(&mut state.comparison_mode, ComparisonMode::Overlay, "Overlay");
-                ui.selectable_value(&mut state.comparison_mode, ComparisonMode::Delta, "Delta");
             });
     });
 
     ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
-    // ponytail: build a label -> color lookup so each bar can be
-    // filled with the user-assigned category color. The previous
-    // version used generic theme colors (fg_muted for Period A,
-    // accent for Period B), which didn't tie the chart bars to the
-    // swatches in the right panel. Now the chart's colors and the
-    // right panel's swatches are pulled from the same map, so the
-    // user can read the chart and look up the matching swatch
-    // without guessing.
+    // ponytail: label -> color lookup so each bar is filled with the
+    // user-assigned category color, matching the picker swatches below.
     let cat_parents = category_parent_map(categories);
     let mut cat_color: HashMap<String, eframe::egui::Color32> = HashMap::new();
     for category in categories.iter() {
         let label = category.full_label(&cat_parents);
         cat_color.insert(label, category.color);
     }
-    // Orphan fallback for any category that shows up in the data
-    // but isn't in the user's category list (e.g. a category that
-    // was deleted after the spend happened).
-    let fallback_color = crate::ui::components::fg_muted(ui);
     // ponytail: shared chart chrome colors, resolved up-front (can't
     // borrow ui inside plot closures).
-    let zero_color = crate::ui::components::border_strong(ui);
-    let neg_tint = crate::ui::components::error_color(ui);
+    let fallback_color = crate::ui::theme::fg_secondary();
+    let zero_color = crate::ui::theme::border_strong();
+    let success = crate::ui::theme::success();
+    let error = crate::ui::theme::error();
+    let fg_default = crate::ui::theme::fg_primary();
 
-    let (start_a, end_a) = state.comparison_period_a_preset.date_range();
-    let (start_b, end_b) = state.comparison_period_b_preset.date_range();
-    let start_a = start_a.unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
-    let end_a = end_a.unwrap_or_else(|| chrono::Local::now().date_naive());
-    let start_b = start_b.unwrap_or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
-    let end_b = end_b.unwrap_or_else(|| chrono::Local::now().date_naive());
-
-    // ponytail: analytics are spending-only — skip income (positive rows)
-    // and excluded transfer/payment categories.
+    // ponytail: PC opts into income (positive) rows — the one chart that
+    // shows them; every other analytics tab stays spending-only. Date
+    // window comes from each period's range; excluded categories and the
+    // category/member/vendor selections still apply.
     let excluded = excluded_category_labels(categories);
-    let is_spend = |e: &Expense| e.amount_cents < 0 && !excluded.contains(&e.category);
+    let mut scope = state.clone();
+    scope.date_start = None;
+    scope.date_end = None;
+    scope.date_preset = DatePreset::AllTime;
+    scope.include_income = true;
+    let pool = filter_expenses(expenses, &scope, &excluded);
 
-    let filtered_a: Vec<Expense> = expenses
-        .iter()
-        .filter(|e| {
-            is_spend(e)
-                && parse_expense_date(&e.date)
-                    .is_some_and(|date| date >= start_a && date <= end_a)
-        })
-        .cloned()
-        .collect();
-    let filtered_b: Vec<Expense> = expenses
-        .iter()
-        .filter(|e| {
-            is_spend(e)
-                && parse_expense_date(&e.date)
-                    .is_some_and(|date| date >= start_b && date <= end_b)
-        })
-        .cloned()
-        .collect();
+    // ponytail: picker rows come from a pool with the category selection
+    // cleared (same trick as the Breakdown legend) — rows built from the
+    // filtered set collapsed to whatever was already selected, so the
+    // whole list vanished the moment you clicked one. Member/vendor/date
+    // filters still apply; only the category toggle is excluded.
+    let mut picker_scope = scope.clone();
+    picker_scope.selected_categories.clear();
+    let picker_pool = filter_expenses(expenses, &picker_scope, &excluded);
 
-    let data = aggregate_period_comparison(
-        &filtered_a,
-        &filtered_b,
-        state.comparison_period_a_preset.label(),
-        state.comparison_period_b_preset.label(),
-        categories,
+    let in_range = |e: &Expense, s: NaiveDate, en: NaiveDate| {
+        parse_expense_date(&e.date).is_some_and(|d| d >= s && d <= en)
+    };
+    let split = |pool: &[Expense]| -> (Vec<Expense>, Vec<Expense>) {
+        (
+            pool.iter()
+                .filter(|e| in_range(e, pa.start, pa.end))
+                .cloned()
+                .collect(),
+            pool.iter()
+                .filter(|e| in_range(e, pb.start, pb.end))
+                .cloned()
+                .collect(),
+        )
+    };
+    let (filtered_a, filtered_b) = split(&pool);
+    let (picker_a, picker_b) = split(&picker_pool);
+
+    let labels = (
+        format!("A · {}", pa.label),
+        format!("B · {}", pb.label),
     );
+    let mut data = aggregate_period_comparison(&filtered_a, &filtered_b, &labels.0, &labels.1, categories);
+    let mut picker_data = aggregate_period_comparison(&picker_a, &picker_b, &labels.0, &labels.1, categories);
 
-    if data.period_a_total == 0.0 && data.period_b_total == 0.0 {
+    // ponytail: empty state keys off the UNFILTERED rows — an empty
+    // *filtered* result still renders the shell + picker below so the
+    // user can unclick the selection (returning early here is what made
+    // the whole list disappear on click).
+    if picker_data.category_comparisons.is_empty() {
         render_empty_state(
             ui,
-            "No spending in either period",
-            Some("Try different date ranges or add expenses"),
+            "No transactions in either period",
+            Some("Try different periods or add transactions"),
         );
-        return;
+        return false;
     }
 
-    // Pass the shared chart chrome to each renderer so the bars pick up
-    // the user-assigned category colors.
-    let theme = PlotTheme {
-        cat_color: &cat_color,
-        zero_color,
-        neg_tint,
-        reset_view: state.reset_view,
-    };
-    match state.comparison_mode {
-        ComparisonMode::SideBySide => render_side_by_side(ui, &data, &theme),
-        ComparisonMode::Overlay => render_overlay(ui, &data, &theme),
-        ComparisonMode::Delta => render_delta(ui, &data, &theme),
+    // Shared Category/Cost sort — same selection as the other two tabs;
+    // chart rows + picker rows both ride it, applied BEFORE the reseed
+    // sig so toggling sort re-fits the plot.
+    super::picker::order_rows_by_legend_sort(
+        categories,
+        &mut data.category_comparisons,
+        state.legend_sort,
+        |c| &c.category,
+        |c| c.period_b_amount,
+    );
+    super::picker::order_rows_by_legend_sort(
+        categories,
+        &mut picker_data.category_comparisons,
+        state.legend_sort,
+        |c| &c.category,
+        |c| c.period_b_amount,
+    );
+
+    // ponytail: data/filters signature → Plot::reset() when it changes
+    // (see take_reseed). Labels catch granularity/period switches; the
+    // per-category amounts catch every filter change.
+    let mut sh = std::collections::hash_map::DefaultHasher::new();
+    data.period_a_label.hash(&mut sh);
+    data.period_b_label.hash(&mut sh);
+    for c in &data.category_comparisons {
+        c.category.hash(&mut sh);
+        c.period_a_amount.to_bits().hash(&mut sh);
+        c.period_b_amount.to_bits().hash(&mut sh);
     }
+    let reseed = super::charts_common::take_reseed(&mut state.pc_sig, sh.finish(), state.reset_view);
 
-    ui.add_space(crate::ui::theme_tokens::SPACE_3);
-    render_summary(ui, &data, &cat_color, fallback_color);
-}
-
-/// ponytail: the shared chart chrome (category colors, zero line, negative
-/// tint, Reset View) — one struct instead of the same 4 params on every
-/// renderer signature.
-struct PlotTheme<'a> {
-    cat_color: &'a HashMap<String, eframe::egui::Color32>,
-    zero_color: eframe::egui::Color32,
-    neg_tint: eframe::egui::Color32,
-    reset_view: bool,
-}
-
-fn render_side_by_side(
-    ui: &mut egui::Ui,
-    data: &PeriodComparisonData,
-    theme: &PlotTheme,
-) {
-    ui.horizontal(|ui| {
-        // The y-axis upper bound is shared across both sub-plots so
-        // the user can compare bar heights at a glance.
-        let max_value = data
-            .category_comparisons
-            .iter()
-            .map(|c| c.period_a_amount.max(c.period_b_amount))
-            .fold(0.0_f64, f64::max);
-        let y_ceiling = if max_value <= 0.0 { 100.0 } else { max_value * 1.1 };
-        let n = data.category_comparisons.len() as f64;
-        let default_bounds = egui_plot::PlotBounds::from_min_max([0.0, 0.0], [n, y_ceiling]);
-
-        ui.vertical(|ui| {
-            crate::ui::components::heading_lg(ui, &data.period_a_label);
-            crate::ui::components::label_muted(ui, &format!("Total ${:.2}", data.period_a_total));
-            ui.add_space(crate::ui::theme_tokens::SPACE_2);
-            render_single_period_plot(ui, data, "A", theme, y_ceiling);
-        });
-        ui.add_space(crate::ui::theme_tokens::SPACE_4);
-        ui.vertical(|ui| {
-            crate::ui::components::heading_lg(ui, &data.period_b_label);
-            crate::ui::components::label_muted(ui, &format!("Total ${:.2}", data.period_b_total));
-            ui.add_space(crate::ui::theme_tokens::SPACE_2);
-            render_single_period_plot(ui, data, "B", theme, y_ceiling);
-        });
-    });
-}
-
-fn render_single_period_plot(
-    ui: &mut egui::Ui,
-    data: &PeriodComparisonData,
-    period: &str,
-    theme: &PlotTheme,
-    y_ceiling: f64,
-) {
-    // ponytail: x-axis formatter — integer x maps to a category name.
-    let cat_labels: Vec<String> = data
-        .category_comparisons
-        .iter()
-        .map(|c| c.category.clone())
-        .collect();
-    let x_formatter = move |x: egui_plot::GridMark, _r: &std::ops::RangeInclusive<f64>| -> String {
-        let idx = x.value.round() as usize;
-        cat_labels.get(idx).cloned().unwrap_or_default()
-    };
-
-    let n = data.category_comparisons.len() as f64;
-    let default_bounds = egui_plot::PlotBounds::from_min_max([0.0, 0.0], [n, y_ceiling]);
-    let plot = Plot::new(format!("period_{period}_plot").as_str())
-        .height(300.0)
-        .default_y_bounds(0.0, y_ceiling)
-        .show_grid([false, false])
-        .x_axis_formatter(x_formatter);
-    // Capture fg_muted up-front so we don't try to call it inside
-    // the plot closure (which mutably borrows ui).
-    let fallback = crate::ui::components::fg_muted(ui);
-    plot.show(ui, |plot_ui| {
-        // Shared chart chrome: thick zero line + Reset View. No negative
-        // tint (period spend is all >= 0).
-        super::charts_common::apply_zero_line_and_bounds(
-            plot_ui,
-            default_bounds,
-            None,
-            theme.zero_color,
-            theme.reset_view,
-        );
-        // ponytail: one BarChart per category so the x-axis label is
-        // the category name. Each chart's bar is filled with the
-        // category's user-assigned color — the same color shown in
-        // the right panel's swatches, so the user can map a chart
-        // bar to a swatch at a glance.
-        for (i, cat) in data.category_comparisons.iter().enumerate() {
-            let amount = if period == "A" {
-                cat.period_a_amount
-            } else {
-                cat.period_b_amount
-            };
-            let color = theme.cat_color.get(&cat.category).copied().unwrap_or(fallback);
-            let outline = crate::ui::components::darker(color, 0.18);
-            let bar = Bar::new(i as f64, amount)
-                .name(&cat.category)
-                .fill(color)
-                .stroke(egui::Stroke::new(1.0_f32, outline))
-                .width(0.8);
-            plot_ui.bar_chart(BarChart::new(&cat.category, vec![bar]));
-        }
-    });
-}
-
-fn render_overlay(
-    ui: &mut egui::Ui,
-    data: &PeriodComparisonData,
-    theme: &PlotTheme,
-) {
-    let max_value = data
-        .category_comparisons
-        .iter()
-        .map(|c| c.period_a_amount.max(c.period_b_amount))
-        .fold(0.0_f64, f64::max);
-    let y_ceiling = if max_value <= 0.0 { 100.0 } else { max_value * 1.1 };
-    let n = data.category_comparisons.len() as f64;
-    let default_bounds = egui_plot::PlotBounds::from_min_max([0.0, 0.0], [n, y_ceiling]);
-
-    let plot = Plot::new("overlay_plot")
-        .height(400.0)
-        .default_y_bounds(0.0, y_ceiling)
-        .show_grid([false, false]);
-    // Capture fg_muted up-front.
-    let fallback = crate::ui::components::fg_muted(ui);
-    plot.show(ui, |plot_ui| {
-        // Shared chart chrome: thick zero line + Reset View. No negative
-        // tint (period spend is all >= 0).
-        super::charts_common::apply_zero_line_and_bounds(
-            plot_ui,
-            default_bounds,
-            None,
-            theme.zero_color,
-            theme.reset_view,
-        );
-        // ponytail: one BarChart per category, each containing two
-        // side-by-side bars (one for each period). Both bars use the
-        // category's own color, but at slightly different opacities
-        // so the user can tell Period A from Period B without a
-        // separate color encoding.
-        for (i, cat) in data.category_comparisons.iter().enumerate() {
-            let x = i as f64;
-            let base_color = theme.cat_color.get(&cat.category).copied().unwrap_or(fallback);
-            // Period A: full opacity. Period B: 60% opacity. Same
-            // hue, different lightness — the user can match them by
-            // color but the opacity marks which period is which.
-            let period_b_color = eframe::egui::Color32::from_rgba_unmultiplied(
-                base_color.r(),
-                base_color.g(),
-                base_color.b(),
-                (base_color.a() as f32 * 0.6) as u8,
-            );
-            let bar_a_outline = crate::ui::components::darker(base_color, 0.18);
-            let bar_b_outline = crate::ui::components::darker(period_b_color, 0.18);
-            let bar_a = Bar::new(x - 0.18, cat.period_a_amount)
-                .name(&cat.category)
-                .fill(base_color)
-                .stroke(egui::Stroke::new(1.0_f32, bar_a_outline))
-                .width(0.32);
-            let bar_b = Bar::new(x + 0.18, cat.period_b_amount)
-                .name(&cat.category)
-                .fill(period_b_color)
-                .stroke(egui::Stroke::new(1.0_f32, bar_b_outline))
-                .width(0.32);
-            let chart = BarChart::new(&cat.category, vec![bar_a, bar_b]);
-            plot_ui.bar_chart(chart);
-        }
-    });
-}
-
-fn render_delta(
-    ui: &mut egui::Ui,
-    data: &PeriodComparisonData,
-    theme: &PlotTheme,
-) {
-    crate::ui::components::heading_lg(ui, "Difference (B − A)");
+    // Summary strip at the TOP — pinning it below the chart is what kept
+    // the plot from filling its container.
+    render_summary_strip(ui, &data);
+    crate::ui::components::label_muted(
+        ui,
+        &format!(
+            "Bars: {} (top) vs {} (bottom); green = good direction (spend ↓, income ↑)",
+            data.period_a_label, data.period_b_label
+        ),
+    );
     ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
-    let max_abs = data
-        .category_comparisons
-        .iter()
-        .map(|c| c.difference.abs())
-        .fold(0.0_f64, f64::max);
-    let y_ceiling = if max_abs <= 0.0 { 100.0 } else { max_abs * 1.1 };
-    let n = data.category_comparisons.len() as f64;
-    let default_bounds = egui_plot::PlotBounds::from_min_max([0.0, -y_ceiling], [n, y_ceiling]);
-
-    let plot = Plot::new("delta_plot")
-        .height(400.0)
-        .default_y_bounds(-y_ceiling, y_ceiling)
-        .show_grid([false, false])
-        .x_axis_formatter(make_x_formatter(data));
-    // Capture fg_muted up-front.
-    let fallback = crate::ui::components::fg_muted(ui);
-    plot.show(ui, |plot_ui| {
-        // Shared chart chrome: thick zero line + negative tint + Reset View.
-        // This is the one chart where values go negative, so we pass the
-        // error-color tint to shade the region below zero.
-        super::charts_common::apply_zero_line_and_bounds(
-            plot_ui,
-            default_bounds,
-            Some(theme.neg_tint),
-            theme.zero_color,
-            theme.reset_view,
-        );
-        for (i, cat) in data.category_comparisons.iter().enumerate() {
-            let color = theme.cat_color.get(&cat.category).copied().unwrap_or(fallback);
-            let outline = crate::ui::components::darker(color, 0.18);
-            let bar = Bar::new(i as f64, cat.difference)
-                .name(&cat.category)
-                .fill(color)
-                .stroke(egui::Stroke::new(1.0_f32, outline))
-                .width(0.8);
-            plot_ui.bar_chart(BarChart::new(&cat.category, vec![bar]));
-        }
-    });
-}
-
-fn make_x_formatter(
-    data: &PeriodComparisonData,
-) -> impl Fn(egui_plot::GridMark, &std::ops::RangeInclusive<f64>) -> String + 'static {
-    let cat_labels: Vec<String> = data
-        .category_comparisons
-        .iter()
-        .map(|c| c.category.clone())
-        .collect();
-    move |x, _r| {
-        let idx = x.value.round() as usize;
-        cat_labels.get(idx).cloned().unwrap_or_default()
-    }
-}
-
-fn render_summary(
-    ui: &mut egui::Ui,
-    data: &PeriodComparisonData,
-    cat_color: &HashMap<String, eframe::egui::Color32>,
-    fallback_color: eframe::egui::Color32,
-) {
-    let success = crate::ui::components::success_color(ui);
-    let error = crate::ui::components::error_color(ui);
-    let fg_default = crate::ui::components::fg_default(ui);
-
-    ui.separator();
-    ui.add_space(crate::ui::theme_tokens::SPACE_2);
-
-    let label_value = |ui: &mut egui::Ui, label: &str, value: String, color: eframe::egui::Color32| {
-        ui.horizontal(|ui| {
-            ui.label(label);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(value).color(color));
+    // Chart + picker column take the whole remaining viewport — no
+    // bottom-strip reserve, so nothing leaves white space at the bottom.
+    let avail = ui.available_size_before_wrap();
+    let row_height = (avail.y - 8.0).max(280.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(avail.x, row_height),
+        egui::Layout::left_to_right(egui::Align::TOP),
+        |ui| {
+            // Left side: the paired horizontal chart, filling the column.
+            ui.vertical(|ui| {
+                ui.set_max_height(row_height);
+                ui.set_width(avail.x - 320.0);
+                if data.category_comparisons.is_empty() {
+                    // Filtered to nothing, but picker rows still exist —
+                    // message here, picker stays reachable on the right.
+                    render_empty_state(
+                        ui,
+                        "No categories match the current filters",
+                        Some("Adjust the category/member/vendor filters"),
+                    );
+                    return;
+                }
+                render_paired_chart(
+                    ui,
+                    &data,
+                    categories,
+                    &cat_color,
+                    fallback_color,
+                    zero_color,
+                    success,
+                    error,
+                    fg_default,
+                    row_height,
+                    reseed,
+                );
             });
-        });
+
+            ui.add_space(crate::ui::theme_tokens::SPACE_5);
+
+            // Right side: the shared category picker (direction-colored
+            // |B| − |A| per category), filling the column height.
+            ui.vertical(|ui| {
+                ui.set_max_height(row_height);
+                ui.set_width(300.0);
+                // Same shared Category/Cost sort row as the other tabs.
+                if render_legend_sort(ui, state) {
+                    changed = true;
+                }
+                // Height left AFTER the sort row — the picker fills it.
+                let picker_h = ui.available_size_before_wrap().y.max(120.0);
+                let picker_rows: Vec<PickerRow> = picker_data
+                    .category_comparisons
+                    .iter()
+                    .map(|c| {
+                        let near_zero = c.difference.abs() < 0.005;
+                        let value = if near_zero {
+                            "$0.00".to_string()
+                        } else if c.difference >= 0.0 {
+                            format!("+${:.2}", c.difference)
+                        } else {
+                            format!("-${:.2}", c.difference.abs())
+                        };
+                        let value_color = direction_color(
+                            categories,
+                            &c.category,
+                            c.period_a_amount,
+                            c.period_b_amount,
+                            success,
+                            error,
+                            fg_default,
+                        );
+                        PickerRow {
+                            label: c.category.clone(),
+                            color: c.color,
+                            value: Some(value),
+                            value_color: Some(value_color),
+                        }
+                    })
+                    .collect();
+                if render_category_picker(ui, state, &picker_rows, picker_h) {
+                    changed = true;
+                }
+            });
+        },
+    );
+
+    changed
+}
+
+/// Compact A/B/Difference stats above the chart (moved up from the old
+/// bottom summary so the plot can fill the container). Totals are gross
+/// magnitudes (Σ |per-category|).
+fn render_summary_strip(ui: &mut egui::Ui, data: &PeriodComparisonData) {
+    let fg_default = crate::ui::theme::fg_primary();
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(format!("{}: ${:.2}", data.period_a_label, data.period_a_total))
+                .color(fg_default),
+        );
+        ui.separator();
+        ui.label(
+            RichText::new(format!("{}: ${:.2}", data.period_b_label, data.period_b_total))
+                .color(fg_default),
+        );
+        ui.separator();
+
+        // ponytail: A == B leaves a float-epsilon difference that rendered
+        // as a red "-$0.00 (0.0%)" — below half a cent is zero, and zero
+        // is neutral, not error. Totals mix income + spending categories,
+        // so the overall difference has NO single good direction — it stays
+        // neutral here; per-row direction colors live on the chart and
+        // picker (which know each category's sign).
+        let near_zero = data.difference.abs() < 0.005;
+        let diff_text = if near_zero {
+            "$0.00 (0.0%)".to_string()
+        } else if data.difference >= 0.0 {
+            format!("+${:.2} (+{:.1}%)", data.difference, data.difference_pct)
+        } else {
+            format!(
+                "-${:.2} ({:.1}%)",
+                data.difference.abs(),
+                data.difference_pct.abs()
+            )
+        };
+        ui.label(RichText::new(format!("Difference: {}", diff_text)).color(fg_default));
+    });
+}
+
+/// The one Period Comparison chart: categories down the y-axis (sorted
+/// biggest-at-top), period A bar above period B bar per row, both
+/// extending right on a log $ axis (ln1p), joined by a connector line
+/// between the bar tips colored by direction.
+#[allow(clippy::too_many_arguments)]
+fn render_paired_chart(
+    ui: &mut egui::Ui,
+    data: &PeriodComparisonData,
+    categories: &[Category],
+    cat_color: &HashMap<String, eframe::egui::Color32>,
+    fallback: eframe::egui::Color32,
+    zero_color: eframe::egui::Color32,
+    success: eframe::egui::Color32,
+    error: eframe::egui::Color32,
+    neutral: eframe::egui::Color32,
+    chart_h: f32,
+    reseed: bool,
+) {
+    let n = data.category_comparisons.len();
+    // y = n-1-i puts sorted-desc index 0 at the TOP of the axis.
+    let labels_by_y: Vec<String> = data
+        .category_comparisons
+        .iter()
+        .rev()
+        .map(|c| super::charts_common::subcategory_label(&c.category))
+        .collect();
+    let y_formatter = move |m: egui_plot::GridMark, _r: &std::ops::RangeInclusive<f64>| {
+        let k = m.value.round();
+        if (m.value - k).abs() < 0.01 && k >= 0.0 && (k as usize) < labels_by_y.len() {
+            labels_by_y[k as usize].clone()
+        } else {
+            String::new()
+        }
     };
 
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            crate::ui::components::section_header(ui, "Summary");
-            label_value(
-                ui,
-                &data.period_a_label,
-                format!("${:.2}", data.period_a_total),
-                fg_default,
+    // Direction colors per row, resolved outside the plot closure.
+    let dir_colors: Vec<eframe::egui::Color32> = data
+        .category_comparisons
+        .iter()
+        .map(|c| {
+            direction_color(
+                categories,
+                &c.category,
+                c.period_a_amount,
+                c.period_b_amount,
+                success,
+                error,
+                neutral,
+            )
+        })
+        .collect();
+
+    let plot = Plot::new("period_comparison_plot")
+        .height(chart_h)
+        .allow_zoom(true)
+        .allow_scroll(true)
+        .show_grid([true, false])
+        .x_grid_spacer(super::charts_common::money_grid_spacer)
+        .y_grid_spacer(super::charts_common::category_grid_spacer)
+        .x_axis_formatter(|m, _r| super::charts_common::money_label(m.value.exp_m1()))
+        .y_axis_formatter(y_formatter);
+    let plot = if reseed { plot.reset() } else { plot };
+
+    plot.show(ui, |plot_ui| {
+        plot_ui.vline(egui_plot::VLine::new("zero", 0.0).width(1.5_f32).color(zero_color));
+        for (i, cat) in data.category_comparisons.iter().enumerate() {
+            let y = (n - 1 - i) as f64;
+            let base = cat_color.get(&cat.category).copied().unwrap_or(fallback);
+            let a_color = base.gamma_multiply(0.55);
+            let a_x = super::charts_common::ln1p(cat.period_a_amount);
+            let b_x = super::charts_common::ln1p(cat.period_b_amount);
+            // Connector between the two bar tips — color = direction.
+            plot_ui.line(
+                Line::new(format!("conn_{i}"), vec![[a_x, y + 0.18], [b_x, y - 0.18]])
+                    .color(dir_colors[i])
+                    .width(2.0_f32),
             );
-            label_value(
-                ui,
-                &data.period_b_label,
-                format!("${:.2}", data.period_b_total),
-                fg_default,
+            let bar_a = Bar::new(y + 0.18, a_x)
+                .width(0.32)
+                .fill(a_color)
+                .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(a_color, 0.18)))
+                .name("A");
+            let bar_b = Bar::new(y - 0.18, b_x)
+                .width(0.32)
+                .fill(base)
+                .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(base, 0.18)))
+                .name("B");
+            // ponytail: bar hover bypasses the plot-level label_formatter
+            // (egui_plot 0.37 routes bars through add_rulers_and_text) —
+            // its default text showed the raw ln-space coordinate.
+            // element_formatter is the only hook for bars; A/B dollar
+            // values + the signed difference (sign = direction).
+            let category = cat.category.clone();
+            let (a_label, b_label) = (data.period_a_label.clone(), data.period_b_label.clone());
+            let (a_amt, b_amt) = (cat.period_a_amount, cat.period_b_amount);
+            let diff_text = if cat.difference.abs() < 0.005 {
+                "$0.00".to_string()
+            } else if cat.difference >= 0.0 {
+                format!("+${:.2}", cat.difference)
+            } else {
+                format!("-${:.2}", cat.difference.abs())
+            };
+            plot_ui.bar_chart(
+                BarChart::new(&cat.category, vec![bar_a, bar_b])
+                    .horizontal()
+                    .element_formatter(Box::new(move |_bar, _chart| {
+                        format!(
+                            "{}\n{}: ${:.2}\n{}: ${:.2}\nDifference: {}",
+                            category, a_label, a_amt, b_label, b_amt, diff_text
+                        )
+                    })),
             );
-
-            let diff_text = if data.difference >= 0.0 {
-                format!("+${:.2} (+{:.1}%)", data.difference, data.difference_pct)
-            } else {
-                format!(
-                    "-${:.2} ({:.1}%)",
-                    data.difference.abs(),
-                    data.difference_pct.abs()
-                )
-            };
-            let diff_color = if data.difference >= 0.0 {
-                success
-            } else {
-                error
-            };
-            label_value(ui, "Difference", diff_text, diff_color);
-        });
-
-        ui.add_space(crate::ui::theme_tokens::SPACE_6);
-
-        ui.vertical(|ui| {
-            crate::ui::components::section_header(ui, "Category Breakdown");
-            egui::ScrollArea::vertical()
-                .max_height(180.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for cat in &data.category_comparisons {
-                        ui.horizontal(|ui| {
-                            // ponytail: swatch uses the category's
-                            // own color (not a generic status color)
-                            // so the row's color matches the bar
-                            // color in the chart above. The
-                            // variance text on the right still uses
-                            // the success/error theme colors to
-                            // communicate the direction.
-                            let swatch_color = cat_color
-                                .get(&cat.category)
-                                .copied()
-                                .unwrap_or(fallback_color);
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                            // ponytail: outlined swatch (1px darker) matches
-                            // the bar chart's silhouette so the user can map
-                            // a swatch to its bar at a glance.
-                            let swatch_outline = crate::ui::components::darker(swatch_color, 0.18);
-                            ui.painter().add(egui::Shape::Rect(egui::epaint::RectShape::new(
-                                rect,
-                                egui::CornerRadius::same(2),
-                                swatch_color,
-                                egui::Stroke::new(1.0_f32, swatch_outline),
-                                egui::StrokeKind::Inside,
-                            )));
-                            ui.add_space(crate::ui::theme_tokens::SPACE_1);
-                            let display_name = if cat.category.len() > 20 {
-                                format!("{}…", &cat.category[..17])
-                            } else {
-                                cat.category.clone()
-                            };
-                            ui.label(display_name);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let color = if cat.difference >= 0.0 {
-                                        error
-                                    } else {
-                                        success
-                                    };
-                                    let text = if cat.difference >= 0.0 {
-                                        format!("+${:.2}", cat.difference)
-                                    } else {
-                                        format!("-${:.2}", cat.difference.abs())
-                                    };
-                                    ui.label(RichText::new(text).color(color));
-                                },
-                            );
-                        });
-                        ui.add_space(crate::ui::theme_tokens::SPACE_1);
-                    }
-                });
-        });
+        }
     });
 }

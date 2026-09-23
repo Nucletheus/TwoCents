@@ -1,130 +1,99 @@
 use eframe::egui::{self, Color32};
 use std::collections::HashSet;
 
-use crate::models::{Category, HouseholdMember};
+use crate::models::HouseholdMember;
 use super::state::*;
 
 pub fn render_filter_panel(
     ui: &mut egui::Ui,
     state: &mut AnalyticsState,
-    categories: &[Category],
     members: &[HouseholdMember],
     available_vendors: &[String],
-    show_granularity: bool,
+    show_date_range: bool,
 ) -> bool {
     let mut changed = false;
 
     // ponytail: row 1 — date preset buttons (themed). User picks a
     // preset and the start/end dates are computed. The "Custom" option
-    // reveals a free-form date range below.
-    ui.horizontal_wrapped(|ui| {
-        crate::ui::components::label_strong(ui, "Date Range:");
+    // reveals a free-form date range below. Hidden on the Period
+    // Comparison tab, whose dates come from its own A/B combos.
+    if show_date_range {
+        ui.horizontal_wrapped(|ui| {
+            crate::ui::components::label_strong(ui, "Date Range:");
 
-        let presets = [
-            DatePreset::ThisMonth,
-            DatePreset::LastMonth,
-            DatePreset::Last3Months,
-            DatePreset::Last6Months,
-            DatePreset::YTD,
-            DatePreset::LastYear,
-            DatePreset::AllTime,
-            DatePreset::Custom,
-        ];
+            let presets = [
+                DatePreset::ThisMonth,
+                DatePreset::LastMonth,
+                DatePreset::Last3Months,
+                DatePreset::Last6Months,
+                DatePreset::YTD,
+                DatePreset::LastYear,
+                DatePreset::AllTime,
+                DatePreset::Custom,
+            ];
 
-        for preset in presets {
-            let selected = state.date_preset == preset;
-            if crate::ui::components::tab_label_button(ui, selected, preset.label()).clicked() {
-                state.date_preset = preset;
-                let (start, end) = preset.date_range();
-                state.date_start = start;
-                state.date_end = end;
-                changed = true;
-            }
-        }
-    });
-
-    // Custom date range (only shown when Custom is selected)
-    if state.date_preset == DatePreset::Custom {
-        ui.horizontal(|ui| {
-            ui.add_space(crate::ui::theme_tokens::SPACE_2);
-            ui.label("Start:");
-            if let Some(ref mut start) = state.date_start {
-                let mut date_str = start.format("%Y-%m-%d").to_string();
-                if ui.text_edit_singleline(&mut date_str).changed() {
-                    if let Ok(new_date) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                        *start = new_date;
-                        changed = true;
-                    }
-                }
-            }
-
-            ui.add_space(crate::ui::theme_tokens::SPACE_2);
-            ui.label("End:");
-            if let Some(ref mut end) = state.date_end {
-                let mut date_str = end.format("%Y-%m-%d").to_string();
-                if ui.text_edit_singleline(&mut date_str).changed() {
-                    if let Ok(new_date) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                        *end = new_date;
-                        changed = true;
-                    }
+            for preset in presets {
+                let selected = state.date_preset == preset;
+                if crate::ui::components::tab_label_button(ui, selected, preset.label()).clicked() {
+                    state.date_preset = preset;
+                    let (start, end) = preset.date_range();
+                    state.date_start = start;
+                    state.date_end = end;
+                    changed = true;
                 }
             }
         });
+
+        // Custom date range (only shown when Custom is selected)
+        if state.date_preset == DatePreset::Custom {
+            // ponytail: Custom reached with no stored dates (e.g. via
+            // AllTime → Custom) used to leave Start/End unusable — the
+            // fields didn't render. Seed a sane default window instead.
+            if state.date_start.is_none() && state.date_end.is_none() {
+                let today = chrono::Local::now().date_naive();
+                state.date_start = Some(today - chrono::Duration::days(30));
+                state.date_end = Some(today);
+                changed = true;
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(crate::ui::theme_tokens::SPACE_2);
+                ui.label("Start:");
+                if let Some(ref mut start) = state.date_start {
+                    let mut date_str = start.format("%Y-%m-%d").to_string();
+                    if ui.text_edit_singleline(&mut date_str).changed() {
+                        if let Ok(new_date) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                            *start = new_date;
+                            changed = true;
+                        }
+                    }
+                }
+
+                ui.add_space(crate::ui::theme_tokens::SPACE_2);
+                ui.label("End:");
+                if let Some(ref mut end) = state.date_end {
+                    let mut date_str = end.format("%Y-%m-%d").to_string();
+                    if ui.text_edit_singleline(&mut date_str).changed() {
+                        if let Ok(new_date) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                            *end = new_date;
+                            changed = true;
+                        }
+                    }
+                }
+            });
+        }
     }
 
-    // ponytail: row 2 — granularity + filter dropdowns. The Clear button
+    // ponytail: row 2 — filter dropdowns. The Clear button
     // here is the only "Clear" in the analytics page. It resets ALL filter
-    // state (granularity, categories, members, vendors) to defaults.
+    // state (categories, members, vendors) to defaults.
     // It also resets the date range to "Last 3 Months". The previous
     // version had two "Clear" buttons that did different things, which
     // was confusing — consolidating them.
     ui.horizontal_wrapped(|ui| {
-        // ponytail: granularity is only meaningful for the time-series
-        // chart (it controls how bars are bucketed along the x axis).
-        // The other charts either have no time axis (category
-        // breakdown) or use the user-supplied Period A/B presets
-        // (period comparison). Hide the dropdown on those tabs so
-        // changing it doesn't give the user the false impression that
-        // it has an effect.
-        if show_granularity {
-            ui.label("Granularity:");
-            egui::ComboBox::from_id_salt("granularity_combo")
-                .selected_text(state.granularity.label())
-                .show_ui(ui, |ui| {
-                    let granularities = [
-                        AnalyticsGranularity::Daily,
-                        AnalyticsGranularity::Weekly,
-                        AnalyticsGranularity::Monthly,
-                        AnalyticsGranularity::Quarterly,
-                        AnalyticsGranularity::Yearly,
-                    ];
-
-                    for g in granularities {
-                        if ui
-                            .selectable_label(state.granularity == g, g.label())
-                            .clicked()
-                        {
-                            state.granularity = g;
-                            changed = true;
-                        }
-                    }
-                });
-        }
-        // Category filter with colors
-        let category_names: Vec<String> = categories.iter().map(|c| c.name.clone()).collect();
-        let category_colors: Vec<Color32> = categories.iter().map(|c| c.color).collect();
-        ui.label("Categories:");
-        if multi_select_dropdown_with_colors(
-            ui,
-            "categories_dropdown",
-            &category_names,
-            Some(&category_colors),
-            &mut state.selected_categories,
-        ) {
-            changed = true;
-        }
-
-        ui.separator();
+        // ponytail: no category dropdown here — it matched `c.name` against
+        // a set of full "Parent › Sub" labels (phantom "N selected", and
+        // checked entries the filter never matched). Category selection is
+        // the shared picker on each chart tab.
 
         // Member filter with colors
         let member_names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
@@ -159,7 +128,6 @@ pub fn render_filter_panel(
             let (start, end) = DatePreset::Last3Months.date_range();
             state.date_start = start;
             state.date_end = end;
-            state.granularity = AnalyticsGranularity::Monthly;
             state.selected_categories.clear();
             state.selected_members.clear();
             state.selected_vendors.clear();

@@ -1,6 +1,5 @@
 pub mod widgets;
 pub mod grid;
-pub mod dashboard;
 pub mod accounts;
 pub mod expenses;
 pub mod analytics;

@@ -79,6 +79,7 @@ struct TwoCentsApp {
   members: Vec<HouseholdMember>,
   new_member_name: String,
   editing_self_name: String,
+  editing_household_name: String,
   import_rows: Vec<ImportRow>,
   pub show_import_review: bool,
   import_account_name: String,
@@ -87,7 +88,6 @@ struct TwoCentsApp {
   pub selected_theme: theme::ThemePreset,
   autocomplete_selection: usize,
   expense_sort: ExpenseSort,
-  show_category_settings: bool,
   new_parent_category_name: String,
   adding_subcategory_to: Option<i64>,
   inline_subcategory_name: String,
@@ -236,7 +236,8 @@ fn main() -> eframe::Result<()> {
 
   if env::var("TWOCENTS_RESET_WINDOW").as_deref() == Ok("1") {
     if let Ok(appdata) = env::var("APPDATA") {
-      let path = PathBuf::from(appdata).join("egui").join("data").join("TwoCents");
+      // eframe 0.34 FileStorage: %APPDATA%\<app_id>\data
+      let path = PathBuf::from(appdata).join("TwoCents").join("data");
       let _ = fs::remove_dir_all(path);
     }
   }
@@ -251,14 +252,32 @@ fn main() -> eframe::Result<()> {
       .with_active(true)
       .with_visible(true)
       .with_icon(icon),
-    centered: true,
+    // ponytail: centered is off — with the persistence feature it would
+    // stomp the remembered window position on every launch. First launch
+    // falls back to the OS default placement.
     ..Default::default()
   };
 
   eframe::run_native(
     "TwoCents",
     options,
-    Box::new(|cc| Ok(Box::new(TwoCentsApp::new(cc)))),
+    Box::new(|cc| {
+      // Debug-only checker that flags virtualized-table rows as "changed id"
+      // whenever they scroll out of the row window; it also paints 2px red
+      // rects over the grid while scrolling. Virtualized grids legitimately
+      // stop creating out-of-view rows between passes — not an id bug.
+      cc.egui_ctx.all_styles_mut(|s| s.debug.warn_if_rect_changes_id = false);
+      // ponytail: egui's proportional chain is Ubuntu-Light → emojis (no
+      // Hack), and ↑↓ — used in the sort labels and variance values — only
+      // exist in Hack, so they rendered as tofu. Per-glyph fallback: Ubuntu-Light
+      // still wins where it has glyphs; Hack supplies the rest.
+      let mut fonts = egui::FontDefinitions::default();
+      if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(1, "Hack".to_owned());
+      }
+      cc.egui_ctx.set_fonts(fonts);
+      Ok(Box::new(TwoCentsApp::new(cc)))
+    }),
   )
 }
 
@@ -266,6 +285,14 @@ impl TwoCentsApp {
   fn new(_cc: &eframe::CreationContext<'_>) -> Self {
     let conn = open_database().expect("open local SQLite database");
     let (household_id, household_name) = load_active_household(&conn).expect("load default household");
+    // ponytail: restore last session's theme before the first frame —
+    // the old hardcoded init reset to One Dark every launch.
+    let selected_theme = get_setting(&conn, "theme_preset")
+      .and_then(|v| theme::ThemePreset::from_name(&v))
+      .unwrap_or(theme::ThemePreset::OneDark);
+    let variant_mode = get_setting(&conn, "variant_mode")
+      .map(|v| theme::VariantMode::from_key(&v))
+      .unwrap_or(theme::VariantMode::System);
     let mut app = Self {
       conn,
       household_id,
@@ -277,16 +304,16 @@ impl TwoCentsApp {
       members: Vec::new(),
       new_member_name: String::new(),
       editing_self_name: String::new(),
+      editing_household_name: String::new(),
       import_rows: Vec::new(),
       csv_import_rx: None,
       show_import_review: false,
       import_account_name: String::new(),
       import_detected_account: String::new(),
-      selected_theme: theme::ThemePreset::OneDark,
-      variant_mode: theme::VariantMode::System,
+      selected_theme,
+      variant_mode,
       autocomplete_selection: 0,
       expense_sort: ExpenseSort::default(),
-      show_category_settings: false,
       new_parent_category_name: String::new(),
       adding_subcategory_to: None,
       inline_subcategory_name: String::new(),
@@ -378,6 +405,7 @@ impl TwoCentsApp {
       .find(|member| member.is_self)
       .map(|member| member.name.clone())
       .unwrap_or_else(|| "Me".to_string());
+    self.editing_household_name = self.household_name.clone();
     self.rebuild_cached_candidates();
     self.rebuild_sorted_expense_indices();
     self.rebuild_sorted_import_indices();
@@ -553,7 +581,9 @@ impl eframe::App for TwoCentsApp {
     }
   }
 
-  fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+  // eframe 0.35+ removed App::update; logic runs before each ui() and
+  // also while hidden on repaint — no painting allowed here.
+  fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
     for log_msg in take_panic_logs() {
       eprintln!("{log_msg}");
     }
@@ -574,31 +604,38 @@ impl eframe::App for TwoCentsApp {
       theme::VariantMode::Dark => true,
       theme::VariantMode::Light => false,
       theme::VariantMode::System => {
-        // Check Windows registry for OS theme on first call, then cache the result
-        theme::system_is_dark()
+        // Live OS theme from the windowing system (winit feeds it from the
+        // user's Windows setting and it updates mid-session); the registry
+        // query in system_is_dark is the fallback when it's unknown.
+        ctx
+          .input(|i| i.raw.system_theme)
+          .map_or_else(theme::system_is_dark, |t| t == egui::Theme::Dark)
       }
     };
     theme::configure_theme(ctx, self.selected_theme, use_dark);
 
     if self.startup_window_frames < 4 {
-      ensure_root_window_visible(ctx, self.startup_window_frames == 0);
+      // Recovery only — never re-center; eframe persistence restores the
+      // remembered size/position (incl. which monitor) at startup.
+      ensure_root_window_visible(ctx);
       self.startup_window_frames += 1;
       ctx.request_repaint();
     }
   }
-  #[allow(deprecated)]
   fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     let ctx = ui.ctx().clone();
     let modal_open = self.show_import_review || self.show_duplicate_review;
 
     // Paint background fill manually, then allocate a padded content area
     let full = ui.max_rect();
-    ui.painter().rect_filled(full, 0.0, ui.visuals().panel_fill);
+    ui.painter().rect_filled(full, 0.0, theme::bg_primary());
     let inner = egui::Rect::from_min_max(
       egui::pos2(full.left() + 24.0, full.top() + 8.0),
       egui::pos2(full.right() - 24.0, full.bottom() - 8.0),
     );
-    ui.allocate_ui_at_rect(inner, |ui| {
+    // allocate_ui_at_rect was removed in egui 0.36 — scope_builder with
+    // max_rect places + allocates the child rect the same way.
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
       self.ui_inner(ui, &ctx, modal_open);
     });
   }
@@ -610,15 +647,19 @@ impl TwoCentsApp {
     let inner_w = available;
 
     // --- Header box ---
+    let prev_theme = self.selected_theme;
+    let prev_variant = self.variant_mode;
     crate::ui::components::card(ui).show(ui, |ui| {
       ui.horizontal(|ui| {
         ui.heading(crate::ui::components::heading_xl_text(ui, "TwoCents"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
           let vm = &mut self.variant_mode;
+          // ponytail: ☾/☀/⚙ glyphs are missing from the app's font set and
+          // render blank (especially in dark mode) — plain words always show.
           let btn_label = match vm {
-            theme::VariantMode::Dark => "☾",
-            theme::VariantMode::Light => "☀",
-            theme::VariantMode::System => "⚙",
+            theme::VariantMode::Dark => "Dark",
+            theme::VariantMode::Light => "Light",
+            theme::VariantMode::System => "System",
           };
           let btn_hover = match vm {
             theme::VariantMode::Dark => "Dark mode (click to cycle)",
@@ -638,15 +679,20 @@ impl TwoCentsApp {
         });
       });
     });
+    // ponytail: persist immediately when the pick changes — theme must
+    // survive relaunch (crash-safe; no reliance on exit hooks).
+    if self.selected_theme != prev_theme || self.variant_mode != prev_variant {
+      let _ = set_setting(&self.conn, "theme_preset", self.selected_theme.name());
+      let _ = set_setting(&self.conn, "variant_mode", self.variant_mode.as_key());
+    }
 
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
-      tab_button(ui, &mut self.tab, Tab::Dashboard, "Dashboard");
       tab_button(ui, &mut self.tab, Tab::Expenses, "Expenses");
       tab_button(ui, &mut self.tab, Tab::Budgets, "Budgets");
       tab_button(ui, &mut self.tab, Tab::Analytics, "Analytics");
       tab_button(ui, &mut self.tab, Tab::Settlements, "Settlements");
-      tab_button(ui, &mut self.tab, Tab::Households, "Households");
+      tab_button(ui, &mut self.tab, Tab::Households, "Household");
     });
     ui.separator();
 
@@ -668,7 +714,6 @@ impl TwoCentsApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
               match self.tab {
-                Tab::Dashboard => self.ui_dashboard(ui),
                 Tab::Accounts | Tab::Goals => {},
                 Tab::Analytics => self.ui_analytics(ui),
                 Tab::Budgets => unreachable!("budgets tab uses dedicated layout"),
@@ -681,7 +726,6 @@ impl TwoCentsApp {
       },
     );
 
-    self.ui_category_settings_window(&ctx);
     self.ui_category_color_popup(&ctx);
     self.ui_member_color_popup(&ctx);
     self.ui_delete_confirmations(&ctx);
@@ -772,12 +816,11 @@ impl TwoCentsApp {
     period < self.current_period(granularity)
   }
 
-  fn annual_cap(&self, category: &str) -> i64 {
-    let year = self.budget_year;
-    if let Ok(snaps) = load_budget_snapshots_for_year(&self.conn, self.household_id, year) {
-      if let Some(s) = snaps.iter().find(|s| s.category == category && s.period_code == 0 && s.is_override) {
-        return s.amount_cents;
-      }
+  fn annual_cap(&self, category: &str, year: i32, snaps: &[BudgetSnapshot]) -> i64 {
+    // Yearly-cap override lives in the viewed year's snapshots; legacy
+    // budgets-table rows (year, code 0) are the fallback.
+    if let Some(s) = snaps.iter().find(|s| s.category == category && s.period_code == 0 && s.is_override) {
+      return s.amount_cents;
     }
     load_budgets(&self.conn, self.household_id, year, 0)
       .ok()
@@ -786,39 +829,78 @@ impl TwoCentsApp {
       .unwrap_or(0)
   }
 
+  /// ponytail: pure pricing core, extracted so the year-honest rule is
+  /// testable without a TwoCentsApp. Pricing a year with no rows (empty
+  /// snaps, cap 0) yields $0 — budgets never bleed across years.
+  fn price_budget(
+    category: &str,
+    code: i32,
+    snaps: &[BudgetSnapshot],
+    cap: i64,
+    periods: i64,
+  ) -> i64 {
+    if let Some(s) = snaps.iter().find(|s| s.category == category && s.period_code == code) {
+      return s.amount_cents;
+    }
+    if cap == 0 { return 0; }
+    cap / periods.max(1)
+  }
+
   fn compute_budget_for_category(&self, category: &str) -> i64 {
-    let gran = self.budget_granularity;
-    let active_code = match gran {
+    self.compute_budget_for(category, self.budget_granularity, self.budget_year, None, &self.cached_budget_snapshots)
+  }
+
+  /// ponytail: period-parameterized budget lookup so the analytics Budget
+  /// vs Actual panel can price ANY week/month/quarter/year, not just the
+  /// Budgets tab's currently-selected one. `period` overrides the
+  /// self.budget_* fields (analytics passes its own view period). `snaps`
+  /// must be the viewed YEAR's snapshots — the year-honest fix: pricing
+  /// used to read the Budgets-tab year's cache regardless of `year`,
+  /// which showed current-year budgets for e.g. 2008.
+  fn compute_budget_for(
+    &self,
+    category: &str,
+    gran: BudgetGranularity,
+    year: i32,
+    period: Option<i32>,
+    snaps: &[BudgetSnapshot],
+  ) -> i64 {
+    let code = match gran {
       BudgetGranularity::Yearly => 0,
-      BudgetGranularity::Quarterly => self.period_code(gran, self.budget_quarter as i32),
-      BudgetGranularity::Monthly => self.period_code(gran, self.budget_month),
-      BudgetGranularity::Weekly => self.period_code(gran, self.budget_week as i32),
+      BudgetGranularity::Quarterly => 20 + period.unwrap_or(self.budget_quarter as i32),
+      BudgetGranularity::Monthly => period.unwrap_or(self.budget_month),
+      BudgetGranularity::Weekly => 100 + period.unwrap_or(self.budget_week as i32),
     };
 
     // Check for override first
-    if let Some(amount) = self.get_snapshot_amount(category, active_code) {
+    if let Some(amount) = snaps.iter()
+      .find(|s| s.category == category && s.period_code == code)
+      .map(|s| s.amount_cents)
+    {
       return amount;
     }
 
     // Past periods with no snapshot → no budget was set → $0
-    if gran != BudgetGranularity::Yearly {
-      let period = match gran {
+    // (only applies when the viewed period is the CURRENT one; analytics
+    // views of past periods treat missing snapshots as "use the cap")
+    if period.is_none() && gran != BudgetGranularity::Yearly {
+      let cur_period = match gran {
         BudgetGranularity::Quarterly => self.budget_quarter as i32,
         BudgetGranularity::Monthly => self.budget_month,
         BudgetGranularity::Weekly => self.budget_week as i32,
         _ => unreachable!(),
       };
-      if self.is_period_past(gran, period) {
+      if self.is_period_past(gran, cur_period) {
         return 0;
       }
     }
 
-    // Otherwise compute from yearly cap
-    let cap = self.annual_cap(category);
-    if cap == 0 { return 0; }
-
-    cap / self.total_periods(gran).max(1) as i64
+    let cap = self.annual_cap(category, year, snaps);
+    Self::price_budget(category, code, snaps, cap, self.total_periods(gran) as i64)
   }
+
+  /// Date window of a budget period lives in `models::budget_period_date_range`
+  /// now — shared with Period Comparison's granularity period lists.
 
   fn get_snapshot_amount(&self, category: &str, period_code: i32) -> Option<i64> {
     self.cached_budget_snapshots.iter()
@@ -1222,4 +1304,59 @@ fn tab_button(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
     *current = tab;
   }
   crate::ui::components::tab_underline(ui, response.rect, selected);
+}
+
+#[cfg(test)]
+mod budget_tests {
+  use super::*;
+
+  fn snap(year: i32, code: i32, cents: i64, is_override: bool) -> BudgetSnapshot {
+    BudgetSnapshot {
+      id: 0, category: "Food".into(), year,
+      period_code: code, amount_cents: cents, is_override,
+    }
+  }
+
+  #[test]
+  fn budget_never_bleeds_across_years() {
+    // 2026 has a yearly cap override of $1,200 and a March override of $150.
+    let snaps_2026 = [snap(2026, 0, 120_000, true), snap(2026, 3, 15_000, true)];
+
+    // The old bug: pricing 2008 with 2026's data. Pricing 2008 uses 2008's
+    // (empty) snapshots + a 2008 cap of 0 → $0, never 2026's numbers.
+    assert_eq!(TwoCentsApp::price_budget("Food", 3, &[], 0, 12), 0);
+
+    // 2026 with its own data: snapshot override wins; cap divides otherwise.
+    assert_eq!(TwoCentsApp::price_budget("Food", 3, &snaps_2026, 120_000, 12), 15_000);
+    assert_eq!(TwoCentsApp::price_budget("Food", 5, &snaps_2026, 120_000, 12), 10_000);
+
+    // Zero cap → $0 when no snapshot matches (other category).
+    assert_eq!(TwoCentsApp::price_budget("Rent", 0, &snaps_2026, 0, 1), 0);
+  }
+
+  #[test]
+  fn cap_lookup_is_year_scoped() {
+    let conn = Connection::open_in_memory().expect("db");
+    conn.execute_batch(
+      "CREATE TABLE budgets (id INTEGER PRIMARY KEY, household_id INTEGER, category TEXT, amount_cents INTEGER, year INTEGER, month INTEGER, UNIQUE(household_id, category, year, month));
+       CREATE TABLE budget_snapshots (id INTEGER PRIMARY KEY, household_id INTEGER, category TEXT, year INTEGER, period_code INTEGER, amount_cents INTEGER, is_override INTEGER, UNIQUE(household_id, category, year, period_code));",
+    ).expect("schema");
+    save_budget_snapshot(&conn, 1, "Food", 2026, 0, 120_000, true).expect("save");
+    save_budget(&conn, 1, "Rent", 30_000, 2026, 0).expect("save legacy");
+
+    // The viewed year's snapshots carry the cap; a year with no rows gives
+    // none — the app must query exactly that year, never reuse another's.
+    let owned = load_budget_snapshots_for_year(&conn, 1, 2026).expect("load");
+    assert!(owned.iter().any(|s| s.period_code == 0 && s.is_override && s.amount_cents == 120_000));
+    assert!(load_budget_snapshots_for_year(&conn, 1, 2008).expect("load").is_empty());
+
+    // Legacy fallback is year-scoped too.
+    let legacy_cap = |year: i32| -> i64 {
+      load_budgets(&conn, 1, year, 0).ok()
+        .and_then(|l| l.into_iter().find(|b| b.category == "Rent"))
+        .map(|b| b.amount_cents).unwrap_or(0)
+    };
+    assert_eq!(legacy_cap(2026), 30_000);
+    assert_eq!(legacy_cap(2008), 0);
+  }
 }

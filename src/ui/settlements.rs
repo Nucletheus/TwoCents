@@ -8,6 +8,9 @@ const ROW_H: f32 = 24.0;
 const SWATCH_R: f32 = 5.0;
 const INDENT: f32 = 16.0;
 const MIN_MEMBER_COL_W: f32 = 52.0;
+/// Right padding between the =/× buttons and the block border, so the
+/// clear button sits inset like the rest of the app's controls.
+const BTN_PAD: f32 = 6.0;
 const BLOCK_GAP: f32 = 6.0;
 /// Fixed block height: pinned header + 8 visible data rows + border allowance.
 const BLOCK_H: f32 = 9.0 * ROW_H + 4.0;
@@ -124,61 +127,62 @@ impl super::super::TwoCentsApp {
     creditors.sort_by(|a, b| b.1.cmp(&a.1));
 
     let two_or_more = members.len() >= 2;
-    ui.columns(2, |cols| {
-      let ui = &mut cols[0];
-      crate::ui::components::label_muted(ui, "Balances");
-      if !two_or_more {
-        crate::ui::components::label_muted(ui, "Add at least 2 household members to see settlements.");
-      } else {
-        for m in &members {
-          let balance = net.get(&m.name).copied().unwrap_or(0);
-          let color = if balance > 0 {
-            crate::ui::theme::current_accent()
-          } else if balance < 0 {
-            crate::ui::theme::current_error()
-          } else {
-            crate::ui::components::fg_muted(ui)
-          };
-          let sign = if balance >= 0 { "+" } else { "-" };
-          ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(SWATCH_R * 2.0, SWATCH_R * 2.0), egui::Sense::hover());
-            ui.painter().circle_filled(rect.center(), SWATCH_R, m.color);
-            ui.label(RichText::new(&m.name).strong());
-            ui.label(
-              RichText::new(format!("{}${}", sign, format_cents(balance)))
-                .color(color),
-            );
-          });
-        }
+    // ponytail: single column — balances, then suggested payments directly
+    // under them (was a side-by-side columns(2) split).
+    crate::ui::components::label_muted(ui, "Balances");
+    if !two_or_more {
+      crate::ui::components::label_muted(ui, "Add at least 2 household members to see settlements.");
+    } else {
+      for m in &members {
+        let balance = net.get(&m.name).copied().unwrap_or(0);
+        let color = if balance > 0 {
+          crate::ui::theme::accent()
+        } else if balance < 0 {
+          crate::ui::theme::error()
+        } else {
+          crate::ui::theme::fg_secondary()
+        };
+        let sign = if balance >= 0 { "+" } else { "-" };
+        ui.horizontal(|ui| {
+          let (rect, _) = ui.allocate_exact_size(egui::vec2(SWATCH_R * 2.0, SWATCH_R * 2.0), egui::Sense::hover());
+          ui.painter().circle_filled(rect.center(), SWATCH_R, m.color);
+          // ponytail: egui hardwires strong() text to widgets.active's
+          // fg_stroke (contrast-on-accent = near-black here), so strong
+          // labels must carry an explicit palette color.
+          ui.label(RichText::new(&m.name).strong().color(crate::ui::theme::fg_primary()));
+          ui.label(
+            RichText::new(format!("{}${}", sign, format_cents(balance)))
+              .color(color),
+          );
+        });
       }
 
-      let ui = &mut cols[1];
-      crate::ui::components::label_muted(ui, "Suggested payments");
-      if !two_or_more {
-        crate::ui::components::label_muted(ui, "—");
-      } else {
-        let mut di = 0;
-        let mut ci = 0;
-        let mut emitted = 0;
-        while di < debtors.len() && ci < creditors.len() {
-          let amount = debtors[di].1.min(creditors[ci].1);
-          if amount > 0 {
-            ui.label(
-              RichText::new(format!("{} pays {} ${}", debtors[di].0, creditors[ci].0, format_cents(amount)))
-                .small(),
-            );
-            emitted += 1;
-          }
-          debtors[di].1 -= amount;
-          creditors[ci].1 -= amount;
-          if debtors[di].1 == 0 { di += 1; }
-          if creditors[ci].1 == 0 { ci += 1; }
+      ui.add_space(crate::ui::theme_tokens::SPACE_1);
+      let mut di = 0;
+      let mut ci = 0;
+      let mut emitted = 0;
+      while di < debtors.len() && ci < creditors.len() {
+        let amount = debtors[di].1.min(creditors[ci].1);
+        if amount > 0 {
+          // ponytail: explicit fg_default — this line previously used egui's
+          // default text stroke, which is also what muted backgrounds show;
+          // in light variants it rendered washed-out (light-on-light).
+          ui.label(
+            RichText::new(format!("{} pays {} ${}", debtors[di].0, creditors[ci].0, format_cents(amount)))
+              .small()
+              .color(crate::ui::theme::fg_primary()),
+          );
+          emitted += 1;
         }
-        if emitted == 0 {
-          crate::ui::components::label_muted(ui, "All settled — no payments needed.");
-        }
+        debtors[di].1 -= amount;
+        creditors[ci].1 -= amount;
+        if debtors[di].1 == 0 { di += 1; }
+        if creditors[ci].1 == 0 { ci += 1; }
       }
-    });
+      if emitted == 0 {
+        crate::ui::components::label_muted(ui, "All settled — no payments needed.");
+      }
+    }
 
     ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
@@ -197,10 +201,10 @@ impl super::super::TwoCentsApp {
       .auto_shrink([false, false])
       .show(ui, |ui| {
         let w = ui.available_width();
-        // Runtime min block width: name col + btn col + one min-width member
-        // col per member. Keeps member cols from clamping (which pushed the
-        // "=" button past the block border into the neighbor block).
-        let min_block_w = NAME_COL_W + BTN_COL_W + num_members as f32 * MIN_MEMBER_COL_W;
+        // Planning minimum: name col + right-anchored btn col + one
+        // min-width member col per member. Decides how many blocks fit per
+        // wrap row; actual member cols just divide the leftover space.
+        let min_block_w = NAME_COL_W + BTN_COL_W + BTN_PAD + num_members as f32 * MIN_MEMBER_COL_W;
         let cols = ((w + BLOCK_GAP) / (min_block_w + BLOCK_GAP)).floor().max(1.0) as usize;
         let block_w = (w - BLOCK_GAP * (cols - 1) as f32) / cols as f32;
 
@@ -262,6 +266,11 @@ impl super::super::TwoCentsApp {
             egui::vec2(w, BLOCK_H),
             egui::Layout::left_to_right(egui::Align::TOP),
             |ui| {
+              // Zero x-spacing: the cols/block_w math above budgets only
+              // BLOCK_GAP between blocks, but the default item_spacing.x is
+              // also applied between every LTR child — overflowing the row
+              // and pushing the last block past the clip edge on wide screens.
+              ui.spacing_mut().item_spacing.x = 0.0;
               for (i, (parent, rows)) in row_blocks.iter().enumerate() {
                 if i > 0 {
                   ui.add_space(BLOCK_GAP);
@@ -369,11 +378,16 @@ fn render_category_block(
   apply_parent_to_subs: &mut Option<String>,
   apply_equal_split: &mut Option<String>,
 ) {
-  let sep_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
-  let faint_bg = ui.visuals().faint_bg_color;
-  let extreme_bg = ui.visuals().extreme_bg_color;
+  let sep_color = crate::ui::theme::border();
+  let faint_bg = crate::ui::theme::bg_secondary();
+  let extreme_bg = crate::ui::theme::bg_primary();
   let num_members = members.len();
-  let member_col_w = ((block_w - NAME_COL_W - BTN_COL_W) / num_members as f32).max(MIN_MEMBER_COL_W);
+  // Row content spans block_w - 2 (1px border each side). The button column
+  // is anchored to the right edge with BTN_PAD clearance, so the clear button
+  // never sits on the border; member columns take the remainder (no floor —
+  // a floor here is what used to push the buttons past the border).
+  let row_w = block_w - 2.0;
+  let member_col_w = ((row_w - NAME_COL_W - BTN_COL_W - BTN_PAD) / num_members as f32).max(1.0);
 
   // Header row lives inside each block so member columns stay aligned per block.
   // Fixed block height — short blocks leave empty space, tall ones scroll inside.
@@ -383,22 +397,18 @@ fn render_category_block(
     |ui| {
       let block_rect = ui.max_rect();
 
-      // Block border
-      ui.painter().rect_stroke(block_rect, 4.0, Stroke::new(1.0_f32, sep_color), egui::StrokeKind::Inside);
-
       let left0 = block_rect.left() + 1.0;
       let top0 = block_rect.top() + 1.0;
 
       // --- Header row IS the parent category row: swatch + name + member
       // names + parent-level =/× buttons (only when the block has subs). ---
       let hdr_y = top0;
-      let hdr_rect = egui::Rect::from_min_size(egui::pos2(left0, hdr_y), egui::vec2(block_w - 2.0, ROW_H));
+      let hdr_rect = egui::Rect::from_min_size(egui::pos2(left0, hdr_y), egui::vec2(row_w, ROW_H));
       let tint = Color32::from_rgba_unmultiplied(parent.color.r(), parent.color.g(), parent.color.b(), 35);
       ui.painter().rect_filled(hdr_rect, 0.0, tint);
-      ui.painter().line_segment(
-        [egui::pos2(left0, hdr_y + ROW_H), egui::pos2(left0 + block_w - 2.0, hdr_y + ROW_H)],
-        Stroke::new(1.0_f32, sep_color),
-      );
+      // Underline is painted AFTER the data ScrollArea below: scrolled row
+      // backgrounds bleed a few px above the scroll clip (clip_rect_margin)
+      // and were covering this line whenever the block had a scrollbar.
 
       let swatch_center = egui::pos2(left0 + 8.0 + SWATCH_R, hdr_y + ROW_H / 2.0);
       ui.painter().circle_filled(swatch_center, SWATCH_R, parent.color);
@@ -411,7 +421,7 @@ fn render_category_block(
         egui::Align2::LEFT_CENTER,
         parent.display_name,
         egui::FontId::proportional(13.0),
-        crate::ui::components::fg_default(ui),
+        crate::ui::theme::fg_primary(),
       );
 
       for (mi, m) in members.iter().enumerate() {
@@ -427,7 +437,7 @@ fn render_category_block(
       }
 
       if has_subs {
-        let btn_x = left0 + NAME_COL_W + num_members as f32 * member_col_w;
+        let btn_x = left0 + row_w - BTN_PAD - BTN_COL_W;
         let half_w = (BTN_COL_W - 4.0) / 2.0;
         let btn1_rect = egui::Rect::from_min_size(egui::pos2(btn_x, hdr_y), egui::vec2(half_w, ROW_H));
         let btn2_rect = egui::Rect::from_min_size(egui::pos2(btn_x + half_w + 4.0, hdr_y), egui::vec2(half_w, ROW_H));
@@ -460,7 +470,7 @@ fn render_category_block(
 
           for (row_idx, row) in rows.iter().enumerate() {
             let y0 = origin.y + row_idx as f32 * ROW_H;
-            let row_rect = egui::Rect::from_min_size(egui::pos2(left0, y0), egui::vec2(block_w - 2.0, ROW_H));
+            let row_rect = egui::Rect::from_min_size(egui::pos2(left0, y0), egui::vec2(row_w, ROW_H));
 
             // Row background
             if row.is_parent {
@@ -468,7 +478,7 @@ fn render_category_block(
               ui.painter().rect_filled(row_rect, 0.0, tint);
               // Bottom separator for parent
               ui.painter().line_segment(
-                [egui::pos2(left0, y0 + ROW_H), egui::pos2(left0 + block_w - 2.0, y0 + ROW_H)],
+                [egui::pos2(left0, y0 + ROW_H), egui::pos2(left0 + row_w, y0 + ROW_H)],
                 Stroke::new(1.0_f32, sep_color),
               );
             } else {
@@ -486,9 +496,9 @@ fn render_category_block(
             let name_x = swatch_x + SWATCH_R * 2.0 + 4.0;
             let font_size = if row.is_parent { 13.0 } else { 12.0 };
             let name_color = if row.is_parent {
-              crate::ui::components::fg_default(ui)
+              crate::ui::theme::fg_primary()
             } else {
-              crate::ui::components::fg_muted(ui)
+              crate::ui::theme::fg_secondary()
             };
             let font_id = egui::FontId::proportional(font_size);
 
@@ -534,8 +544,8 @@ fn render_category_block(
             }
 
             // Buttons — every data row gets "=" (equal split) and "×" (clear),
-            // compact and centered with padding on either side of their columns.
-            let btn_x = left0 + NAME_COL_W + num_members as f32 * member_col_w;
+            // compact and centered, anchored right with BTN_PAD clearance.
+            let btn_x = left0 + row_w - BTN_PAD - BTN_COL_W;
             let half_w = (BTN_COL_W - 4.0) / 2.0;
             let btn1_rect = egui::Rect::from_min_size(egui::pos2(btn_x, y0), egui::vec2(half_w, ROW_H));
             let btn2_rect = egui::Rect::from_min_size(egui::pos2(btn_x + half_w + 4.0, y0), egui::vec2(half_w, ROW_H));
@@ -555,6 +565,19 @@ fn render_category_block(
             });
           }
         });
+
+      // Block border — painted after the data ScrollArea so scrolled row
+      // backgrounds (which bleed up to clip_rect_margin past the scroll
+      // clip) can't cover the bottom edge when the block has a scrollbar.
+      ui.painter().rect_stroke(block_rect, 4.0, Stroke::new(1.0_f32, sep_color), egui::StrokeKind::Inside);
+
+      // Parent header underline — painted after the ScrollArea so scrolled
+      // row backgrounds (which can bleed up to clip_rect_margin above the
+      // scroll clip) can't cover it when the block has a scrollbar.
+      ui.painter().line_segment(
+        [egui::pos2(left0, hdr_y + ROW_H), egui::pos2(left0 + row_w, hdr_y + ROW_H)],
+        Stroke::new(1.0_f32, sep_color),
+      );
     },
   );
 }

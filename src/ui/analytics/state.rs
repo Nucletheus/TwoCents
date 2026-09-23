@@ -67,27 +67,6 @@ impl DatePreset {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AnalyticsGranularity {
-    Daily,
-    Weekly,
-    Monthly,
-    Quarterly,
-    Yearly,
-}
-
-impl AnalyticsGranularity {
-    pub fn label(&self) -> &'static str {
-        match self {
-            AnalyticsGranularity::Daily => "Daily",
-            AnalyticsGranularity::Weekly => "Weekly",
-            AnalyticsGranularity::Monthly => "Monthly",
-            AnalyticsGranularity::Quarterly => "Quarterly",
-            AnalyticsGranularity::Yearly => "Yearly",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FilterMode {
     Include,
     Exclude,
@@ -95,44 +74,50 @@ pub enum FilterMode {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AnalyticsChart {
-    TimeSeries,
     CategoryBreakdown,
     BudgetVsActual,
-    Candlestick,
     PeriodComparison,
 }
 
 impl AnalyticsChart {
     pub fn label(&self) -> &'static str {
         match self {
-            AnalyticsChart::TimeSeries => "Time Series",
             AnalyticsChart::CategoryBreakdown => "Category Breakdown",
             AnalyticsChart::BudgetVsActual => "Budget vs Actual",
-            AnalyticsChart::Candlestick => "Candlestick",
             AnalyticsChart::PeriodComparison => "Period Comparison",
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CandlestickPeriod {
-    Weekly,
-    Monthly,
+/// ponytail: shared Category/Cost row ordering for ALL three analytics
+/// charts (breakdown legend, BvA picker/chart, PC picker/chart) — one
+/// selection so switching tabs keeps your sort. Not persisted — no
+/// schema migration; defaults to Category ascending each launch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LegendSort {
+  #[default]
+  CategoryAsc,
+  CategoryDesc,
+  CostAsc,
+  CostDesc,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ComparisonMode {
-    SideBySide,
-    Overlay,
-    Delta,
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BudgetViewPeriod {
+    Week,
+    #[default]
+    Month,
+    Quarter,
+    Year,
 }
 
-impl ComparisonMode {
+impl BudgetViewPeriod {
     pub fn label(&self) -> &'static str {
         match self {
-            ComparisonMode::SideBySide => "Side-by-Side",
-            ComparisonMode::Overlay => "Overlay",
-            ComparisonMode::Delta => "Delta",
+            BudgetViewPeriod::Week => "Week",
+            BudgetViewPeriod::Month => "Month",
+            BudgetViewPeriod::Quarter => "Quarter",
+            BudgetViewPeriod::Year => "Year",
         }
     }
 }
@@ -142,44 +127,65 @@ pub struct AnalyticsState {
     pub date_start: Option<NaiveDate>,
     pub date_end: Option<NaiveDate>,
     pub date_preset: DatePreset,
-    pub granularity: AnalyticsGranularity,
     pub selected_categories: HashSet<String>,
     pub category_filter_mode: FilterMode,
     pub selected_members: HashSet<String>,
     pub selected_vendors: HashSet<String>,
     pub active_chart: AnalyticsChart,
-    pub candlestick_year: i32,
-    pub candlestick_period: CandlestickPeriod,
-    pub comparison_mode: ComparisonMode,
-    pub comparison_period_a_preset: DatePreset,
-    pub comparison_period_b_preset: DatePreset,
+    /// ponytail: Period Comparison includes income (positive) rows; the
+    /// other charts stay spending-only. Set on PC's scope clone only.
+    pub include_income: bool,
+    /// ponytail: Period Comparison granularity + selected indices into the
+    /// generated period list (see `period_comparison.rs`). Not persisted —
+    /// same precedent as legend_sort/budget_view_period; defaults to
+    /// Month, A = previous month, B = current month each launch.
+    pub comparison_granularity: BudgetViewPeriod,
+    pub comparison_period_a: usize,
+    pub comparison_period_b: usize,
     /// ponytail: one-shot flag. When set, every analytics chart resets
     /// its zoom/pan to the default bounds on its next draw, then clears
     /// the flag. Driven by the "Reset View" button so it works across
     /// all charts (the button lives outside the plot closures).
     pub reset_view: bool,
+    /// ponytail: which budget period Budget vs Actual compares against —
+    /// granularity tab + index into the 24-entry `comparison_periods`
+    /// list (0 = current). Not persisted — same precedent as
+    /// comparison_period_a/b; defaults to Month, current period, each
+    /// launch.
+    pub budget_view_period: BudgetViewPeriod,
+    pub budget_period_index: usize,
+    /// ponytail: Category Breakdown legend ordering.
+    pub legend_sort: LegendSort,
+    /// ponytail: plot reseed signatures (NOT persisted). egui_plot freezes
+    /// auto-bounds on first pan/zoom; when the data behind a chart changes
+    /// we call Plot::reset() so bounds auto-fit the new data again. Manual
+    /// zoom persists until the next change or the Reset View flag.
+    pub bva_sig: u64,
+    pub pc_sig: u64,
 }
 
 impl Default for AnalyticsState {
     fn default() -> Self {
-        let now = chrono::Local::now().date_naive();
         let (start, end) = DatePreset::Last3Months.date_range();
         Self {
             date_start: start,
             date_end: end,
             date_preset: DatePreset::Last3Months,
-            granularity: AnalyticsGranularity::Monthly,
             selected_categories: HashSet::new(),
             category_filter_mode: FilterMode::Include,
             selected_members: HashSet::new(),
             selected_vendors: HashSet::new(),
             active_chart: AnalyticsChart::CategoryBreakdown,
-            candlestick_year: now.year(),
-            candlestick_period: CandlestickPeriod::Monthly,
-            comparison_mode: ComparisonMode::Overlay,
-            comparison_period_a_preset: DatePreset::LastMonth,
-            comparison_period_b_preset: DatePreset::ThisMonth,
+            include_income: false,
+            comparison_granularity: BudgetViewPeriod::Month,
+            comparison_period_a: 1,
+            comparison_period_b: 0,
             reset_view: false,
+            budget_view_period: BudgetViewPeriod::Month,
+            budget_period_index: 0,
+            legend_sort: LegendSort::CategoryAsc,
+            bva_sig: 0,
+            pc_sig: 0,
         }
     }
 }
@@ -190,46 +196,57 @@ impl AnalyticsState {
             date_preset: date_preset_to_str(self.date_preset).to_string(),
             date_start: self.date_start.map(|d| d.format("%Y-%m-%d").to_string()),
             date_end: self.date_end.map(|d| d.format("%Y-%m-%d").to_string()),
-            granularity: granularity_to_str(self.granularity).to_string(),
             active_chart: chart_to_str(self.active_chart).to_string(),
             category_filter_mode: filter_mode_to_str(self.category_filter_mode).to_string(),
             selected_categories: string_set_to_json(&self.selected_categories),
             selected_members: string_set_to_json(&self.selected_members),
             selected_vendors: string_set_to_json(&self.selected_vendors),
-            candlestick_year: self.candlestick_year,
-            candlestick_period: candlestick_period_to_str(self.candlestick_period).to_string(),
-            comparison_mode: comparison_mode_to_str(self.comparison_mode).to_string(),
-            comparison_date_preset: date_preset_to_str(self.comparison_period_a_preset).to_string(),
+            // The comparison_mode column stays NOT NULL in the schema but
+            // is a legacy constant now — the view-mode UI was removed in
+            // favor of the single paired chart.
+            comparison_mode: "overlay".to_string(),
+            // The old A-preset column stays NOT NULL in the schema but is
+            // no longer read — granularity/A/B indices aren't persisted.
+            comparison_date_preset: "last_month".to_string(),
         }
     }
 
     pub fn from_row(row: &AnalyticsFilterRow) -> Self {
         let date_preset = str_to_date_preset(&row.date_preset);
-        let (default_start, default_end) = date_preset.date_range();
-        
-        let date_start = row.date_start.as_ref()
-            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-            .or(default_start);
-        let date_end = row.date_end.as_ref()
-            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-            .or(default_end);
-        
+
+        // ponytail: rolling presets must be recomputed at load, not
+        // restored — a saved "This Month" from Aug 15 reopened in Sep
+        // still showing August dates. Saved strings are honored only
+        // for Custom, where the user picked the exact bounds.
+        let (date_start, date_end) = if date_preset == DatePreset::Custom {
+            let parse = |s: &Option<String>| {
+                s.as_ref()
+                    .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+            };
+            (parse(&row.date_start), parse(&row.date_end))
+        } else {
+            date_preset.date_range()
+        };
+
         Self {
-            date_start,
-            date_end,
+            date_start: if date_preset == DatePreset::Custom { date_start.or_else(|| chrono::Local::now().date_naive().pred_opt()) } else { date_start },
+            date_end: if date_preset == DatePreset::Custom { date_end.or_else(|| Some(chrono::Local::now().date_naive())) } else { date_end },
             date_preset,
-            granularity: str_to_granularity(&row.granularity),
             selected_categories: json_to_string_set(&row.selected_categories),
             category_filter_mode: str_to_filter_mode(&row.category_filter_mode),
             selected_members: json_to_string_set(&row.selected_members),
             selected_vendors: json_to_string_set(&row.selected_vendors),
             active_chart: str_to_chart(&row.active_chart),
-            candlestick_year: row.candlestick_year,
-            candlestick_period: str_to_candlestick_period(&row.candlestick_period),
-            comparison_mode: str_to_comparison_mode(&row.comparison_mode),
-            comparison_period_a_preset: str_to_date_preset(&row.comparison_date_preset),
-            comparison_period_b_preset: DatePreset::ThisMonth,
+            include_income: false,
+            comparison_granularity: BudgetViewPeriod::Month,
+            comparison_period_a: 1,
+            comparison_period_b: 0,
             reset_view: false,
+            budget_view_period: BudgetViewPeriod::Month,
+            budget_period_index: 0,
+            legend_sort: LegendSort::CategoryAsc,
+            bva_sig: 0,
+            pc_sig: 0,
         }
     }
 }
@@ -261,43 +278,17 @@ fn str_to_date_preset(s: &str) -> DatePreset {
     }
 }
 
-fn granularity_to_str(g: AnalyticsGranularity) -> &'static str {
-    match g {
-        AnalyticsGranularity::Daily => "daily",
-        AnalyticsGranularity::Weekly => "weekly",
-        AnalyticsGranularity::Monthly => "monthly",
-        AnalyticsGranularity::Quarterly => "quarterly",
-        AnalyticsGranularity::Yearly => "yearly",
-    }
-}
-
-fn str_to_granularity(s: &str) -> AnalyticsGranularity {
-    match s {
-        "daily" => AnalyticsGranularity::Daily,
-        "weekly" => AnalyticsGranularity::Weekly,
-        "monthly" => AnalyticsGranularity::Monthly,
-        "quarterly" => AnalyticsGranularity::Quarterly,
-        "yearly" => AnalyticsGranularity::Yearly,
-        _ => AnalyticsGranularity::Monthly,
-    }
-}
-
 fn chart_to_str(c: AnalyticsChart) -> &'static str {
     match c {
-        AnalyticsChart::TimeSeries => "time_series",
         AnalyticsChart::CategoryBreakdown => "category_breakdown",
         AnalyticsChart::BudgetVsActual => "budget_vs_actual",
-        AnalyticsChart::Candlestick => "candlestick",
         AnalyticsChart::PeriodComparison => "period_comparison",
     }
 }
 
 fn str_to_chart(s: &str) -> AnalyticsChart {
     match s {
-        "time_series" => AnalyticsChart::TimeSeries,
-        "category_breakdown" => AnalyticsChart::CategoryBreakdown,
         "budget_vs_actual" => AnalyticsChart::BudgetVsActual,
-        "candlestick" => AnalyticsChart::Candlestick,
         "period_comparison" => AnalyticsChart::PeriodComparison,
         _ => AnalyticsChart::CategoryBreakdown,
     }
@@ -314,37 +305,6 @@ fn str_to_filter_mode(s: &str) -> FilterMode {
     match s {
         "exclude" => FilterMode::Exclude,
         _ => FilterMode::Include,
-    }
-}
-
-fn candlestick_period_to_str(p: CandlestickPeriod) -> &'static str {
-    match p {
-        CandlestickPeriod::Weekly => "weekly",
-        CandlestickPeriod::Monthly => "monthly",
-    }
-}
-
-fn str_to_candlestick_period(s: &str) -> CandlestickPeriod {
-    match s {
-        "weekly" => CandlestickPeriod::Weekly,
-        _ => CandlestickPeriod::Monthly,
-    }
-}
-
-fn comparison_mode_to_str(m: ComparisonMode) -> &'static str {
-    match m {
-        ComparisonMode::SideBySide => "side_by_side",
-        ComparisonMode::Overlay => "overlay",
-        ComparisonMode::Delta => "delta",
-    }
-}
-
-fn str_to_comparison_mode(s: &str) -> ComparisonMode {
-    match s {
-        "side_by_side" => ComparisonMode::SideBySide,
-        "overlay" => ComparisonMode::Overlay,
-        "delta" => ComparisonMode::Delta,
-        _ => ComparisonMode::Overlay,
     }
 }
 

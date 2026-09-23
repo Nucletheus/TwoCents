@@ -1,168 +1,294 @@
 use eframe::egui::{self, Color32, RichText};
-use egui_plot::{Bar, BarChart, Plot};
+use egui_plot::{Bar, BarChart, Line, Plot};
+use std::hash::{Hash, Hasher};
 
 use crate::models::*;
 use super::state::*;
 use super::aggregation::*;
+use super::charts_common::{comparison_periods, period_text};
 use super::empty_state::{render_no_budgets_state, render_empty_state};
+
+/// Everything the Budget vs Actual panel needs for ONE viewed period,
+/// pre-computed in mod.rs where the app's snapshot cache is reachable.
+pub struct BudgetPeriodBudgets {
+    pub budgets: std::collections::HashMap<String, i64>,
+    pub start: chrono::NaiveDate,
+    pub end: chrono::NaiveDate,
+    pub period_label: &'static str,
+    pub period_name: String,
+}
 
 pub fn render_budget_vs_actual_chart(
     ui: &mut egui::Ui,
     expenses: &[Expense],
-    budgets: &std::collections::HashMap<String, i64>,
+    priced_budgets: &BudgetPeriodBudgets,
     categories: &[Category],
-    state: &AnalyticsState,
-) {
-    if budgets.is_empty() {
+    state: &mut AnalyticsState,
+) -> bool {
+    if priced_budgets.budgets.is_empty() {
         render_no_budgets_state(ui);
-        return;
+        return false;
     }
 
-    let filtered = filter_expenses(expenses, state, &excluded_category_labels(categories));
-    let comparisons = compare_budget_vs_actual(&filtered, budgets, categories);
+    // ponytail: route through the shared filter like the other two charts —
+    // raw expenses mixed income rows and excluded categories (transfers)
+    // into the actuals. Date window = THIS budget period, not the global
+    // filter range (same scope trick Period Comparison uses).
+    let excluded = excluded_category_labels(categories);
+    let mut scope = state.clone();
+    scope.date_start = Some(priced_budgets.start);
+    scope.date_end = Some(priced_budgets.end);
+    let pool = filter_expenses(expenses, &scope, &excluded);
 
-    if comparisons.is_empty() {
-        render_empty_state(
-            ui,
-            "No budget or spending data",
-            Some("Set budgets and add expenses to see comparison"),
-        );
-        return;
-    }
+    // ponytail: the budget side must honor the category selection too —
+    // unioning unfiltered budgets with filtered actuals left every budget
+    // bar in place when you clicked a category (looked like a no-op).
+    let filtered_budgets: std::collections::HashMap<String, i64> = priced_budgets
+        .budgets
+        .iter()
+        .filter(|(cat, _)| passes_category_filter(state, cat))
+        .map(|(cat, amt)| (cat.clone(), *amt))
+        .collect();
+    let mut comparisons = compare_budget_vs_actual(&pool, &filtered_budgets, categories);
 
-    let has_actual = comparisons.iter().any(|c| c.actual > 0.0);
-    if !has_actual {
-        render_empty_state(
-            ui,
-            "No spending in selected period",
-            Some("Add expenses to compare against your budgets"),
-        );
-        return;
+    // Shared Category/Cost sort — same selection as the other two tabs.
+    // Rows are ordered BEFORE the reseed sig below, so toggling sort
+    // re-fits the plot to the new order.
+    super::picker::order_rows_by_legend_sort(
+        categories,
+        &mut comparisons,
+        state.legend_sort,
+        |c| &c.category,
+        |c| c.actual,
+    );
+
+    // ponytail: data/filters signature → Plot::reset() when it changes.
+    // egui_plot freezes auto-bounds on first pan/zoom, so a stale view
+    // never re-fits new data; reset re-seeds auto-fit, manual zoom
+    // persists until the next change (or the Reset View flag).
+    let mut sh = std::collections::hash_map::DefaultHasher::new();
+    priced_budgets.period_name.hash(&mut sh);
+    for c in &comparisons {
+        c.category.hash(&mut sh);
+        c.budgeted.to_bits().hash(&mut sh);
+        c.actual.to_bits().hash(&mut sh);
     }
+    let reseed = super::charts_common::take_reseed(&mut state.bva_sig, sh.finish(), state.reset_view);
+
+    // ponytail: picker rows come from a pool with the category selection
+    // cleared (same trick as the Breakdown legend) — building them from the
+    // filtered set collapsed the list down to what was already selected, so
+    // you could never click the next row, and an empty filtered result
+    // returned an empty state before the picker rendered at all.
+    let mut picker_scope = scope.clone();
+    picker_scope.selected_categories.clear();
+    let picker_pool = filter_expenses(expenses, &picker_scope, &excluded);
+    let mut row_comparisons =
+        compare_budget_vs_actual(&picker_pool, &priced_budgets.budgets, categories);
+    super::picker::order_rows_by_legend_sort(
+        categories,
+        &mut row_comparisons,
+        state.legend_sort,
+        |c| &c.category,
+        |c| c.actual,
+    );
+
+    // Granularity tabs (Week / Month / Quarter / Year) + a Period combo
+    // walking 24 same-granularity periods back — same controls as Period
+    // Comparison. Budgets/actuals re-price next frame from the new index
+    // (mod.rs prices per frame; input events always repaint).
+    let periods = comparison_periods(state.budget_view_period);
+    state.budget_period_index = state.budget_period_index.min(periods.len() - 1);
+    let sel = &periods[state.budget_period_index];
+    ui.horizontal_wrapped(|ui| {
+        crate::ui::components::label_strong(ui, "Granularity:");
+        for option in [
+            BudgetViewPeriod::Week,
+            BudgetViewPeriod::Month,
+            BudgetViewPeriod::Quarter,
+            BudgetViewPeriod::Year,
+        ] {
+            if crate::ui::components::tab_label_button(ui, state.budget_view_period == option, option.label()).clicked() {
+                state.budget_view_period = option;
+            }
+        }
+        ui.add_space(crate::ui::theme_tokens::SPACE_3);
+        crate::ui::components::label_strong(ui, "Period:");
+        egui::ComboBox::from_id_salt("bva_period_sel")
+            .selected_text(period_text(&sel.label, sel.start, sel.end))
+            .show_ui(ui, |ui| {
+                for (i, p) in periods.iter().enumerate() {
+                    if ui
+                        .selectable_label(
+                            state.budget_period_index == i,
+                            period_text(&p.label, p.start, p.end),
+                        )
+                        .clicked()
+                    {
+                        state.budget_period_index = i;
+                    }
+                }
+            });
+    });
+    crate::ui::components::label_muted(
+        ui,
+        &format!(
+            "Comparing {} {} budget vs actual spend ({} – {})",
+            priced_budgets.period_label,
+            priced_budgets.period_name,
+            priced_budgets.start.format("%b %d, %Y"),
+            priced_budgets.end.format("%b %d, %Y")
+        ),
+    );
+    ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
     // Capture the palette up-front. `plot.show` mutably borrows `ui`,
     // so we can't reach for color accessors inside the closure.
-    let budget_color = crate::ui::components::border_strong(ui);
-    let success = crate::ui::components::success_color(ui);
-    let error = crate::ui::components::error_color(ui);
-    let fg_default = crate::ui::components::fg_default(ui);
+    let zero_color = crate::ui::theme::border_strong();
+    let success = crate::ui::theme::success();
+    let error = crate::ui::theme::error();
+    let fg_default = crate::ui::theme::fg_primary();
 
-    // ponytail: cap the chart+panel row at the available viewport height
-    // so the page never grows taller than the window (kills the blank
-    // scroll area). The chart keeps its fixed height and the right panel
-    // scrolls internally.
+    // ponytail: chart + right column take the whole remaining viewport —
+    // the picker lives in the right column (under the summary card) now,
+    // so nothing is reserved at the bottom.
     let avail = ui.available_size_before_wrap();
-    let row_height = (avail.y - 16.0).max(360.0);
+    let row_height = (avail.y - 16.0).max(320.0);
+    let mut changed = false;
     ui.allocate_ui_with_layout(
         egui::vec2(avail.x, row_height),
         egui::Layout::left_to_right(egui::Align::TOP),
         |ui| {
-            // Left side: chart. One BarChart per category so the x-axis
-            // shows category names. The chart's auto-legend is hidden —
-            // the right panel has a custom legend that uses theme colors.
+            // Left side: horizontal paired bars — categories down the
+            // y-axis (sorted biggest-at-top), budget bar above actual bar,
+            // both extending right on a log $ axis (ln1p transform).
             ui.vertical(|ui| {
                 ui.set_max_height(row_height);
                 ui.set_width(avail.x - 320.0);
 
-                let max_budget = comparisons
-                    .iter()
-                    .map(|c| c.budgeted.max(c.actual))
-                    .fold(0.0_f64, f64::max);
-                let y_ceiling = if max_budget <= 0.0 { 100.0 } else { max_budget * 1.1 };
-
-                let cat_labels: Vec<String> =
-                    comparisons.iter().map(|c| subcategory_label(&c.category)).collect();
-                let x_formatter =
-                    move |x: egui_plot::GridMark, _r: &std::ops::RangeInclusive<f64>| -> String {
-                        let idx = x.value.round() as usize;
-                        cat_labels.get(idx).cloned().unwrap_or_default()
-                    };
-
-                let mut cat_color: std::collections::HashMap<String, Color32> =
-                    std::collections::HashMap::new();
-                for comp in comparisons.iter() {
-                    cat_color.entry(comp.category.clone()).or_insert(comp.color);
+                // ponytail: the category filter can empty the chart side
+                // (no budget/spend matches) while the picker rows above
+                // still list every category — show a message here instead
+                // of returning early, so the picker stays reachable.
+                if comparisons.is_empty() {
+                    render_empty_state(
+                        ui,
+                        "No budget or spending data",
+                        Some("Set budgets and add expenses to see comparison"),
+                    );
+                    return;
                 }
-                // Capture the muted color up-front so we don't try to
-                // borrow ui immutably inside the plot closure.
-                let budget_color = crate::ui::components::border_strong(ui);
-                // ponytail: thick zero line color, resolved up-front
-                // (can't borrow ui inside the plot closure).
-                let zero_color = budget_color;
+
+                let n = comparisons.len();
+                // y = n-1-i puts sorted-desc index 0 at the TOP of the axis;
+                // labels indexed the same way for the y formatter.
+                let labels_by_y: Vec<String> = comparisons
+                    .iter()
+                    .rev()
+                    .map(|c| super::charts_common::subcategory_label(&c.category))
+                    .collect();
+                let y_formatter = move |m: egui_plot::GridMark, _r: &std::ops::RangeInclusive<f64>| {
+                    let k = m.value.round();
+                    if (m.value - k).abs() < 0.01 && k >= 0.0 && (k as usize) < labels_by_y.len() {
+                        labels_by_y[k as usize].clone()
+                    } else {
+                        String::new()
+                    }
+                };
 
                 let plot = Plot::new("budget_vs_actual_plot")
-                    .height(400.0)
+                    .height(row_height)
                     .allow_zoom(true)
                     .allow_scroll(true)
-                    .default_y_bounds(0.0, y_ceiling)
-                    .show_grid([false, false])
-                    .x_axis_formatter(x_formatter)
-                    .label_formatter(|name, value| format!("{}: ${:.2}", name, value.y));
+                    .show_grid([true, false])
+                    .x_grid_spacer(super::charts_common::money_grid_spacer)
+                    .y_grid_spacer(super::charts_common::category_grid_spacer)
+                    .x_axis_formatter(|m, _r| super::charts_common::money_label(m.value.exp_m1()))
+                    .y_axis_formatter(y_formatter);
+                let plot = if reseed { plot.reset() } else { plot };
 
-                let n = comparisons.len() as f64;
-                let default_bounds =
-                    egui_plot::PlotBounds::from_min_max([0.0, 0.0], [n, y_ceiling]);
                 plot.show(ui, |plot_ui| {
-                    // Shared chart chrome: thick zero line + Reset View.
-                    // No negative tint (budget/actual are both >= 0).
-                    super::charts_common::apply_zero_line_and_bounds(
-                        plot_ui,
-                        default_bounds,
-                        None,
-                        zero_color,
-                        state.reset_view,
-                    );
+                    // Thick zero line (value axis is x for horizontal bars).
+                    plot_ui.vline(egui_plot::VLine::new("zero", 0.0).width(1.5_f32).color(zero_color));
                     for (i, comp) in comparisons.iter().enumerate() {
-                        let x = i as f64;
-                        let actual_color = cat_color
-                            .get(&comp.category)
-                            .copied()
-                            .unwrap_or(budget_color);
-                        let budget_outline = crate::ui::components::darker(budget_color, 0.18);
-                        let actual_outline = crate::ui::components::darker(actual_color, 0.18);
-                        let budget_bar = Bar::new(x - 0.18, comp.budgeted)
-                            .width(0.35)
-                            .fill(budget_color)
-                            .stroke(egui::Stroke::new(1.0_f32, budget_outline))
+                        let y = (n - 1 - i) as f64;
+                        // PC's exact scheme: both bars in the category's
+                        // color (budget dimmed 55%, actual full); the
+                        // connector between the tips carries direction —
+                        // green under budget, red over.
+                        let base = comp.color;
+                        let dim = base.gamma_multiply(0.55);
+                        let budget_x = super::charts_common::ln1p(comp.budgeted);
+                        let actual_x = super::charts_common::ln1p(comp.actual);
+                        let conn_color = if comp.variance >= 0.0 { success } else { error };
+                        plot_ui.line(
+                            Line::new(format!("conn_{i}"), vec![[budget_x, y + 0.18], [actual_x, y - 0.18]])
+                                .color(conn_color)
+                                .width(2.0_f32),
+                        );
+                        let budget_bar = Bar::new(y + 0.18, budget_x)
+                            .width(0.32)
+                            .fill(dim)
+                            .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(dim, 0.18)))
                             .name("Budget");
-                        let actual_bar = Bar::new(x + 0.18, comp.actual)
-                            .width(0.35)
-                            .fill(actual_color)
-                            .stroke(egui::Stroke::new(1.0_f32, actual_outline))
+                        let actual_bar = Bar::new(y - 0.18, actual_x)
+                            .width(0.32)
+                            .fill(base)
+                            .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(base, 0.18)))
                             .name("Actual");
-                        let chart = BarChart::new(&comp.category, vec![budget_bar, actual_bar]);
-                        plot_ui.bar_chart(chart);
+                        // ponytail: bar hover bypasses the plot-level
+                        // label_formatter entirely (egui_plot 0.37 routes
+                        // bars through add_rulers_and_text) — its default
+                        // text showed the raw ln-space coordinate
+                        // ("Budget 3.43"). element_formatter is the only
+                        // hook for bars; dollar values + signed variance.
+                        let category = comp.category.clone();
+                        let (budgeted, actual) = (comp.budgeted, comp.actual);
+                        let variance_text = if comp.variance >= 0.0 {
+                            format!("+${:.2} under budget", comp.variance)
+                        } else {
+                            format!("-${:.2} over budget", comp.variance.abs())
+                        };
+                        plot_ui.bar_chart(
+                            BarChart::new(&comp.category, vec![budget_bar, actual_bar])
+                                .horizontal()
+                                .element_formatter(Box::new(move |_bar, _chart| {
+                                    format!(
+                                        "{}\nBudget: ${:.2}\nActual: ${:.2}\nVariance: {}",
+                                        category, budgeted, actual, variance_text
+                                    )
+                                })),
+                        );
                     }
                 });
             });
 
             ui.add_space(crate::ui::theme_tokens::SPACE_5);
 
-            // Right side: themed summary card. Bounded to the row height
-            // and scrolls internally so it can't push the layout taller
-            // than the viewport.
+            // Right side: summary card on top (natural height, capped so
+            // the picker below always gets room), category picker filling
+            // the rest of the column — matches the Breakdown side list.
             ui.vertical(|ui| {
                 ui.set_max_height(row_height);
                 ui.set_width(300.0);
+                let card_cap = (row_height - 140.0).max(160.0);
                 crate::ui::components::card(ui).show(ui, |ui| {
-                    ui.set_max_height(row_height - 24.0);
                     egui::ScrollArea::vertical()
                         .id_salt("budget_summary_scroll")
-                        .auto_shrink([false, false])
+                        .max_height(card_cap)
                         .show(ui, |ui| {
                             crate::ui::components::heading_lg(ui, "Budget vs Actual");
                             ui.add_space(crate::ui::theme_tokens::SPACE_1);
                             crate::ui::components::label_muted(
                                 ui,
-                                "Bars compare monthly budget against actual spend, per category.",
+                                "Budget vs actual spend per category (log scale).",
+                            );
+                            crate::ui::components::label_muted(
+                                ui,
+                                "Bars: Budget (top) vs Actual (bottom); green = under budget, red = over",
                             );
                             ui.add_space(crate::ui::theme_tokens::SPACE_3);
 
-                            legend_row(ui, budget_color, "Budget");
-                            legend_row(ui, success, "Under budget");
-                            legend_row(ui, error, "Over budget");
-
-                            ui.add_space(crate::ui::theme_tokens::SPACE_3);
                             ui.separator();
                             ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
@@ -181,58 +307,41 @@ pub fn render_budget_vs_actual_chart(
                             stat_row(ui, "Total Budgeted", format!("${:.2}", total_budgeted), fg_default);
                             stat_row(ui, "Total Actual", format!("${:.2}", total_actual), fg_default);
                             stat_row(ui, "Variance", variance_text, variance_color);
-
-                            ui.add_space(crate::ui::theme_tokens::SPACE_3);
-                            ui.separator();
-                            ui.add_space(crate::ui::theme_tokens::SPACE_2);
-
-                            crate::ui::components::section_header(ui, "Categories");
-                            for comp in &comparisons {
-                                ui.horizontal(|ui| {
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(12.0, 12.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(rect, 2.0, comp.color);
-                                    ui.add_space(crate::ui::theme_tokens::SPACE_1);
-                                    let display_name = if comp.category.len() > 20 {
-                                        format!("{}…", &comp.category[..17])
-                                    } else {
-                                        comp.category.clone()
-                                    };
-                                    ui.label(display_name);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let variance_text = if comp.variance >= 0.0 {
-                                                format!("↑${:.2}", comp.variance.abs())
-                                            } else {
-                                                format!("↓${:.2}", comp.variance.abs())
-                                            };
-                                            let variance_color =
-                                                if comp.variance >= 0.0 { success } else { error };
-                                            ui.label(
-                                                RichText::new(variance_text).color(variance_color),
-                                            );
-                                        },
-                                    );
-                                });
-                                ui.add_space(crate::ui::theme_tokens::SPACE_1);
-                            }
                         });
                 });
+
+                ui.add_space(crate::ui::theme_tokens::SPACE_3);
+                // Same shared Category/Cost sort row as the other tabs —
+                // one selection orders every chart's rows + picker.
+                if super::picker::render_legend_sort(ui, state) {
+                    changed = true;
+                }
+                // Picker rows = unfiltered-by-category comparisons (full
+                // list); values are per-category variance.
+                let picker_h = ui.available_size_before_wrap().y.max(120.0);
+                let picker_rows: Vec<super::picker::PickerRow> = row_comparisons
+                    .iter()
+                    .map(|comp| {
+                        let (value, value_color) = if comp.variance >= 0.0 {
+                            (format!("↑${:.2}", comp.variance.abs()), success)
+                        } else {
+                            (format!("↓${:.2}", comp.variance.abs()), error)
+                        };
+                        super::picker::PickerRow {
+                            label: comp.category.clone(),
+                            color: comp.color,
+                            value: Some(value),
+                            value_color: Some(value_color),
+                        }
+                    })
+                    .collect();
+                if super::picker::render_category_picker(ui, state, &picker_rows, picker_h) {
+                    changed = true;
+                }
             });
         },
     );
-}
-
-fn legend_row(ui: &mut egui::Ui, color: Color32, label: &str) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 2.0, color);
-        ui.add_space(crate::ui::theme_tokens::SPACE_1);
-        ui.label(label);
-    });
+    changed
 }
 
 fn stat_row(ui: &mut egui::Ui, label: &str, value: String, value_color: Color32) {
@@ -242,14 +351,4 @@ fn stat_row(ui: &mut egui::Ui, label: &str, value: String, value_color: Color32)
             ui.label(RichText::new(value).color(value_color));
         });
     });
-}
-
-// ponytail: x-axis gets the bare subcategory name (after the " › " separator)
-// so dense budgets don't overflow the axis. The full "Parent › Sub" name is
-// still listed in the right panel and on hover.
-fn subcategory_label(full: &str) -> String {
-    match full.rfind(crate::models::CATEGORY_LABEL_SEP) {
-        Some(i) => full[i + crate::models::CATEGORY_LABEL_SEP.len()..].to_string(),
-        None => full.to_string(),
-    }
 }

@@ -1,35 +1,8 @@
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::NaiveDate;
 use std::collections::{HashMap, HashSet};
 
 use crate::models::*;
 use super::state::*;
-
-#[derive(Clone)]
-pub struct TimeSeriesPoint {
-    pub date: NaiveDate,
-    pub amount: f64,
-    pub cumulative: f64,
-}
-
-#[derive(Clone)]
-pub struct TimeSeriesSegment {
-    /// Category label, e.g. "Food > Groceries".
-    pub category: String,
-    /// Amount in dollars for this category within the period.
-    pub amount: f64,
-    /// Category color, used as the bar fill. Falls back to a neutral gray
-    /// when the user has not assigned a color (e.g. a category was deleted).
-    pub color: eframe::egui::Color32,
-}
-
-#[derive(Clone)]
-pub struct TimeSeriesBucket {
-    pub date: NaiveDate,
-    pub total: f64,
-    /// Segments stacked bottom-up. Order is stable (sorted by amount desc)
-    /// so the largest slice sits at the bottom of the bar.
-    pub segments: Vec<TimeSeriesSegment>,
-}
 
 #[derive(Clone)]
 pub struct CategoryTotal {
@@ -47,17 +20,6 @@ pub struct BudgetComparison {
     pub variance: f64,
     pub variance_pct: f64,
     pub color: eframe::egui::Color32,
-}
-
-#[derive(Clone)]
-pub struct CandlestickData {
-    pub period_start: chrono::NaiveDate,
-    pub period_end: chrono::NaiveDate,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub label: String,
 }
 
 #[derive(Clone)]
@@ -81,8 +43,34 @@ pub struct CategoryComparison {
     pub color: eframe::egui::Color32,
 }
 
+/// ponytail: char-boundary-safe truncation. `&s[..17]` panicked on
+/// "Parent › Sub" labels (`›` is 3 bytes UTF-8); slice by chars instead.
+pub fn truncate_label(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let kept: String = s.chars().take(max_chars).collect();
+        format!("{}…", kept.trim_end())
+    }
+}
+
 pub fn parse_expense_date(date_str: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+}
+
+/// ponytail: the include/exclude category predicate, shared by
+/// `filter_expenses` and the Budget-vs-Actual budget-side filter — the
+/// budget bars never used to honor the selection, so clicking a category
+/// in that tab looked like a no-op. Empty selection passes everything.
+pub fn passes_category_filter(state: &AnalyticsState, label: &str) -> bool {
+    if state.selected_categories.is_empty() {
+        return true;
+    }
+    let is_selected = state.selected_categories.contains(label);
+    match state.category_filter_mode {
+        FilterMode::Include => is_selected,
+        FilterMode::Exclude => !is_selected,
+    }
 }
 
 pub fn filter_expenses(
@@ -94,9 +82,13 @@ pub fn filter_expenses(
 
     expenses.iter()
         .filter(|exp| {
-            // ponytail: analytics are spending-only — income (positive rows)
-            // and excluded transfer/payment categories never chart.
-            if exp.amount_cents >= 0 || excluded_categories.contains(&exp.category) {
+            // ponytail: analytics default to spending-only — income
+            // (positive rows) chart only where the caller opts in via
+            // `state.include_income` (Period Comparison). Excluded
+            // transfer/payment categories never chart.
+            if (!state.include_income && exp.amount_cents >= 0)
+                || excluded_categories.contains(&exp.category)
+            {
                 return false;
             }
 
@@ -117,22 +109,10 @@ pub fn filter_expenses(
             }
             
             // Category filter
-            if !state.selected_categories.is_empty() {
-                let is_selected = state.selected_categories.contains(&exp.category);
-                match state.category_filter_mode {
-                    FilterMode::Include => {
-                        if !is_selected {
-                            return false;
-                        }
-                    }
-                    FilterMode::Exclude => {
-                        if is_selected {
-                            return false;
-                        }
-                    }
-                }
+            if !passes_category_filter(state, &exp.category) {
+                return false;
             }
-            
+
             // Member filter
             if !state.selected_members.is_empty() {
                 if !state.selected_members.contains(&exp.member) {
@@ -150,210 +130,6 @@ pub fn filter_expenses(
             true
         })
         .cloned()
-        .collect()
-}
-
-pub fn aggregate_time_series(
-    expenses: &[Expense],
-    granularity: AnalyticsGranularity,
-    start: NaiveDate,
-    end: NaiveDate,
-) -> Vec<TimeSeriesPoint> {
-    // Group expenses by period
-    let mut period_totals: HashMap<NaiveDate, f64> = HashMap::new();
-    
-    for exp in expenses {
-        if let Some(exp_date) = parse_expense_date(&exp.date) {
-            let period_start = match granularity {
-                AnalyticsGranularity::Daily => exp_date,
-                AnalyticsGranularity::Weekly => {
-                    let weekday = exp_date.weekday().num_days_from_monday();
-                    exp_date - Duration::days(weekday as i64)
-                }
-                AnalyticsGranularity::Monthly => {
-                    exp_date.with_day(1).unwrap()
-                }
-                AnalyticsGranularity::Quarterly => {
-                    let quarter_start_month = ((exp_date.month() - 1) / 3) * 3 + 1;
-                    exp_date.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
-                }
-                AnalyticsGranularity::Yearly => {
-                    exp_date.with_ordinal(1).unwrap()
-                }
-            };
-            
-            *period_totals.entry(period_start).or_insert(0.0) += exp.amount_cents as f64 / 100.0;
-        }
-    }
-    
-    // Generate all periods in range
-    let mut periods: Vec<NaiveDate> = Vec::new();
-    let mut current = match granularity {
-        AnalyticsGranularity::Daily => start,
-        AnalyticsGranularity::Weekly => {
-            let weekday = start.weekday().num_days_from_monday();
-            start - Duration::days(weekday as i64)
-        }
-        AnalyticsGranularity::Monthly => start.with_day(1).unwrap(),
-        AnalyticsGranularity::Quarterly => {
-            let quarter_start_month = ((start.month() - 1) / 3) * 3 + 1;
-            start.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
-        }
-        AnalyticsGranularity::Yearly => start.with_ordinal(1).unwrap(),
-    };
-    
-    while current <= end {
-        periods.push(current);
-        current = match granularity {
-            AnalyticsGranularity::Daily => current + Duration::days(1),
-            AnalyticsGranularity::Weekly => current + Duration::days(7),
-            AnalyticsGranularity::Monthly => {
-                if current.month() == 12 {
-                    current.with_year(current.year() + 1).unwrap().with_month(1).unwrap()
-                } else {
-                    current.with_month(current.month() + 1).unwrap()
-                }
-            }
-            AnalyticsGranularity::Quarterly => {
-                let next_month = current.month() + 3;
-                if next_month > 12 {
-                    current.with_year(current.year() + 1).unwrap().with_month(next_month - 12).unwrap()
-                } else {
-                    current.with_month(next_month).unwrap()
-                }
-            }
-            AnalyticsGranularity::Yearly => {
-                current.with_year(current.year() + 1).unwrap()
-            }
-        };
-    }
-    
-    // Build time series with cumulative totals
-    let mut cumulative = 0.0;
-    periods.iter()
-        .map(|&period| {
-            let amount = period_totals.get(&period).copied().unwrap_or(0.0);
-            cumulative += amount;
-            TimeSeriesPoint {
-                date: period,
-                amount,
-                cumulative,
-            }
-        })
-        .collect()
-}
-
-/// ponytail: per-period, per-category breakdown used by the time-series stacked
-/// bar chart. Walks the same period grid as `aggregate_time_series` but
-/// produces, for each period, a list of (category, amount, color) segments
-/// that sum to the period total. Categories that don't appear in a given
-/// period are omitted from that period's segments (the bar has no slice for
-/// them, naturally).
-pub fn aggregate_time_series_by_category(
-    expenses: &[Expense],
-    categories: &[Category],
-    granularity: AnalyticsGranularity,
-    start: NaiveDate,
-    end: NaiveDate,
-) -> Vec<TimeSeriesBucket> {
-    // Build category color map (full_label -> color).
-    let cat_parents = category_parent_map(categories);
-    let mut category_colors: HashMap<String, eframe::egui::Color32> = HashMap::new();
-    for category in categories {
-        let label = category.full_label(&cat_parents);
-        category_colors.insert(label, category.color);
-    }
-    let fallback = eframe::egui::Color32::from_rgb(128, 128, 128);
-
-    // Per-period category totals.
-    let mut period_buckets: HashMap<NaiveDate, HashMap<String, f64>> = HashMap::new();
-
-    for exp in expenses {
-        if let Some(exp_date) = parse_expense_date(&exp.date) {
-            let period_start = match granularity {
-                AnalyticsGranularity::Daily => exp_date,
-                AnalyticsGranularity::Weekly => {
-                    let weekday = exp_date.weekday().num_days_from_monday();
-                    exp_date - Duration::days(weekday as i64)
-                }
-                AnalyticsGranularity::Monthly => exp_date.with_day(1).unwrap(),
-                AnalyticsGranularity::Quarterly => {
-                    let quarter_start_month = ((exp_date.month() - 1) / 3) * 3 + 1;
-                    exp_date.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
-                }
-                AnalyticsGranularity::Yearly => exp_date.with_ordinal(1).unwrap(),
-            };
-            *period_buckets
-                .entry(period_start)
-                .or_default()
-                .entry(exp.category.clone())
-                .or_insert(0.0) += exp.amount_cents as f64 / 100.0;
-        }
-    }
-
-    // Generate the same period grid `aggregate_time_series` would, so the
-    // x-axis labels match exactly.
-    let mut periods: Vec<NaiveDate> = Vec::new();
-    let mut current = match granularity {
-        AnalyticsGranularity::Daily => start,
-        AnalyticsGranularity::Weekly => {
-            let weekday = start.weekday().num_days_from_monday();
-            start - Duration::days(weekday as i64)
-        }
-        AnalyticsGranularity::Monthly => start.with_day(1).unwrap(),
-        AnalyticsGranularity::Quarterly => {
-            let quarter_start_month = ((start.month() - 1) / 3) * 3 + 1;
-            start.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
-        }
-        AnalyticsGranularity::Yearly => start.with_ordinal(1).unwrap(),
-    };
-    while current <= end {
-        periods.push(current);
-        current = match granularity {
-            AnalyticsGranularity::Daily => current + Duration::days(1),
-            AnalyticsGranularity::Weekly => current + Duration::days(7),
-            AnalyticsGranularity::Monthly => {
-                if current.month() == 12 {
-                    current.with_year(current.year() + 1).unwrap().with_month(1).unwrap()
-                } else {
-                    current.with_month(current.month() + 1).unwrap()
-                }
-            }
-            AnalyticsGranularity::Quarterly => {
-                let next_month = current.month() + 3;
-                if next_month > 12 {
-                    current.with_year(current.year() + 1).unwrap().with_month(next_month - 12).unwrap()
-                } else {
-                    current.with_month(next_month).unwrap()
-                }
-            }
-            AnalyticsGranularity::Yearly => current.with_year(current.year() + 1).unwrap(),
-        };
-    }
-
-    // Build the buckets. Empty periods still get a bucket (total 0, no
-    // segments) so the x-axis stays consistent.
-    periods
-        .into_iter()
-        .map(|period| {
-            let mut cat_totals = period_buckets.remove(&period).unwrap_or_default();
-            // Drop zero-amount entries defensively.
-            cat_totals.retain(|_, v| *v > 0.0);
-            let total: f64 = cat_totals.values().sum();
-            // Sort largest-first so the largest slice sits at the bottom of
-            // the stacked bar (consistent with the donut chart's largest-first
-            // arrangement).
-            let mut segments: Vec<TimeSeriesSegment> = cat_totals
-                .into_iter()
-                .map(|(category, amount)| TimeSeriesSegment {
-                    color: category_colors.get(&category).copied().unwrap_or(fallback),
-                    category,
-                    amount,
-                })
-                .collect();
-            segments.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap_or(std::cmp::Ordering::Equal));
-            TimeSeriesBucket { date: period, total, segments }
-        })
         .collect()
 }
 
@@ -377,8 +153,9 @@ pub fn aggregate_by_category(
         *category_totals.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents as f64 / 100.0;
     }
     
-    // Calculate total for percentages
-    let total: f64 = category_totals.values().sum();
+    // Calculate total for percentages — abs, since expense amounts are
+    // negative (spend) and a signed total <= 0 forced every share to 0.0%.
+    let total: f64 = category_totals.values().map(|v| v.abs()).sum();
     
     // Build result with colors and percentages
     let mut result: Vec<CategoryTotal> = category_totals
@@ -387,7 +164,7 @@ pub fn aggregate_by_category(
             let color = category_colors.get(&category).copied()
                 .unwrap_or(eframe::egui::Color32::from_rgb(128, 128, 128));
             let percentage = if total > 0.0 {
-                (amount / total) * 100.0
+                (amount.abs() / total) * 100.0
             } else {
                 0.0
             };
@@ -400,8 +177,15 @@ pub fn aggregate_by_category(
         })
         .collect();
     
-    // Sort by amount descending
-    result.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by amount descending, name ascending on ties — the HashMap
+    // iteration order behind `category_totals` is not stable across
+    // frames, so equal amounts used to reshuffle every repaint.
+    result.sort_by(|a, b| {
+        b.amount
+            .partial_cmp(&a.amount)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.category.cmp(&b.category))
+    });
     
     result
 }
@@ -440,7 +224,11 @@ pub fn compare_budget_vs_actual(
         .into_iter()
         .map(|category| {
             let budgeted = budgets.get(&category).copied().unwrap_or(0) as f64 / 100.0;
-            let actual = actual_totals.get(&category).copied().unwrap_or(0.0);
+            // abs: filter_expenses already drops income rows, but when this
+            // runs on raw expenses (legacy callers) netting is wrong either
+            // way — "actual spend" is a magnitude, and every bar/variance in
+            // Budget vs Actual now points the same direction.
+            let actual = actual_totals.get(&category).copied().unwrap_or(0.0).abs();
             let variance = budgeted - actual;
             let variance_pct = if budgeted > 0.0 {
                 (variance / budgeted) * 100.0
@@ -464,145 +252,16 @@ pub fn compare_budget_vs_actual(
         })
         .collect();
     
-    // Sort by absolute variance descending (biggest differences first)
-    result.sort_by(|a, b| b.variance.abs().partial_cmp(&a.variance.abs()).unwrap_or(std::cmp::Ordering::Equal));
-    
-    result
-}
-
-pub fn aggregate_candlestick(
-    expenses: &[Expense],
-    granularity: AnalyticsGranularity,
-    start: NaiveDate,
-    end: NaiveDate,
-) -> Vec<CandlestickData> {
-    // Group expenses by period and calculate daily cumulative spending within each period
-    let mut period_expenses: HashMap<NaiveDate, Vec<(NaiveDate, f64)>> = HashMap::new();
-    
-    for exp in expenses {
-        if let Some(exp_date) = parse_expense_date(&exp.date) {
-            let period_start = match granularity {
-                AnalyticsGranularity::Daily => exp_date,
-                AnalyticsGranularity::Weekly => {
-                    let weekday = exp_date.weekday().num_days_from_monday();
-                    exp_date - Duration::days(weekday as i64)
-                }
-                AnalyticsGranularity::Monthly => {
-                    exp_date.with_day(1).unwrap()
-                }
-                AnalyticsGranularity::Quarterly => {
-                    let quarter_start_month = ((exp_date.month() - 1) / 3) * 3 + 1;
-                    exp_date.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
-                }
-                AnalyticsGranularity::Yearly => {
-                    exp_date.with_ordinal(1).unwrap()
-                }
-            };
-            
-            let amount = exp.amount_cents as f64 / 100.0;
-            period_expenses.entry(period_start).or_default().push((exp_date, amount));
-        }
-    }
-    
-    // Generate all periods in range
-    let mut periods: Vec<NaiveDate> = Vec::new();
-    let mut current = match granularity {
-        AnalyticsGranularity::Daily => start,
-        AnalyticsGranularity::Weekly => {
-            let weekday = start.weekday().num_days_from_monday();
-            start - Duration::days(weekday as i64)
-        }
-        AnalyticsGranularity::Monthly => start.with_day(1).unwrap(),
-        AnalyticsGranularity::Quarterly => {
-            let quarter_start_month = ((start.month() - 1) / 3) * 3 + 1;
-            start.with_day(1).unwrap().with_month(quarter_start_month).unwrap()
-        }
-        AnalyticsGranularity::Yearly => start.with_ordinal(1).unwrap(),
-    };
-    
-    while current <= end {
-        periods.push(current);
-        current = match granularity {
-            AnalyticsGranularity::Daily => current + Duration::days(1),
-            AnalyticsGranularity::Weekly => current + Duration::days(7),
-            AnalyticsGranularity::Monthly => {
-                if current.month() == 12 {
-                    current.with_year(current.year() + 1).unwrap().with_month(1).unwrap()
-                } else {
-                    current.with_month(current.month() + 1).unwrap()
-                }
-            }
-            AnalyticsGranularity::Quarterly => {
-                let next_month = current.month() + 3;
-                if next_month > 12 {
-                    current.with_year(current.year() + 1).unwrap().with_month(next_month - 12).unwrap()
-                } else {
-                    current.with_month(next_month).unwrap()
-                }
-            }
-            AnalyticsGranularity::Yearly => {
-                current.with_year(current.year() + 1).unwrap()
-            }
-        };
-    }
-    
-    // Build candlestick data for each period
-    let mut result = Vec::new();
-    
-    for (i, &period_start) in periods.iter().enumerate() {
-        let period_end = if i + 1 < periods.len() {
-            periods[i + 1] - Duration::days(1)
-        } else {
-            end
-        };
-        
-        let mut daily_expenses = period_expenses.get(&period_start).cloned().unwrap_or_default();
-        daily_expenses.sort_by_key(|(date, _)| *date);
-        
-        // Calculate cumulative spending within the period
-        let mut cumulative = 0.0;
-        let mut daily_cumulative: Vec<f64> = Vec::new();
-        
-        for (_, amount) in &daily_expenses {
-            cumulative += amount;
-            daily_cumulative.push(cumulative);
-        }
-        
-        // OHLC values
-        let open = if !daily_cumulative.is_empty() {
-            daily_cumulative[0]
-        } else {
-            0.0
-        };
-        
-        let close = cumulative;
-        
-        let high = daily_cumulative.iter().cloned().fold(0.0_f64, f64::max);
-        let low = daily_cumulative.iter().cloned().fold(f64::MAX, f64::min);
-        let low = if low == f64::MAX { 0.0 } else { low };
-        
-        // Generate label
-        let label = match granularity {
-            AnalyticsGranularity::Daily => period_start.format("%b %d").to_string(),
-            AnalyticsGranularity::Weekly => format!("W{}", period_start.iso_week().week()),
-            AnalyticsGranularity::Monthly => period_start.format("%b %Y").to_string(),
-            AnalyticsGranularity::Quarterly => {
-                let quarter = (period_start.month() - 1) / 3 + 1;
-                format!("Q{} {}", quarter, period_start.year())
-            }
-            AnalyticsGranularity::Yearly => period_start.format("%Y").to_string(),
-        };
-        
-        result.push(CandlestickData {
-            period_start,
-            period_end,
-            open,
-            high,
-            low,
-            close,
-            label,
-        });
-    }
+    // Sort by absolute variance descending (biggest differences first),
+    // name ascending on ties — equal |variance| rows reshuffled every
+    // frame otherwise (HashSet union order is not stable).
+    result.sort_by(|a, b| {
+        b.variance
+            .abs()
+            .partial_cmp(&a.variance.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.category.cmp(&b.category))
+    });
     
     result
 }
@@ -622,14 +281,16 @@ pub fn aggregate_period_comparison(
         category_colors.insert(label, category.color);
     }
     
+    // gross magnitude: each expense contributes its absolute amount (income
+    // reads positive), so inflows never net against outflows in a category.
     let mut totals_a: HashMap<String, f64> = HashMap::new();
     for exp in expenses_a {
-        *totals_a.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents as f64 / 100.0;
+        *totals_a.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents.abs() as f64 / 100.0;
     }
     
     let mut totals_b: HashMap<String, f64> = HashMap::new();
     for exp in expenses_b {
-        *totals_b.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents as f64 / 100.0;
+        *totals_b.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents.abs() as f64 / 100.0;
     }
     
     let period_a_total: f64 = totals_a.values().sum();
@@ -679,7 +340,15 @@ pub fn aggregate_period_comparison(
         })
         .collect();
     
-    category_comparisons.sort_by(|a, b| b.difference.abs().partial_cmp(&a.difference.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    // |difference| desc, name asc on ties — zero-difference rows (and any
+    // other ties) reshuffled frame-to-frame off the HashSet union order.
+    category_comparisons.sort_by(|a, b| {
+        b.difference
+            .abs()
+            .partial_cmp(&a.difference.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.category.cmp(&b.category))
+    });
     
     PeriodComparisonData {
         period_a_label: period_a_label.to_string(),
@@ -689,5 +358,89 @@ pub fn aggregate_period_comparison(
         difference,
         difference_pct,
         category_comparisons,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with(selected: &[&str], mode: FilterMode) -> AnalyticsState {
+        AnalyticsState {
+            category_filter_mode: mode,
+            selected_categories: selected.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn passes_category_filter_modes() {
+        // Empty selection passes everything.
+        let state = state_with(&[], FilterMode::Include);
+        assert!(passes_category_filter(&state, "Food"));
+        assert!(passes_category_filter(&state, "Rent"));
+
+        // Include: only selected labels pass.
+        let state = state_with(&["Food"], FilterMode::Include);
+        assert!(passes_category_filter(&state, "Food"));
+        assert!(!passes_category_filter(&state, "Rent"));
+
+        // Exclude: selected labels are dropped, everything else passes.
+        let state = state_with(&["Food"], FilterMode::Exclude);
+        assert!(!passes_category_filter(&state, "Food"));
+        assert!(passes_category_filter(&state, "Rent"));
+    }
+
+    fn expense(category: &str, cents: i64) -> Expense {
+        Expense {
+            id: 0,
+            date: "2026-09-01".to_string(),
+            amount_input: String::new(),
+            amount_cents: cents,
+            member: "Me".to_string(),
+            category: category.to_string(),
+            vendor: String::new(),
+            description: String::new(),
+            account_id: 0,
+            account: String::new(),
+        }
+    }
+
+    fn cat(id: i64, name: &str) -> Category {
+        Category {
+            id,
+            name: name.to_string(),
+            parent_id: None,
+            color: eframe::egui::Color32::GRAY,
+            excluded: false,
+        }
+    }
+
+    #[test]
+    fn period_comparison_abs_and_stable_tie_order() {
+        let categories = vec![cat(1, "Alpha"), cat(2, "Beta")];
+        // Equal |difference| (both zero): name tie-break must give a
+        // deterministic order regardless of HashMap union order.
+        let a = vec![expense("Alpha", -500), expense("Beta", -500)];
+        let b = vec![expense("Alpha", -500), expense("Beta", -500)];
+        let data = aggregate_period_comparison(&a, &b, "A", "B", &categories);
+        let names: Vec<&str> = data
+            .category_comparisons
+            .iter()
+            .map(|c| c.category.as_str())
+            .collect();
+        assert_eq!(names, vec!["Alpha", "Beta"]);
+
+        // Per-category and total sums are magnitudes: spending −$10 and
+        // income +$30 in period B both read positive, totals = Σ|cat|.
+        let a = vec![expense("Alpha", -1000)];
+        let b = vec![expense("Alpha", -1000), expense("Alpha", 3000)];
+        let data = aggregate_period_comparison(&a, &b, "A", "B", &categories);
+        let alpha = &data.category_comparisons[0];
+        assert_eq!(alpha.period_a_amount, 10.0);
+        assert_eq!(alpha.period_b_amount, 40.0);
+        assert_eq!(data.period_a_total, 10.0);
+        assert_eq!(data.period_b_total, 40.0);
+        assert_eq!(data.difference, 30.0);
     }
 }

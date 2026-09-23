@@ -19,11 +19,19 @@ impl TwoCentsApp {
     }
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("is_rendering_duplicate_grid"), true));
 
-    let screen_rect = ctx.screen_rect();
-    let pad_x = if screen_rect.width() < 900.0 { 16.0 } else { 60.0 };
-    let pad_y = if screen_rect.height() < 600.0 { 16.0 } else { 60.0 };
-    let win_w = (screen_rect.width() - pad_x * 2.0).clamp(320.0, 1200.0);
-    let win_h = (screen_rect.height() - pad_y * 2.0).clamp(300.0, 800.0);
+    let screen_rect = ctx.content_rect();
+    let pad_x = if screen_rect.width() < 900.0 { 21.0 } else { 60.0 };
+    let pad_y = if screen_rect.height() < 600.0 { 21.0 } else { 60.0 };
+    // fixed_size constrains the CONTENT; the modal frame wraps it in its own
+    // inner margin + stroke. Subtract that chrome or the panel is wider than
+    // the window (pad 42 < chrome 50 → the panel sat flush on both edges).
+    let frame = themed_modal_frame(ctx);
+    let chrome_x = (frame.inner_margin.left + frame.inner_margin.right) as f32
+      + 2.0 * crate::ui::theme_tokens::BORDER_W;
+    let chrome_y = (frame.inner_margin.top + frame.inner_margin.bottom) as f32
+      + 2.0 * crate::ui::theme_tokens::BORDER_W;
+    let win_w = (screen_rect.width() - pad_x * 2.0 - chrome_x).clamp(320.0, 1200.0);
+    let win_h = (screen_rect.height() - pad_y * 2.0 - chrome_y).clamp(300.0, 800.0);
 
     egui::Window::new("Possible Duplicates Review")
       .title_bar(false)
@@ -31,7 +39,7 @@ impl TwoCentsApp {
       .collapsible(false)
       .fixed_size([win_w, win_h])
       .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-      .frame(themed_modal_frame(ctx))
+      .frame(frame)
       .show(ctx, |ui| {
         // Escape handling: only close the modal if nothing is being edited.
         // If a cell is being edited, let the grid handle Escape first (cancel edit).
@@ -84,7 +92,7 @@ impl TwoCentsApp {
         let mut autocomplete_selection = self.autocomplete_selection;
 
         // ponytail: shared grid_table_frame so the three grids have identical chrome.
-        crate::ui::components::grid_table_frame(ui)
+        let frame_resp = crate::ui::components::grid_table_frame(ui)
           .show(ui, |ui| {
             let old_spacing = ui.spacing().item_spacing;
             ui.style_mut().spacing.item_spacing = egui::Vec2::ZERO;
@@ -202,6 +210,8 @@ impl TwoCentsApp {
               }
             }
           });
+        // Frame stroke on top of the scrolled content (clip_rect_margin bleed).
+        crate::ui::components::repaint_grid_frame_stroke(ui, frame_resp.response.rect);
       });
   }
 
