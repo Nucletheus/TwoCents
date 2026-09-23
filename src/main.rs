@@ -266,6 +266,8 @@ fn main() -> eframe::Result<()> {
       // whenever they scroll out of the row window; it also paints 2px red
       // rects over the grid while scrolling. Virtualized grids legitimately
       // stop creating out-of-view rows between passes — not an id bug.
+      // (`Style::debug` itself only exists in debug builds.)
+      #[cfg(debug_assertions)]
       cc.egui_ctx.all_styles_mut(|s| s.debug.warn_if_rect_changes_id = false);
       // ponytail: egui's proportional chain is Ubuntu-Light → emojis (no
       // Hack), and ↑↓ — used in the sort labels and variance values — only
