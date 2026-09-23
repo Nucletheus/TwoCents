@@ -1,15 +1,15 @@
+use chrono::NaiveDate;
 use eframe::egui::{self, RichText};
 use egui_plot::{Bar, BarChart, Line, Plot};
-use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::models::*;
 use super::aggregation::*;
-use super::state::*;
 use super::charts_common::{comparison_periods, period_text};
 use super::empty_state::render_empty_state;
 use super::picker::{render_category_picker, render_legend_sort, PickerRow};
+use super::state::*;
+use crate::models::*;
 
 /// Direction color: green = movement in the category's good direction —
 /// spending down, income up. Near-equal rows are neutral.
@@ -30,7 +30,11 @@ fn direction_color(
     } else {
         b < a
     };
-    if good { success } else { error }
+    if good {
+        success
+    } else {
+        error
+    }
 }
 
 pub fn render_period_comparison_chart(
@@ -177,12 +181,11 @@ pub fn render_period_comparison_chart(
     let (filtered_a, filtered_b) = split(&pool);
     let (picker_a, picker_b) = split(&picker_pool);
 
-    let labels = (
-        format!("A · {}", pa.label),
-        format!("B · {}", pb.label),
-    );
-    let mut data = aggregate_period_comparison(&filtered_a, &filtered_b, &labels.0, &labels.1, categories);
-    let mut picker_data = aggregate_period_comparison(&picker_a, &picker_b, &labels.0, &labels.1, categories);
+    let labels = (format!("A · {}", pa.label), format!("B · {}", pb.label));
+    let mut data =
+        aggregate_period_comparison(&filtered_a, &filtered_b, &labels.0, &labels.1, categories);
+    let mut picker_data =
+        aggregate_period_comparison(&picker_a, &picker_b, &labels.0, &labels.1, categories);
 
     // empty state keys off the UNFILTERED rows — an empty
     // *filtered* result still renders the shell + picker below so the
@@ -226,7 +229,8 @@ pub fn render_period_comparison_chart(
         c.period_a_amount.to_bits().hash(&mut sh);
         c.period_b_amount.to_bits().hash(&mut sh);
     }
-    let reseed = super::charts_common::take_reseed(&mut state.pc_sig, sh.finish(), state.reset_view);
+    let reseed =
+        super::charts_common::take_reseed(&mut state.pc_sig, sh.finish(), state.reset_view);
 
     // Summary strip at the TOP — pinning it below the chart is what kept
     // the plot from filling its container.
@@ -337,13 +341,19 @@ fn render_summary_strip(ui: &mut egui::Ui, data: &PeriodComparisonData) {
 
     ui.horizontal_wrapped(|ui| {
         ui.label(
-            RichText::new(format!("{}: ${:.2}", data.period_a_label, data.period_a_total))
-                .color(fg_default),
+            RichText::new(format!(
+                "{}: ${:.2}",
+                data.period_a_label, data.period_a_total
+            ))
+            .color(fg_default),
         );
         ui.separator();
         ui.label(
-            RichText::new(format!("{}: ${:.2}", data.period_b_label, data.period_b_total))
-                .color(fg_default),
+            RichText::new(format!(
+                "{}: ${:.2}",
+                data.period_b_label, data.period_b_total
+            ))
+            .color(fg_default),
         );
         ui.separator();
 
@@ -433,7 +443,11 @@ fn render_paired_chart(
     let plot = if reseed { plot.reset() } else { plot };
 
     plot.show(ui, |plot_ui| {
-        plot_ui.vline(egui_plot::VLine::new("zero", 0.0).width(1.5_f32).color(zero_color));
+        plot_ui.vline(
+            egui_plot::VLine::new("zero", 0.0)
+                .width(1.5_f32)
+                .color(zero_color),
+        );
         for (i, cat) in data.category_comparisons.iter().enumerate() {
             let y = (n - 1 - i) as f64;
             let base = cat_color.get(&cat.category).copied().unwrap_or(fallback);
@@ -449,12 +463,18 @@ fn render_paired_chart(
             let bar_a = Bar::new(y + 0.18, a_x)
                 .width(0.32)
                 .fill(a_color)
-                .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(a_color, 0.18)))
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    crate::ui::components::darker(a_color, 0.18),
+                ))
                 .name("A");
             let bar_b = Bar::new(y - 0.18, b_x)
                 .width(0.32)
                 .fill(base)
-                .stroke(egui::Stroke::new(1.0_f32, crate::ui::components::darker(base, 0.18)))
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    crate::ui::components::darker(base, 0.18),
+                ))
                 .name("B");
             // bar hover bypasses the plot-level label_formatter
             // (egui_plot 0.37 routes bars through add_rulers_and_text) —

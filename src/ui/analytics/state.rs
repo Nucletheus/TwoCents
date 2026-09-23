@@ -95,11 +95,11 @@ impl AnalyticsChart {
 /// schema migration; defaults to Category ascending each launch.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LegendSort {
-  #[default]
-  CategoryAsc,
-  CategoryDesc,
-  CostAsc,
-  CostDesc,
+    #[default]
+    CategoryAsc,
+    CategoryDesc,
+    CostAsc,
+    CostDesc,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -229,8 +229,16 @@ impl AnalyticsState {
         };
 
         Self {
-            date_start: if date_preset == DatePreset::Custom { date_start.or_else(|| chrono::Local::now().date_naive().pred_opt()) } else { date_start },
-            date_end: if date_preset == DatePreset::Custom { date_end.or_else(|| Some(chrono::Local::now().date_naive())) } else { date_end },
+            date_start: if date_preset == DatePreset::Custom {
+                date_start.or_else(|| chrono::Local::now().date_naive().pred_opt())
+            } else {
+                date_start
+            },
+            date_end: if date_preset == DatePreset::Custom {
+                date_end.or_else(|| Some(chrono::Local::now().date_naive()))
+            } else {
+                date_end
+            },
             date_preset,
             selected_categories: json_to_string_set(&row.selected_categories),
             category_filter_mode: str_to_filter_mode(&row.category_filter_mode),
@@ -309,7 +317,8 @@ fn str_to_filter_mode(s: &str) -> FilterMode {
 }
 
 fn string_set_to_json(set: &HashSet<String>) -> String {
-    let items: Vec<String> = set.iter()
+    let items: Vec<String> = set
+        .iter()
         .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
         .collect();
     format!("[{}]", items.join(","))
@@ -324,10 +333,10 @@ fn json_to_string_set(json: &str) -> HashSet<String> {
     if inner.is_empty() {
         return HashSet::new();
     }
-    
+
     let mut result = HashSet::new();
     let mut chars = inner.chars().peekable();
-    
+
     while chars.peek().is_some() {
         // Skip whitespace and commas
         while let Some(&c) = chars.peek() {
@@ -337,17 +346,17 @@ fn json_to_string_set(json: &str) -> HashSet<String> {
                 break;
             }
         }
-        
+
         if chars.peek().is_none() {
             break;
         }
-        
+
         // Parse string
         if chars.peek() == Some(&'"') {
             chars.next(); // consume opening quote
             let mut value = String::new();
             let mut escaped = false;
-            
+
             while let Some(c) = chars.next() {
                 if escaped {
                     value.push(c);
@@ -360,12 +369,12 @@ fn json_to_string_set(json: &str) -> HashSet<String> {
                     value.push(c);
                 }
             }
-            
+
             if !value.is_empty() {
                 result.insert(value);
             }
         }
     }
-    
+
     result
 }

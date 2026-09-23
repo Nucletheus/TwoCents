@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item target/release/twocents-desktop.exe .
+          Copy-Item README.md .
+          Compress-Archive -Path twocents-desktop.exe, README.md -DestinationPath twocents-x86_64-pc-windows-msvc.zip -Force
+      - name: Extract changelog excerpt for this tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern "^## $tag" | Select-Object -First 1).LineNumber
+          if (-not $start) { throw "CHANGELOG.md has no section for $tag" }
+          $rest = $lines[$start..($lines.Length - 1)]
+          $end = ($rest | Select-String -Pattern "^## " | Select-Object -Skip 0 | Where-Object { $_.LineNumber -gt 1 } | Select-Object -First 1)
+          $section = if ($end) { $rest[0..($end.LineNumber - 2)] } else { $rest }
+          $section | Set-Content release-notes.md
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: twocents-x86_64-pc-windows-msvc.zip
+          body_path: release-notes.md
+          fail_on_unmatched_files: true

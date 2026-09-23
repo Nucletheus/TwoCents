@@ -1,0 +1,43 @@
+name: Bug report
+description: Something broke or looks wrong
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: TwoCents version (Help/About, or the release tag e.g. v0.1.1)
+      placeholder: v0.1.1
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What were you doing when it happened?
+      placeholder: |
+        1. Open Analytics
+        2. Switch to Period Comparison
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened vs what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot
+      description: If visual
+    validations:
+      required: false

@@ -1,8 +1,8 @@
 use chrono::NaiveDate;
 use std::collections::{HashMap, HashSet};
 
-use crate::models::*;
 use super::state::*;
+use crate::models::*;
 
 #[derive(Clone)]
 pub struct CategoryTotal {
@@ -80,7 +80,8 @@ pub fn filter_expenses(
 ) -> Vec<Expense> {
     let (start, end) = (state.date_start, state.date_end);
 
-    expenses.iter()
+    expenses
+        .iter()
         .filter(|exp| {
             // analytics default to spending-only — income
             // (positive rows) chart only where the caller opts in via
@@ -107,7 +108,7 @@ pub fn filter_expenses(
             } else {
                 return false;
             }
-            
+
             // Category filter
             if !passes_category_filter(state, &exp.category) {
                 return false;
@@ -119,49 +120,49 @@ pub fn filter_expenses(
                     return false;
                 }
             }
-            
+
             // Vendor filter
             if !state.selected_vendors.is_empty() {
                 if !state.selected_vendors.contains(&exp.vendor) {
                     return false;
                 }
             }
-            
+
             true
         })
         .cloned()
         .collect()
 }
 
-pub fn aggregate_by_category(
-    expenses: &[Expense],
-    categories: &[Category],
-) -> Vec<CategoryTotal> {
+pub fn aggregate_by_category(expenses: &[Expense], categories: &[Category]) -> Vec<CategoryTotal> {
     // Build category color map
     let cat_parents = category_parent_map(categories);
     let mut category_colors: HashMap<String, eframe::egui::Color32> = HashMap::new();
-    
+
     for category in categories {
         let label = category.full_label(&cat_parents);
         category_colors.insert(label, category.color);
     }
-    
+
     // Group expenses by category
     let mut category_totals: HashMap<String, f64> = HashMap::new();
-    
+
     for exp in expenses {
-        *category_totals.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents as f64 / 100.0;
+        *category_totals.entry(exp.category.clone()).or_insert(0.0) +=
+            exp.amount_cents as f64 / 100.0;
     }
-    
+
     // Calculate total for percentages — abs, since expense amounts are
     // negative (spend) and a signed total <= 0 forced every share to 0.0%.
     let total: f64 = category_totals.values().map(|v| v.abs()).sum();
-    
+
     // Build result with colors and percentages
     let mut result: Vec<CategoryTotal> = category_totals
         .into_iter()
         .map(|(category, amount)| {
-            let color = category_colors.get(&category).copied()
+            let color = category_colors
+                .get(&category)
+                .copied()
                 .unwrap_or(eframe::egui::Color32::from_rgb(128, 128, 128));
             let percentage = if total > 0.0 {
                 (amount.abs() / total) * 100.0
@@ -176,7 +177,7 @@ pub fn aggregate_by_category(
             }
         })
         .collect();
-    
+
     // Sort by amount descending, name ascending on ties — the HashMap
     // iteration order behind `category_totals` is not stable across
     // frames, so equal amounts used to reshuffle every repaint.
@@ -186,7 +187,7 @@ pub fn aggregate_by_category(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.category.cmp(&b.category))
     });
-    
+
     result
 }
 
@@ -197,19 +198,22 @@ pub fn compare_budget_vs_actual(
 ) -> Vec<BudgetComparison> {
     // Build category color map
     let cat_parents = category_parent_map(categories);
-    let mut category_colors: std::collections::HashMap<String, eframe::egui::Color32> = std::collections::HashMap::new();
-    
+    let mut category_colors: std::collections::HashMap<String, eframe::egui::Color32> =
+        std::collections::HashMap::new();
+
     for category in categories {
         let label = category.full_label(&cat_parents);
         category_colors.insert(label, category.color);
     }
-    
+
     // Calculate actual spending per category
-    let mut actual_totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut actual_totals: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
     for exp in expenses {
-        *actual_totals.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents as f64 / 100.0;
+        *actual_totals.entry(exp.category.clone()).or_insert(0.0) +=
+            exp.amount_cents as f64 / 100.0;
     }
-    
+
     // Get all categories that have either a budget or actual spending
     let mut all_categories: std::collections::HashSet<String> = std::collections::HashSet::new();
     for category in budgets.keys() {
@@ -218,7 +222,7 @@ pub fn compare_budget_vs_actual(
     for category in actual_totals.keys() {
         all_categories.insert(category.clone());
     }
-    
+
     // Build comparison data
     let mut result: Vec<BudgetComparison> = all_categories
         .into_iter()
@@ -237,10 +241,12 @@ pub fn compare_budget_vs_actual(
             } else {
                 0.0
             };
-            
-            let color = category_colors.get(&category).copied()
+
+            let color = category_colors
+                .get(&category)
+                .copied()
                 .unwrap_or(eframe::egui::Color32::from_rgb(128, 128, 128));
-            
+
             BudgetComparison {
                 category,
                 budgeted,
@@ -251,7 +257,7 @@ pub fn compare_budget_vs_actual(
             }
         })
         .collect();
-    
+
     // Sort by absolute variance descending (biggest differences first),
     // name ascending on ties — equal |variance| rows reshuffled every
     // frame otherwise (HashSet union order is not stable).
@@ -262,7 +268,7 @@ pub fn compare_budget_vs_actual(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.category.cmp(&b.category))
     });
-    
+
     result
 }
 
@@ -275,24 +281,26 @@ pub fn aggregate_period_comparison(
 ) -> PeriodComparisonData {
     let cat_parents = category_parent_map(categories);
     let mut category_colors: HashMap<String, eframe::egui::Color32> = HashMap::new();
-    
+
     for category in categories {
         let label = category.full_label(&cat_parents);
         category_colors.insert(label, category.color);
     }
-    
+
     // gross magnitude: each expense contributes its absolute amount (income
     // reads positive), so inflows never net against outflows in a category.
     let mut totals_a: HashMap<String, f64> = HashMap::new();
     for exp in expenses_a {
-        *totals_a.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents.abs() as f64 / 100.0;
+        *totals_a.entry(exp.category.clone()).or_insert(0.0) +=
+            exp.amount_cents.abs() as f64 / 100.0;
     }
-    
+
     let mut totals_b: HashMap<String, f64> = HashMap::new();
     for exp in expenses_b {
-        *totals_b.entry(exp.category.clone()).or_insert(0.0) += exp.amount_cents.abs() as f64 / 100.0;
+        *totals_b.entry(exp.category.clone()).or_insert(0.0) +=
+            exp.amount_cents.abs() as f64 / 100.0;
     }
-    
+
     let period_a_total: f64 = totals_a.values().sum();
     let period_b_total: f64 = totals_b.values().sum();
     let difference = period_b_total - period_a_total;
@@ -303,7 +311,7 @@ pub fn aggregate_period_comparison(
     } else {
         0.0
     };
-    
+
     let mut all_categories: HashSet<String> = HashSet::new();
     for cat in totals_a.keys() {
         all_categories.insert(cat.clone());
@@ -311,7 +319,7 @@ pub fn aggregate_period_comparison(
     for cat in totals_b.keys() {
         all_categories.insert(cat.clone());
     }
-    
+
     let mut category_comparisons: Vec<CategoryComparison> = all_categories
         .into_iter()
         .map(|category| {
@@ -325,10 +333,12 @@ pub fn aggregate_period_comparison(
             } else {
                 0.0
             };
-            
-            let color = category_colors.get(&category).copied()
+
+            let color = category_colors
+                .get(&category)
+                .copied()
                 .unwrap_or(eframe::egui::Color32::from_rgb(128, 128, 128));
-            
+
             CategoryComparison {
                 category,
                 period_a_amount: a_amount,
@@ -339,7 +349,7 @@ pub fn aggregate_period_comparison(
             }
         })
         .collect();
-    
+
     // |difference| desc, name asc on ties — zero-difference rows (and any
     // other ties) reshuffled frame-to-frame off the HashSet union order.
     category_comparisons.sort_by(|a, b| {
@@ -349,7 +359,7 @@ pub fn aggregate_period_comparison(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.category.cmp(&b.category))
     });
-    
+
     PeriodComparisonData {
         period_a_label: period_a_label.to_string(),
         period_b_label: period_b_label.to_string(),

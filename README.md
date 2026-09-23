@@ -87,6 +87,8 @@ Installs to `C:\Program Files\TwoCents` with a Start Menu shortcut for every use
 
 Windows prevents normal users from writing to Program Files, so the installer grants write access to the `data` subfolder only; the executable itself stays read-only as intended.
 
+> **SmartScreen note:** the Windows binary is not code-signed, so the first launch may show "Windows protected your PC". Click **More info → Run anyway** to proceed, or verify the download against the release artifacts.
+
 ### Build from source
 Requires the [Rust toolchain](https://rustup.rs/) (stable) and, on Windows, Visual Studio Build Tools (MSVC target).
 

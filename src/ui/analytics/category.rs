@@ -1,9 +1,9 @@
 use eframe::egui::{self, Color32, Pos2, RichText};
 
-use crate::models::*;
-use super::state::*;
 use super::aggregation::*;
 use super::empty_state::render_no_data_state;
+use super::state::*;
+use crate::models::*;
 
 pub fn render_category_breakdown_chart(
     ui: &mut egui::Ui,
@@ -48,7 +48,12 @@ pub fn render_category_breakdown_chart(
     let donut_data = aggregate_by_category(&filtered, categories);
     let donut_used: Vec<CategoryTotal> = ordered
         .iter()
-        .filter_map(|t| donut_data.iter().find(|d| d.category == t.category).cloned())
+        .filter_map(|t| {
+            donut_data
+                .iter()
+                .find(|d| d.category == t.category)
+                .cloned()
+        })
         .collect();
 
     let total: f64 = donut_used.iter().map(|c| c.amount).sum();
@@ -70,16 +75,14 @@ pub fn render_category_breakdown_chart(
         // Left side: Donut chart
         ui.vertical(|ui| {
             let chart_size = 400.0;
-            let (rect, donut_response) = ui.allocate_exact_size(
-                egui::vec2(chart_size, chart_size),
-                egui::Sense::hover(),
-            );
-            
+            let (rect, donut_response) =
+                ui.allocate_exact_size(egui::vec2(chart_size, chart_size), egui::Sense::hover());
+
             // Draw donut chart
             let center = rect.center();
             let outer_radius = chart_size * 0.4;
             let inner_radius = chart_size * 0.25;
-            
+
             let mut start_angle = -std::f32::consts::FRAC_PI_2; // Start from top
             let mut slice_hit: Vec<(f32, f32, &super::aggregation::CategoryTotal)> = Vec::new();
 
@@ -107,7 +110,8 @@ pub fn render_category_breakdown_chart(
             }
 
             // Draw center circle (donut hole)
-            ui.painter().circle_filled(center, inner_radius, ui.visuals().panel_fill);
+            ui.painter()
+                .circle_filled(center, inner_radius, ui.visuals().panel_fill);
 
             // Draw total in center
             let total_text = if donut_used.is_empty() {
@@ -135,9 +139,8 @@ pub fn render_category_breakdown_chart(
                     if angle < -std::f32::consts::FRAC_PI_2 {
                         angle += std::f32::consts::TAU;
                     }
-                    if let Some(&(_, _, cat)) = slice_hit
-                        .iter()
-                        .find(|(s, e, _)| angle >= *s && angle < *e)
+                    if let Some(&(_, _, cat)) =
+                        slice_hit.iter().find(|(s, e, _)| angle >= *s && angle < *e)
                     {
                         donut_response.on_hover_text(format!(
                             "{}\n${:.2} ({:.1}%)",
@@ -147,15 +150,19 @@ pub fn render_category_breakdown_chart(
                 }
             }
         });
-        
+
         ui.add_space(20.0);
-        
+
         // Right side: Legend
         ui.vertical(|ui| {
             crate::ui::components::heading_lg(ui, "Categories");
             ui.add_space(8.0);
 
-            ui.label(RichText::new("Click categories to filter (multi-select)").size(11.0).color(crate::ui::theme::fg_secondary()));
+            ui.label(
+                RichText::new("Click categories to filter (multi-select)")
+                    .size(11.0)
+                    .color(crate::ui::theme::fg_secondary()),
+            );
             ui.add_space(4.0);
 
             // Shared Category/Cost sort row — same widget + same stored
@@ -186,22 +193,30 @@ pub fn render_category_breakdown_chart(
             if super::picker::render_category_picker(ui, state, &picker_rows, picker_h) {
                 state_changed = true;
             }
-            
+
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            
+
             // Total
             ui.horizontal(|ui| {
                 // egui hardwires strong() text to widgets.active's
                 // fg_stroke (contrast-on-accent = near-black here), so strong
                 // labels must carry an explicit palette color.
-                ui.label(RichText::new("Total:").strong().color(crate::ui::theme::fg_primary()));
+                ui.label(
+                    RichText::new("Total:")
+                        .strong()
+                        .color(crate::ui::theme::fg_primary()),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("${:.2}", legend_total)).strong().color(crate::ui::theme::fg_primary()));
+                    ui.label(
+                        RichText::new(format!("${:.2}", legend_total))
+                            .strong()
+                            .color(crate::ui::theme::fg_primary()),
+                    );
                 });
             });
-            
+
             // Show filter status
             if !state.selected_categories.is_empty() {
                 ui.add_space(8.0);
@@ -210,10 +225,16 @@ pub fn render_category_breakdown_chart(
                         FilterMode::Include => "Showing only",
                         FilterMode::Exclude => "Excluding",
                     };
-                    ui.label(RichText::new(format!("{} {} categories", mode_text, state.selected_categories.len()))
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {} categories",
+                            mode_text,
+                            state.selected_categories.len()
+                        ))
                         .size(11.0)
-                        .color(crate::ui::theme::fg_secondary()));
-                    
+                        .color(crate::ui::theme::fg_secondary()),
+                    );
+
                     if crate::ui::popups::styled_button(ui, "Clear", false).clicked() {
                         state.selected_categories.clear();
                         state_changed = true;
@@ -222,7 +243,7 @@ pub fn render_category_breakdown_chart(
             }
         });
     });
-    
+
     state_changed
 }
 
@@ -237,9 +258,9 @@ fn draw_donut_slice(
 ) {
     let painter = ui.painter();
     let num_segments = ((end_angle - start_angle).abs() * 20.0).max(3.0) as usize;
-    
+
     let mut points = Vec::new();
-    
+
     // Outer arc
     for i in 0..=num_segments {
         let angle = start_angle + (end_angle - start_angle) * (i as f32 / num_segments as f32);
@@ -247,7 +268,7 @@ fn draw_donut_slice(
         let y = center.y + outer_radius * angle.sin();
         points.push(Pos2::new(x, y));
     }
-    
+
     // Inner arc (reverse direction)
     for i in (0..=num_segments).rev() {
         let angle = start_angle + (end_angle - start_angle) * (i as f32 / num_segments as f32);
@@ -255,7 +276,7 @@ fn draw_donut_slice(
         let y = center.y + inner_radius * angle.sin();
         points.push(Pos2::new(x, y));
     }
-    
+
     // Close the shape
     points.push(points[0]);
 

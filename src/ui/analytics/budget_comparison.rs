@@ -2,11 +2,11 @@ use eframe::egui::{self, Color32, RichText};
 use egui_plot::{Bar, BarChart, Line, Plot};
 use std::hash::{Hash, Hasher};
 
-use crate::models::*;
-use super::state::*;
 use super::aggregation::*;
 use super::charts_common::{comparison_periods, period_text};
-use super::empty_state::{render_no_budgets_state, render_empty_state};
+use super::empty_state::{render_empty_state, render_no_budgets_state};
+use super::state::*;
+use crate::models::*;
 
 /// Everything the Budget vs Actual panel needs for ONE viewed period,
 /// pre-computed in mod.rs where the app's snapshot cache is reachable.
@@ -73,7 +73,8 @@ pub fn render_budget_vs_actual_chart(
         c.budgeted.to_bits().hash(&mut sh);
         c.actual.to_bits().hash(&mut sh);
     }
-    let reseed = super::charts_common::take_reseed(&mut state.bva_sig, sh.finish(), state.reset_view);
+    let reseed =
+        super::charts_common::take_reseed(&mut state.bva_sig, sh.finish(), state.reset_view);
 
     // picker rows come from a pool with the category selection
     // cleared (same trick as the Breakdown legend) — building them from the
@@ -108,7 +109,13 @@ pub fn render_budget_vs_actual_chart(
             BudgetViewPeriod::Quarter,
             BudgetViewPeriod::Year,
         ] {
-            if crate::ui::components::tab_label_button(ui, state.budget_view_period == option, option.label()).clicked() {
+            if crate::ui::components::tab_label_button(
+                ui,
+                state.budget_view_period == option,
+                option.label(),
+            )
+            .clicked()
+            {
                 state.budget_view_period = option;
             }
         }

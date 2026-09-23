@@ -1,39 +1,47 @@
-use eframe::egui;
-use rusqlite::params;
-use crate::models::*;
 use crate::db::*;
+use crate::models::*;
 use crate::ui::popups::styled_button;
 use crate::ui::widgets::*;
 use crate::TwoCentsApp;
+use eframe::egui;
+use rusqlite::params;
 
 impl TwoCentsApp {
-  #[allow(deprecated)]
-  pub fn ui_duplicate_review(&mut self, ctx: &egui::Context) {
-    if !self.show_duplicate_review {
-      return;
-    }
-    if let Some(sort) = self.pending_duplicate_sort.take() {
-      self.duplicate_sort = sort;
-      self.duplicate_grid_state.clear_selection();
-      self.rebuild_sorted_duplicate_indices();
-    }
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("is_rendering_duplicate_grid"), true));
+    #[allow(deprecated)]
+    pub fn ui_duplicate_review(&mut self, ctx: &egui::Context) {
+        if !self.show_duplicate_review {
+            return;
+        }
+        if let Some(sort) = self.pending_duplicate_sort.take() {
+            self.duplicate_sort = sort;
+            self.duplicate_grid_state.clear_selection();
+            self.rebuild_sorted_duplicate_indices();
+        }
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("is_rendering_duplicate_grid"), true));
 
-    let screen_rect = ctx.content_rect();
-    let pad_x = if screen_rect.width() < 900.0 { 21.0 } else { 60.0 };
-    let pad_y = if screen_rect.height() < 600.0 { 21.0 } else { 60.0 };
-    // fixed_size constrains the CONTENT; the modal frame wraps it in its own
-    // inner margin + stroke. Subtract that chrome or the panel is wider than
-    // the window (pad 42 < chrome 50 → the panel sat flush on both edges).
-    let frame = themed_modal_frame(ctx);
-    let chrome_x = (frame.inner_margin.left + frame.inner_margin.right) as f32
-      + 2.0 * crate::ui::theme_tokens::BORDER_W;
-    let chrome_y = (frame.inner_margin.top + frame.inner_margin.bottom) as f32
-      + 2.0 * crate::ui::theme_tokens::BORDER_W;
-    let win_w = (screen_rect.width() - pad_x * 2.0 - chrome_x).clamp(320.0, 1200.0);
-    let win_h = (screen_rect.height() - pad_y * 2.0 - chrome_y).clamp(300.0, 800.0);
+        let screen_rect = ctx.content_rect();
+        let pad_x = if screen_rect.width() < 900.0 {
+            21.0
+        } else {
+            60.0
+        };
+        let pad_y = if screen_rect.height() < 600.0 {
+            21.0
+        } else {
+            60.0
+        };
+        // fixed_size constrains the CONTENT; the modal frame wraps it in its own
+        // inner margin + stroke. Subtract that chrome or the panel is wider than
+        // the window (pad 42 < chrome 50 → the panel sat flush on both edges).
+        let frame = themed_modal_frame(ctx);
+        let chrome_x = (frame.inner_margin.left + frame.inner_margin.right) as f32
+            + 2.0 * crate::ui::theme_tokens::BORDER_W;
+        let chrome_y = (frame.inner_margin.top + frame.inner_margin.bottom) as f32
+            + 2.0 * crate::ui::theme_tokens::BORDER_W;
+        let win_w = (screen_rect.width() - pad_x * 2.0 - chrome_x).clamp(320.0, 1200.0);
+        let win_h = (screen_rect.height() - pad_y * 2.0 - chrome_y).clamp(300.0, 800.0);
 
-    egui::Window::new("Possible Duplicates Review")
+        egui::Window::new("Possible Duplicates Review")
       .title_bar(false)
       .resizable(false)
       .collapsible(false)
@@ -213,43 +221,43 @@ impl TwoCentsApp {
         // Frame stroke on top of the scrolled content (clip_rect_margin bleed).
         crate::ui::components::repaint_grid_frame_stroke(ui, frame_resp.response.rect);
       });
-  }
+    }
 
-  fn save_duplicates(&mut self) {
-    if self.conn.execute("BEGIN IMMEDIATE", []).is_err() {
+    fn save_duplicates(&mut self) {
+        if self.conn.execute("BEGIN IMMEDIATE", []).is_err() {
             return;
-    }
+        }
 
-    let mut ok = true;
+        let mut ok = true;
 
-    // 1. Delete all staged-for-deletion expenses
-    for &id in &self.duplicate_deleted_ids {
-      if let Err(err) = self.conn.execute(
-        "DELETE FROM expenses WHERE id = ?1 AND household_id = ?2",
-        params![id, self.household_id]
-      ) {
-        ok = false;
+        // 1. Delete all staged-for-deletion expenses
+        for &id in &self.duplicate_deleted_ids {
+            if let Err(err) = self.conn.execute(
+                "DELETE FROM expenses WHERE id = ?1 AND household_id = ?2",
+                params![id, self.household_id],
+            ) {
+                ok = false;
                 break;
-      }
-    }
+            }
+        }
 
-    // 2. Update remaining duplicates in the database
-    if ok {
-      let categories = self.categories.clone();
-      let parents = category_parent_map(&categories);
-      for row in &mut self.duplicate_rows {
-        // Double check category label normalization
-        let category = if row.category.trim().is_empty() {
-          String::new()
-        } else if let Some(matched) = find_category_by_label(&categories, &row.category) {
-          matched.full_label(&parents)
-        } else {
-          String::new()
-        };
+        // 2. Update remaining duplicates in the database
+        if ok {
+            let categories = self.categories.clone();
+            let parents = category_parent_map(&categories);
+            for row in &mut self.duplicate_rows {
+                // Double check category label normalization
+                let category = if row.category.trim().is_empty() {
+                    String::new()
+                } else if let Some(matched) = find_category_by_label(&categories, &row.category) {
+                    matched.full_label(&parents)
+                } else {
+                    String::new()
+                };
 
-        if let Err(err) = self.conn.execute(
-          "UPDATE expenses 
-           SET date = ?1, amount_cents = ?2, category = ?3, member = ?4, vendor = ?5, description = ?6 
+                if let Err(err) = self.conn.execute(
+          "UPDATE expenses
+           SET date = ?1, amount_cents = ?2, category = ?3, member = ?4, vendor = ?5, description = ?6
            WHERE id = ?7 AND household_id = ?8",
           params![
             row.date,
@@ -265,33 +273,33 @@ impl TwoCentsApp {
           ok = false;
                     break;
         }
-      }
+            }
+        }
+
+        if ok {
+            if self.conn.execute("COMMIT", []).is_err() {
+                let _ = self.conn.execute("ROLLBACK", []);
+            } else {
+                self.duplicate_rows.clear();
+                self.duplicate_deleted_ids.clear();
+                self.show_duplicate_review = false;
+                self.reload();
+            }
+        } else {
+            let _ = self.conn.execute("ROLLBACK", []);
+        }
     }
 
-    if ok {
-      if self.conn.execute("COMMIT", []).is_err() {
-        let _ = self.conn.execute("ROLLBACK", []);
-              } else {
-        self.duplicate_rows.clear();
-        self.duplicate_deleted_ids.clear();
-        self.show_duplicate_review = false;
-        self.reload();
-              }
-    } else {
-      let _ = self.conn.execute("ROLLBACK", []);
+    pub fn delete_duplicate_rows_by_indices(&mut self, indices: &[usize]) {
+        let mut sorted_indices = indices.to_vec();
+        sorted_indices.sort_by(|a, b| b.cmp(a));
+        for &idx in &sorted_indices {
+            if idx < self.duplicate_rows.len() {
+                let expense = self.duplicate_rows.remove(idx);
+                self.duplicate_deleted_ids.insert(expense.id);
+            }
+        }
+        self.rebuild_sorted_duplicate_indices();
+        self.duplicate_grid_state.clear_selection();
     }
-  }
-
-  pub fn delete_duplicate_rows_by_indices(&mut self, indices: &[usize]) {
-    let mut sorted_indices = indices.to_vec();
-    sorted_indices.sort_by(|a, b| b.cmp(a));
-    for &idx in &sorted_indices {
-      if idx < self.duplicate_rows.len() {
-        let expense = self.duplicate_rows.remove(idx);
-        self.duplicate_deleted_ids.insert(expense.id);
-      }
-    }
-    self.rebuild_sorted_duplicate_indices();
-    self.duplicate_grid_state.clear_selection();
-      }
 }

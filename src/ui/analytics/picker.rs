@@ -119,7 +119,10 @@ pub fn order_rows_by_legend_sort<T>(
             }
             // Rebuild via Option slots — rows is borrowed, can't move out.
             let mut slots: Vec<Option<T>> = std::mem::take(rows).into_iter().map(Some).collect();
-            *rows = order.into_iter().map(|i| slots[i].take().unwrap()).collect();
+            *rows = order
+                .into_iter()
+                .map(|i| slots[i].take().unwrap())
+                .collect();
         }
         LegendSort::CostAsc | LegendSort::CostDesc => {
             let desc = sort == LegendSort::CostDesc;
@@ -157,7 +160,11 @@ pub fn render_category_picker(
                 let is_include_mode = state.category_filter_mode == FilterMode::Include;
                 // In include mode, active = in the filter set; in exclude
                 // mode, active = NOT in the set.
-                let is_active = if is_include_mode { is_filtered } else { !is_filtered };
+                let is_active = if is_include_mode {
+                    is_filtered
+                } else {
+                    !is_filtered
+                };
 
                 ui.horizontal(|ui| {
                     let (swatch_rect, swatch_response) =
@@ -177,10 +184,8 @@ pub fn render_category_picker(
 
                     // Truncated so long names can't overlap the right value.
                     let display_name = truncate_label(&row.label, 24);
-                    let name_response = ui.add(
-                        egui::Label::new(&display_name)
-                            .sense(egui::Sense::click()),
-                    );
+                    let name_response =
+                        ui.add(egui::Label::new(&display_name).sense(egui::Sense::click()));
                     let name_clicked = name_response.clicked();
                     if row.label.chars().count() > 24 {
                         name_response.on_hover_text(&row.label);
@@ -231,10 +236,22 @@ mod tests {
 
     fn rows() -> Vec<Row> {
         vec![
-            Row { label: "Fun".into(), cost: 5.0 },
-            Row { label: "Rent".into(), cost: 50.0 },
-            Row { label: "Food".into(), cost: 20.0 },
-            Row { label: "Orphan".into(), cost: 7.0 },
+            Row {
+                label: "Fun".into(),
+                cost: 5.0,
+            },
+            Row {
+                label: "Rent".into(),
+                cost: 50.0,
+            },
+            Row {
+                label: "Food".into(),
+                cost: 20.0,
+            },
+            Row {
+                label: "Orphan".into(),
+                cost: 7.0,
+            },
         ]
     }
 
@@ -248,17 +265,35 @@ mod tests {
         let cats = vec![cat(1, "Food"), cat(2, "Rent"), cat(3, "Fun")];
 
         let mut r = rows();
-        order_rows_by_legend_sort(&cats, &mut r, LegendSort::CategoryAsc, |x| &x.label, |x| x.cost);
+        order_rows_by_legend_sort(
+            &cats,
+            &mut r,
+            LegendSort::CategoryAsc,
+            |x| &x.label,
+            |x| x.cost,
+        );
         assert_eq!(labels(&r), vec!["Food", "Rent", "Fun", "Orphan"]);
 
         let mut r = rows();
-        order_rows_by_legend_sort(&cats, &mut r, LegendSort::CategoryDesc, |x| &x.label, |x| x.cost);
+        order_rows_by_legend_sort(
+            &cats,
+            &mut r,
+            LegendSort::CategoryDesc,
+            |x| &x.label,
+            |x| x.cost,
+        );
         assert_eq!(labels(&r), vec!["Orphan", "Fun", "Rent", "Food"]);
 
         // Cost ↓ = biggest magnitude first (the old signed sort put the
         // smallest spends on top).
         let mut r = rows();
-        order_rows_by_legend_sort(&cats, &mut r, LegendSort::CostDesc, |x| &x.label, |x| x.cost);
+        order_rows_by_legend_sort(
+            &cats,
+            &mut r,
+            LegendSort::CostDesc,
+            |x| &x.label,
+            |x| x.cost,
+        );
         assert_eq!(labels(&r), vec!["Rent", "Food", "Orphan", "Fun"]);
 
         let mut r = rows();
@@ -267,8 +302,14 @@ mod tests {
 
         // Ties fall back to name.
         let mut r = vec![
-            Row { label: "B".into(), cost: 10.0 },
-            Row { label: "A".into(), cost: 10.0 },
+            Row {
+                label: "B".into(),
+                cost: 10.0,
+            },
+            Row {
+                label: "A".into(),
+                cost: 10.0,
+            },
         ];
         order_rows_by_legend_sort(&[], &mut r, LegendSort::CostDesc, |x| &x.label, |x| x.cost);
         assert_eq!(labels(&r), vec!["A", "B"]);

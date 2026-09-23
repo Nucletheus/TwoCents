@@ -50,13 +50,21 @@ pub fn comparison_periods(gran: BudgetViewPeriod) -> Vec<ChartPeriod> {
             BudgetViewPeriod::Week => format!("W{} {}", period, year),
             BudgetViewPeriod::Month => format!(
                 "{} {}",
-                chrono::Month::try_from(period as u8).map(|m| m.name()).unwrap_or(""),
+                chrono::Month::try_from(period as u8)
+                    .map(|m| m.name())
+                    .unwrap_or(""),
                 year
             ),
             BudgetViewPeriod::Quarter => format!("Q{} {}", period, year),
             BudgetViewPeriod::Year => year.to_string(),
         };
-        out.push(ChartPeriod { label, start, end, year, period });
+        out.push(ChartPeriod {
+            label,
+            start,
+            end,
+            year,
+            period,
+        });
         match gran {
             BudgetViewPeriod::Week => {
                 if period <= 1 {
@@ -93,7 +101,12 @@ pub fn comparison_periods(gran: BudgetViewPeriod) -> Vec<ChartPeriod> {
 
 /// "Sep 01 – Sep 30" style combo text for one [`ChartPeriod`].
 pub fn period_text(label: &str, start: NaiveDate, end: NaiveDate) -> String {
-    format!("{} ({} – {})", label, start.format("%b %d"), end.format("%b %d"))
+    format!(
+        "{} ({} – {})",
+        label,
+        start.format("%b %d"),
+        end.format("%b %d")
+    )
 }
 
 /// Transform a raw dollar value into the ln-space the bars are fed.

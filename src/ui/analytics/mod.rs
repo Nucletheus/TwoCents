@@ -1,22 +1,22 @@
-pub mod state;
 pub mod aggregation;
-pub mod charts_common;
-pub mod picker;
-pub mod filters;
-pub mod category;
 pub mod budget_comparison;
-pub mod period_comparison;
+pub mod category;
+pub mod charts_common;
 pub mod empty_state;
+pub mod filters;
+pub mod period_comparison;
+pub mod picker;
+pub mod state;
 
-use eframe::egui;
 use crate::db::save_analytics_state;
 use crate::models::BudgetGranularity;
 use crate::TwoCentsApp;
-use state::*;
-use filters::render_filter_panel;
-use category::render_category_breakdown_chart;
 use budget_comparison::{render_budget_vs_actual_chart, BudgetPeriodBudgets};
+use category::render_category_breakdown_chart;
+use eframe::egui;
+use filters::render_filter_panel;
 use period_comparison::render_period_comparison_chart;
+use state::*;
 
 impl TwoCentsApp {
     /// Budget vs Actual re-prices each category's envelope for
@@ -41,13 +41,18 @@ impl TwoCentsApp {
             std::borrow::Cow::Borrowed(&self.cached_budget_snapshots[..])
         } else {
             std::borrow::Cow::Owned(
-                crate::db::load_budget_snapshots_for_year(&self.conn, self.household_id, entry.year)
-                    .unwrap_or_default(),
+                crate::db::load_budget_snapshots_for_year(
+                    &self.conn,
+                    self.household_id,
+                    entry.year,
+                )
+                .unwrap_or_default(),
             )
         };
         let mut budgets: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for cat in crate::models::category_assignable_labels(&self.categories) {
-            let amount = self.compute_budget_for(&cat, gran, entry.year, Some(entry.period), &snaps);
+            let amount =
+                self.compute_budget_for(&cat, gran, entry.year, Some(entry.period), &snaps);
             if amount > 0 {
                 budgets.insert(cat, amount);
             }
@@ -58,7 +63,13 @@ impl TwoCentsApp {
             BudgetViewPeriod::Quarter => "quarter",
             BudgetViewPeriod::Year => "year",
         };
-        BudgetPeriodBudgets { budgets, start, end, period_label, period_name: entry.label.clone() }
+        BudgetPeriodBudgets {
+            budgets,
+            start,
+            end,
+            period_label,
+            period_name: entry.label.clone(),
+        }
     }
 
     pub fn ui_analytics(&mut self, ui: &mut egui::Ui) {
@@ -97,7 +108,13 @@ impl TwoCentsApp {
         ];
         ui.horizontal_wrapped(|ui| {
             for (chart, label) in chart_tabs {
-                if crate::ui::components::tab_label_button(ui, self.analytics_state.active_chart == chart, label).clicked() {
+                if crate::ui::components::tab_label_button(
+                    ui,
+                    self.analytics_state.active_chart == chart,
+                    label,
+                )
+                .clicked()
+                {
                     self.analytics_state.active_chart = chart;
                     state_changed = true;
                 }
@@ -114,12 +131,14 @@ impl TwoCentsApp {
         // story per tab. Category/member/vendor filters still apply on
         // all three. Category selection is the shared right-column picker
         // on each chart tab (no dropdown here).
-        let show_date_range = self.analytics_state.active_chart == AnalyticsChart::CategoryBreakdown;
+        let show_date_range =
+            self.analytics_state.active_chart == AnalyticsChart::CategoryBreakdown;
         // HashSet iteration order is randomized per instance —
         // rebuilding it every frame made the vendor dropdown rows reshuffle
         // frame-to-frame ("scrolling all over the place"). Sort for a stable
         // order; drop blank vendors (expenses with no vendor set).
-        let mut available_vendors: Vec<String> = self.expenses
+        let mut available_vendors: Vec<String> = self
+            .expenses
             .iter()
             .map(|e| e.vendor.clone())
             .collect::<std::collections::HashSet<_>>()
@@ -147,7 +166,12 @@ impl TwoCentsApp {
         // Render active chart
         match self.analytics_state.active_chart {
             AnalyticsChart::CategoryBreakdown => {
-                if render_category_breakdown_chart(ui, &self.expenses, &self.categories, &mut self.analytics_state) {
+                if render_category_breakdown_chart(
+                    ui,
+                    &self.expenses,
+                    &self.categories,
+                    &mut self.analytics_state,
+                ) {
                     state_changed = true;
                 }
             }
@@ -156,12 +180,23 @@ impl TwoCentsApp {
                     self.analytics_state.budget_view_period,
                     self.analytics_state.budget_period_index,
                 );
-                if render_budget_vs_actual_chart(ui, &self.expenses, &priced, &self.categories, &mut self.analytics_state) {
+                if render_budget_vs_actual_chart(
+                    ui,
+                    &self.expenses,
+                    &priced,
+                    &self.categories,
+                    &mut self.analytics_state,
+                ) {
                     state_changed = true;
                 }
             }
             AnalyticsChart::PeriodComparison => {
-                if render_period_comparison_chart(ui, &self.expenses, &self.categories, &mut self.analytics_state) {
+                if render_period_comparison_chart(
+                    ui,
+                    &self.expenses,
+                    &self.categories,
+                    &mut self.analytics_state,
+                ) {
                     state_changed = true;
                 }
             }

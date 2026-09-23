@@ -1,8 +1,8 @@
 use eframe::egui::{self, Color32};
 use std::collections::HashSet;
 
-use crate::models::HouseholdMember;
 use super::state::*;
+use crate::models::HouseholdMember;
 
 pub fn render_filter_panel(
     ui: &mut egui::Ui,
@@ -61,7 +61,9 @@ pub fn render_filter_panel(
                 if let Some(ref mut start) = state.date_start {
                     let mut date_str = start.format("%Y-%m-%d").to_string();
                     if ui.text_edit_singleline(&mut date_str).changed() {
-                        if let Ok(new_date) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                        if let Ok(new_date) =
+                            chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                        {
                             *start = new_date;
                             changed = true;
                         }
@@ -73,7 +75,9 @@ pub fn render_filter_panel(
                 if let Some(ref mut end) = state.date_end {
                     let mut date_str = end.format("%Y-%m-%d").to_string();
                     if ui.text_edit_singleline(&mut date_str).changed() {
-                        if let Ok(new_date) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                        if let Ok(new_date) =
+                            chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                        {
                             *end = new_date;
                             changed = true;
                         }
@@ -155,26 +159,26 @@ fn multi_select_dropdown_with_colors(
     selected: &mut HashSet<String>,
 ) -> bool {
     let mut changed = false;
-    
+
     let label = if selected.is_empty() {
         "All".to_string()
     } else {
         format!("{} selected", selected.len())
     };
-    
+
     let popup_id = egui::Id::new(id);
-    
+
     // Check if popup is open
     let is_open = ui.data(|data| data.get_temp::<bool>(popup_id).unwrap_or(false));
-    
+
     // Create the button
     let button_response = ui.button(label);
-    
+
     // Toggle popup on button click
     if button_response.clicked() {
         ui.data_mut(|data| data.insert_temp(popup_id, !is_open));
     }
-    
+
     // Show popup if open
     if is_open {
         let area_response = egui::Area::new(popup_id.with("area"))
@@ -188,7 +192,7 @@ fn multi_select_dropdown_with_colors(
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for (i, option) in options.iter().enumerate() {
                             let mut is_selected = selected.contains(option);
-                            
+
                             ui.horizontal(|ui| {
                                 // Show color swatch if colors are provided
                                 if let Some(color_list) = colors {
@@ -200,7 +204,7 @@ fn multi_select_dropdown_with_colors(
                                         ui.painter().rect_filled(swatch_rect, 2.0, color_list[i]);
                                     }
                                 }
-                                
+
                                 // Checkbox
                                 if ui.checkbox(&mut is_selected, option).changed() {
                                     if is_selected {
@@ -215,17 +219,18 @@ fn multi_select_dropdown_with_colors(
                     });
                 });
             });
-        
+
         // Close popup if clicked outside
         if ui.input(|input| input.pointer.any_click()) {
             let pointer_pos = ui.input(|input| input.pointer.interact_pos());
             if let Some(pos) = pointer_pos {
-                if !button_response.rect.contains(pos) && !area_response.response.rect.contains(pos) {
+                if !button_response.rect.contains(pos) && !area_response.response.rect.contains(pos)
+                {
                     ui.data_mut(|data| data.insert_temp(popup_id, false));
                 }
             }
         }
     }
-    
+
     changed
 }

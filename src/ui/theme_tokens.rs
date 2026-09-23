@@ -36,6 +36,12 @@ pub const GRID_SELECTION_STATUS_HEIGHT: f32 = 18.0;
 // These are the only places that hardcode chrome. Anything that wants a card,
 // button, modal, or input should call these, not build its own Frame.
 
-pub fn radius_sm() -> CornerRadius { CornerRadius::same(RADIUS_SM as u8) }
-pub fn radius_md() -> CornerRadius { CornerRadius::same(RADIUS_MD as u8) }
-pub fn radius_lg() -> CornerRadius { CornerRadius::same(RADIUS_LG as u8) }
+pub fn radius_sm() -> CornerRadius {
+    CornerRadius::same(RADIUS_SM as u8)
+}
+pub fn radius_md() -> CornerRadius {
+    CornerRadius::same(RADIUS_MD as u8)
+}
+pub fn radius_lg() -> CornerRadius {
+    CornerRadius::same(RADIUS_LG as u8)
+}
