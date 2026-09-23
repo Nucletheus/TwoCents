@@ -3877,8 +3877,6 @@ dependencies = [
  "resvg",
  "rfd",
  "rusqlite",
- "tiny-skia",
- "usvg",
 ]
 
 [[package]]

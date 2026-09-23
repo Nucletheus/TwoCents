@@ -213,15 +213,18 @@ impl log::Log for InAppLogger {
 static LOGGER: InAppLogger = InAppLogger;
 
 fn load_icon_svg(svg_bytes: &[u8]) -> egui::IconData {
-    let opt = usvg::Options::default();
-    let rtree = usvg::Tree::from_data(svg_bytes, &opt).expect("parse SVG icon");
+    // resvg re-exports usvg and tiny_skia; using those re-exports keeps a
+    // single version of each crate in the dependency graph.
+    let opt = resvg::usvg::Options::default();
+    let rtree = resvg::usvg::Tree::from_data(svg_bytes, &opt).expect("parse SVG icon");
     let icon_size = 64u32;
     let max_dim = rtree.size().width().max(rtree.size().height());
     let scale = icon_size as f32 / max_dim as f32;
-    let mut pixmap = tiny_skia::Pixmap::new(icon_size, icon_size).expect("create icon pixmap");
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(icon_size, icon_size).expect("create icon pixmap");
     resvg::render(
         &rtree,
-        tiny_skia::Transform::from_scale(scale, scale),
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
     egui::IconData {
