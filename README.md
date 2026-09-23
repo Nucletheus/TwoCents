@@ -1,6 +1,10 @@
 # TwoCents
 
 <p align="center">
+  <img src="docs/logo.png" alt="TwoCents logo" width="60%">
+</p>
+
+<p align="center">
   <img src="docs/screenshots/expenses.png" alt="TwoCents, the expenses tab with a spreadsheet grid of transactions" width="100%">
 </p>
 
