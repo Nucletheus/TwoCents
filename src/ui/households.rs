@@ -134,6 +134,11 @@ impl TwoCentsApp {
           );
         });
 
+        household_panel(ui, "Support", |ui| {
+          crate::ui::components::label_muted(ui, "TwoCents is a free personal project.");
+          ui.hyperlink_to("Buy Me a Coffee", "https://www.buymeacoffee.com/Nucletheus");
+        });
+
         if let Some(message) = &status_message {
           ui.add_space(8.0);
           ui.label(RichText::new(message).color(crate::ui::theme::accent()));

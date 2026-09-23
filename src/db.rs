@@ -5,14 +5,69 @@ use std::path::PathBuf;
 use crate::models::*;
 use eframe::egui::{Color32, ecolor::Hsva};
 
-pub fn db_path() -> PathBuf {
+/// Legacy data location: the roaming AppData folder used before installs
+/// became self-contained.
+fn legacy_db_path() -> PathBuf {
   let base = env::var("APPDATA")
     .map(PathBuf::from)
     .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
   base.join("TwoCents").join("twocents.sqlite")
 }
 
+/// Data directory for the database. Self-contained installs keep everything
+/// in one folder: when the installer has created a `data` folder next to the
+/// executable, the database lives there. Otherwise (dev builds, legacy
+/// installs) the roaming AppData location is used.
+pub fn data_dir() -> PathBuf {
+  if let Ok(exe) = env::current_exe() {
+    if let Some(dir) = exe.parent() {
+      let portable = dir.join("data");
+      if portable.is_dir() {
+        return portable;
+      }
+    }
+  }
+  env::var("APPDATA")
+    .map(|base| PathBuf::from(base).join("TwoCents"))
+    .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+pub fn db_path() -> PathBuf {
+  data_dir().join("twocents.sqlite")
+}
+
+/// One-time migration: when the self-contained `data` folder exists but has
+/// no database yet, and a legacy AppData database does, copy it in so
+/// existing users keep their data after updating.
+fn migrate_legacy_db() {
+  let portable = db_path();
+  if portable.is_file() {
+    return;
+  }
+  let legacy = legacy_db_path();
+  if !legacy.is_file() {
+    return;
+  }
+  if !portable.parent().is_some_and(|dir| dir.is_dir()) {
+    return;
+  }
+  let _ = fs::copy(&legacy, &portable);
+  for suffix in ["-wal", "-shm"] {
+    let from = legacy.with_file_name(format!(
+      "{}{suffix}",
+      legacy.file_name().and_then(|n| n.to_str()).unwrap_or_default()
+    ));
+    if from.is_file() {
+      let _ = fs::copy(&from, portable.with_file_name(format!(
+        "{}{suffix}",
+        portable.file_name().and_then(|n| n.to_str()).unwrap_or_default()
+      )));
+    }
+  }
+}
+
 pub fn open_database() -> rusqlite::Result<Connection> {
+  migrate_legacy_db();
   let path = db_path();
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent).map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;

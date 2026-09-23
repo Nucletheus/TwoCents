@@ -65,14 +65,23 @@ Three chart views over the same filters (members, vendors, dates):
 
 ## Install
 
-### Windows, one line
-No Rust toolchain needed. Downloads the latest release and adds a Start Menu shortcut:
+Everything is contained in one folder: the executable and its `data` subfolder (the SQLite database) live side by side. Deleting the folder removes the app and its data. No Rust toolchain needed for the installs below.
+
+### Current user (default)
+Installs to `%LOCALAPPDATA%\TwoCents` and adds a Start Menu shortcut:
 
 ```powershell
 irm https://raw.githubusercontent.com/Nucletheus/TwoCents/main/install.ps1 | iex
 ```
 
-Installs to `%LOCALAPPDATA%\TwoCents`.
+### Program Files (all users of this PC)
+Installs to `C:\Program Files\TwoCents` with a Start Menu shortcut for every user. Run in an **elevated (Run as Administrator) PowerShell**:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucletheus/TwoCents/main/install.ps1))) -Machine
+```
+
+Windows prevents normal users from writing to Program Files, so the installer grants write access to the `data` subfolder only; the executable itself stays read-only as intended.
 
 ### Build from source
 Requires the [Rust toolchain](https://rustup.rs/) (stable) and, on Windows, Visual Studio Build Tools (MSVC target).
@@ -83,7 +92,7 @@ cd TwoCents
 cargo run --release
 ```
 
-On Windows, `restart_app.bat` rebuilds and relaunches in one step.
+On Windows, `restart_app.bat` rebuilds and relaunches in one step. Builds run from `cargo` keep their data in `%APPDATA%\TwoCents` unless a `data` folder exists next to the executable.
 
 ## Getting Started
 
@@ -93,8 +102,9 @@ On Windows, `restart_app.bat` rebuilds and relaunches in one step.
 4. Settlements: set split percentages per category.
 5. Budgets: pick a timeframe and allocate limits.
 6. Analytics: pick a chart and hover the bars for tooltips.
+7. Household tab: if TwoCents is useful to you, there is a Buy Me a Coffee link under Support.
 
-All data lives in one file: `%APPDATA%\TwoCents\twocents.sqlite`. Back it up or move it as you like.
+All data lives in one file inside the install folder: `<install dir>\data\twocents.sqlite`. Back it up or move it as you like. Updating from an older version that stored data in `%APPDATA%\TwoCents` is automatic: the existing database is imported on first launch.
 
 ## Tech Stack
 
