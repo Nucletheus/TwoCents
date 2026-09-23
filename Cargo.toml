@@ -17,6 +17,6 @@ chrono = "0.4.44"
 jiff = "0.2.24"
 log = "0.4"
 resvg = "0.44"
-usvg = "0.44"
+usvg = "0.48"
 tiny-skia = "0.11"
 
