@@ -1,5 +1,5 @@
 use chrono::{Datelike, NaiveDate};
-use egui_plot::{GridInput, GridMark};
+use egui_plot::{AxisHints, GridInput, GridMark};
 
 use super::state::BudgetViewPeriod;
 
@@ -35,10 +35,15 @@ pub fn comparison_periods(gran: BudgetViewPeriod) -> Vec<ChartPeriod> {
         BudgetViewPeriod::Year => crate::models::BudgetGranularity::Yearly,
     };
     let (mut year, mut period) = match gran {
-        BudgetViewPeriod::Week => {
-            let iso = now.iso_week();
-            (iso.year(), iso.week() as i32)
-        }
+        BudgetViewPeriod::Week => (
+            now.year(),
+            crate::models::budget_period_for_date(
+                crate::models::BudgetGranularity::Weekly,
+                now.year(),
+                now,
+            )
+            .unwrap_or(1),
+        ),
         BudgetViewPeriod::Month => (now.year(), now.month() as i32),
         BudgetViewPeriod::Quarter => (now.year(), ((now.month() - 1) / 3 + 1) as i32),
         BudgetViewPeriod::Year => (now.year(), 0),
@@ -69,10 +74,10 @@ pub fn comparison_periods(gran: BudgetViewPeriod) -> Vec<ChartPeriod> {
             BudgetViewPeriod::Week => {
                 if period <= 1 {
                     year -= 1;
-                    period = NaiveDate::from_ymd_opt(year, 12, 28)
-                        .unwrap()
-                        .iso_week()
-                        .week() as i32;
+                    period = crate::models::budget_period_count(
+                        crate::models::BudgetGranularity::Weekly,
+                        year,
+                    );
                 } else {
                     period -= 1;
                 }
@@ -114,6 +119,25 @@ pub fn ln1p(v: f64) -> f64 {
     v.max(0.0).ln_1p()
 }
 
+pub fn comparison_connector_widths(change: f64, max_change: f64) -> [f32; 4] {
+    const MIN_WIDTH: f32 = 2.5;
+    const MAX_WIDTH: f32 = 4.5;
+
+    let ratio = if max_change > 0.0 {
+        (change.abs() / max_change).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    let end_width = MIN_WIDTH + (MAX_WIDTH - MIN_WIDTH) * ratio;
+    let step = (end_width - MIN_WIDTH) / 3.0;
+    [
+        MIN_WIDTH,
+        MIN_WIDTH + step,
+        MIN_WIDTH + step * 2.0,
+        end_width,
+    ]
+}
+
 /// Compact $ label for a RAW dollar value (formatter side of [`ln1p`]).
 pub fn money_label(v: f64) -> String {
     if v <= 0.0 {
@@ -127,6 +151,13 @@ pub fn money_label(v: f64) -> String {
     } else {
         format!("${:.2}", v)
     }
+}
+
+pub fn money_axis_hints() -> AxisHints<'static> {
+    AxisHints::new_x()
+        .formatter(|mark, _| money_label(mark.value.exp_m1()))
+        .label_spacing(eframe::egui::emath::Rangef::new(16.0, 40.0))
+        .tick_label_color(crate::ui::theme::fg_secondary())
 }
 
 /// 1-2-5 dollar ticks inside the visible ln-space range — feed to
@@ -152,21 +183,25 @@ pub fn money_grid_spacer(input: GridInput) -> Vec<GridMark> {
     }
     raw.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
 
-    let xs: Vec<f64> = raw.iter().map(|v| v.ln_1p()).collect();
+    let min_gap = (input.base_step_size * 4.0).max(f64::EPSILON);
+    let mut xs = Vec::new();
+    for value in raw.iter().map(|value| value.ln_1p()) {
+        if xs.last().map_or(true, |last| value - *last >= min_gap) {
+            xs.push(value);
+        }
+    }
     xs.iter()
         .enumerate()
-        .map(|(i, &x)| {
-            // step_size = gap to the neighbouring mark (grid-line thickness
-            // tier); first mark borrows the gap to the next.
+        .map(|(i, &value)| {
             let step = if i + 1 < xs.len() {
-                xs[i + 1] - x
+                xs[i + 1] - value
             } else if i > 0 {
-                x - xs[i - 1]
+                value - xs[i - 1]
             } else {
-                0.1
+                min_gap
             };
             GridMark {
-                value: x,
+                value,
                 step_size: step.max(f64::EPSILON),
             }
         })
@@ -218,6 +253,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn comparison_connector_widths_are_bounded_and_monotonic() {
+        let zero = comparison_connector_widths(0.0, 0.0);
+        assert_eq!(zero, [2.5; 4]);
+
+        let small = comparison_connector_widths(0.25, 1.0);
+        let large = comparison_connector_widths(1.0, 1.0);
+        assert!(small[3] < large[3]);
+        assert_eq!(large[3], 4.5);
+        assert!(small.iter().all(|width| (2.5..=4.5).contains(width)));
+        assert!(large.iter().all(|width| (2.5..=4.5).contains(width)));
+        assert!(small.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(large.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
     fn money_spacer_ticks_inside_ln_bounds() {
         // $50..$500 visible → ln-space bounds.
         let (lo, hi) = (ln1p(50.0), ln1p(500.0));
@@ -238,6 +288,18 @@ mod tests {
                 });
             assert!(ok, "mark {raw} not a 1-2-5 value");
         }
+    }
+
+    #[test]
+    fn money_spacer_keeps_labels_separated() {
+        let marks = money_grid_spacer(GridInput {
+            bounds: (0.0, ln1p(5.0)),
+            base_step_size: 0.1,
+        });
+        assert_eq!(marks.first().map(|mark| mark.value), Some(0.0));
+        assert!(marks
+            .windows(2)
+            .all(|pair| { pair[1].value - pair[0].value >= 0.4 - f64::EPSILON }));
     }
 
     #[test]

@@ -4,6 +4,25 @@ All notable changes to TwoCents are documented here.
 
 ## [Unreleased]
 
+## [v0.1.2] - 2026-09-24
+
+### Added
+- Year-scoped budget planning with midyear actual-spend catch-up, selected-period suffix propagation, calendar-week boundaries, atomic persistence, and full-year Copy Limits.
+- Persistent Household and Settlements undo history with contextual Ctrl+Z and destructive-action confirmations.
+- Responsive unified Household Members and Categories layout with a Default member marker and adaptive two-column cards.
+- Improved budget currency editing with select-all, Enter-to-save, Escape/click-away cancel, strict parsing, and safe limits.
+- Compact content-sized destructive confirmations that keep the underlying app visible.
+
+### Changed
+- Budgets now use fresh plans instead of stale cached propagation, with quarterly, monthly, and weekly values derived consistently.
+- Analytics period labels, chart grids, tapered connectors, and transient status placement were refined.
+- Household and Settlement confirmations now preserve the surrounding interface while remaining interaction-protected.
+
+### Fixed
+- Prevented budget values from bleeding across calendar years.
+- Fixed stale weekly/monthly/quarterly propagation and boundary-week handling.
+- Fixed destructive confirmations appearing oversized or hiding the underlying Household/Settlements view.
+
 ## [v0.1.1] - 2026-09-23
 
 ### Added

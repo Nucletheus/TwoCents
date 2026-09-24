@@ -1,6 +1,7 @@
 use crate::db::*;
 use crate::models::*;
 use eframe::egui::{self, Color32, RichText, Stroke};
+use rusqlite::OptionalExtension;
 
 const NAME_COL_W: f32 = 150.0;
 const BTN_COL_W: f32 = 46.0;
@@ -223,7 +224,8 @@ impl super::super::TwoCentsApp {
         let num_members = members.len();
 
         // Collect deferred actions
-        let mut save_target: Option<(String, String, f64)> = None;
+        let mut pending_edits = std::mem::take(&mut self.settlement_pending_edits);
+        let mut commit_edit = false;
         let mut clear_target: Option<(String, bool)> = None;
         let mut apply_parent_to_subs: Option<String> = None;
         let mut apply_equal_split: Option<String> = None;
@@ -324,7 +326,8 @@ impl super::super::TwoCentsApp {
                                     has_subs,
                                     &members,
                                     &splits,
-                                    &mut save_target,
+                                    &mut pending_edits,
+                                    &mut commit_edit,
                                     &mut clear_target,
                                     &mut apply_parent_to_subs,
                                     &mut apply_equal_split,
@@ -339,70 +342,154 @@ impl super::super::TwoCentsApp {
                 }
             });
 
-        // Apply deferred actions
-        if let Some((cat, member, pct)) = save_target {
-            let _ = save_category_split(&self.conn, self.household_id, &cat, &member, pct);
-            self.category_splits =
-                load_category_splits(&self.conn, self.household_id).unwrap_or_default();
+        self.settlement_pending_edits = pending_edits;
+        if commit_edit {
+            self.commit_pending_settlement_edits();
+        }
+        if !self.settlement_pending_edits.is_empty() {
+            return;
         }
         if let Some((label, include_subs)) = clear_target {
-            // Parent "0" clears the parent and all its subcategory splits;
-            // sub "0" clears just that subcategory.
-            let _ = delete_category_splits_for(&self.conn, self.household_id, &label);
-            if include_subs {
-                if let Some(pid) = categories.iter().find(|c| c.name == label).map(|c| c.id) {
-                    for sub in categories.iter().filter(|c| c.parent_id == Some(pid)) {
-                        let sub_label = sub.full_label(&parents);
-                        let _ =
-                            delete_category_splits_for(&self.conn, self.household_id, &sub_label);
-                    }
-                }
-            }
-            self.category_splits =
-                load_category_splits(&self.conn, self.household_id).unwrap_or_default();
+            let descendant_count = if include_subs {
+                Self::settlement_equal_labels(&categories, &label, true)
+                    .len()
+                    .saturating_sub(1)
+            } else {
+                0
+            };
+            self.open_destructive_confirmation(DestructiveConfirm::Settlement {
+                label,
+                include_subcategories: include_subs,
+                descendant_count,
+            });
         }
         if let Some(parent_label) = apply_parent_to_subs {
-            let n = members.len().max(1) as f64;
-            let each = 100.0 / n;
-            for m in &members {
-                let _ = save_category_split(
-                    &self.conn,
-                    self.household_id,
-                    &parent_label,
-                    &m.name,
-                    each,
-                );
-            }
-            let parent_id = categories
-                .iter()
-                .find(|c| c.name == parent_label)
-                .map(|c| c.id);
-            if let Some(pid) = parent_id {
-                for sub in categories.iter().filter(|c| c.parent_id == Some(pid)) {
-                    let sub_label = sub.full_label(&parents);
-                    for m in &members {
-                        let _ = save_category_split(
-                            &self.conn,
-                            self.household_id,
-                            &sub_label,
-                            &m.name,
-                            each,
-                        );
-                    }
-                }
-            }
-            self.category_splits =
-                load_category_splits(&self.conn, self.household_id).unwrap_or_default();
+            self.apply_settlement_equal_split(parent_label, true);
         }
         if let Some(cat_label) = apply_equal_split {
-            let n = members.len().max(1) as f64;
-            let each = 100.0 / n;
-            for m in &members {
-                let _ =
-                    save_category_split(&self.conn, self.household_id, &cat_label, &m.name, each);
+            self.apply_settlement_equal_split(cat_label, false);
+        }
+    }
+
+    fn settlement_equal_labels(
+        categories: &[Category],
+        label: &str,
+        include_subcategories: bool,
+    ) -> Vec<String> {
+        let parents = category_parent_map(categories);
+        let Some(category) = find_category_by_label(categories, label) else {
+            return vec![label.to_string()];
+        };
+        let mut labels = vec![category.full_label(&parents)];
+        if include_subcategories {
+            let mut ids = vec![category.id];
+            let mut index = 0;
+            while index < ids.len() {
+                let parent_id = ids[index];
+                for child in categories
+                    .iter()
+                    .filter(|child| child.parent_id == Some(parent_id))
+                {
+                    if !ids.contains(&child.id) {
+                        labels.push(child.full_label(&parents));
+                        ids.push(child.id);
+                    }
+                }
+                index += 1;
             }
-            self.category_splits =
-                load_category_splits(&self.conn, self.household_id).unwrap_or_default();
+        }
+        labels
+    }
+
+    fn apply_settlement_equal_split(&mut self, label: String, include_subcategories: bool) {
+        let categories = self.categories.clone();
+        let members = self.members.clone();
+        let labels = Self::settlement_equal_labels(&categories, &label, include_subcategories);
+        let each = 100.0 / members.len().max(1) as f64;
+        let household_id = self.household_id;
+        let result = self.run_settlement_mutation(
+            |tx| {
+                for category in &labels {
+                    for member in &members {
+                        save_category_split(tx, household_id, category, &member.name, each)?;
+                    }
+                }
+                Ok(())
+            },
+            |before, after| UndoAction::SettlementEqualSplit { before, after },
+        );
+        match result {
+            Ok(true) => self.set_transient_status("Equal split saved."),
+            Ok(false) => {}
+            Err(error) => self.set_transient_status(error),
+        }
+    }
+
+    pub(crate) fn clear_settlement_splits_with_undo(
+        &mut self,
+        label: &str,
+        include_subcategories: bool,
+    ) -> Result<(), String> {
+        let categories = self.categories.clone();
+        let labels = Self::settlement_equal_labels(&categories, label, include_subcategories);
+        let household_id = self.household_id;
+        let result = self.run_settlement_mutation(
+            |tx| {
+                for category in &labels {
+                    delete_category_splits_for(tx, household_id, category)?;
+                }
+                Ok(())
+            },
+            |before, after| UndoAction::SettlementClear { before, after },
+        )?;
+        if result {
+            self.set_transient_status("Settlement splits cleared.");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_pending_settlement_edits(&mut self) {
+        let pending = std::mem::take(&mut self.settlement_pending_edits);
+        let mut failed = Vec::new();
+        let mut changed = false;
+        let mut error = None;
+        for edit in pending {
+            let household_id = self.household_id;
+            let category = edit.category.clone();
+            let member = edit.member_name.clone();
+            let before = edit.before;
+            let value = edit.value;
+            let result = self.run_settlement_mutation(
+                |tx| {
+                    let current = tx
+                        .query_row(
+                            "SELECT percentage FROM category_splits WHERE household_id = ?1 AND category = ?2 AND member_name = ?3",
+                            rusqlite::params![household_id, category, member],
+                            |row| row.get::<_, f64>(0),
+                        )
+                        .optional()?;
+                    if current != before {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "settlement edit changed before commit".into(),
+                        ));
+                    }
+                    save_category_split(tx, household_id, &category, &member, value)
+                },
+                |before, after| UndoAction::SettlementPercentage { before, after },
+            );
+            match result {
+                Ok(changed_now) => changed |= changed_now,
+                Err(message) => {
+                    error.get_or_insert(message);
+                    failed.push(edit);
+                }
+            }
+        }
+        self.settlement_pending_edits = failed;
+        if let Some(message) = error {
+            self.set_transient_status(message);
+        } else if changed {
+            self.set_transient_status("Split updated.");
         }
     }
 }
@@ -435,7 +522,8 @@ fn render_category_block(
     has_subs: bool,
     members: &[HouseholdMember],
     splits: &[CategorySplit],
-    save_target: &mut Option<(String, String, f64)>,
+    pending_edits: &mut Vec<PendingSettlementEdit>,
+    commit_edit: &mut bool,
     clear_target: &mut Option<(String, bool)>,
     apply_parent_to_subs: &mut Option<String>,
     apply_equal_split: &mut Option<String>,
@@ -635,9 +723,13 @@ fn render_category_block(
                             let current = cat_splits
                                 .iter()
                                 .find(|s| s.member_name == m.name)
-                                .map(|s| s.percentage)
+                                .map(|s| s.percentage);
+                            let mut pct = pending_edits
+                                .iter()
+                                .find(|pending| pending.matches(cat_label, &m.name))
+                                .map(|pending| pending.value)
+                                .or(current)
                                 .unwrap_or(0.0);
-                            let mut pct = current;
 
                             centered_cell(ui, cell_rect, |ui| {
                                 let response = ui.add(
@@ -648,8 +740,37 @@ fn render_category_block(
                                         .max_decimals(0),
                                 );
                                 if response.changed() {
-                                    *save_target =
-                                        Some((cat_label.to_string(), m.name.clone(), pct));
+                                    if let Some(pending) = pending_edits
+                                        .iter_mut()
+                                        .find(|pending| pending.matches(cat_label, &m.name))
+                                    {
+                                        pending.value = pct;
+                                    } else {
+                                        pending_edits.push(PendingSettlementEdit {
+                                            category: cat_label.to_string(),
+                                            member_name: m.name.clone(),
+                                            before: current,
+                                            value: pct,
+                                        });
+                                    }
+                                }
+                                if response.drag_stopped()
+                                    || response.lost_focus()
+                                    || (response.has_focus()
+                                        && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                                {
+                                    if pending_edits
+                                        .iter()
+                                        .any(|pending| pending.matches(cat_label, &m.name))
+                                    {
+                                        *commit_edit = true;
+                                    }
+                                }
+                                if (response.has_focus() || response.dragged())
+                                    && ui.input(|input| input.key_pressed(egui::Key::Escape))
+                                {
+                                    pending_edits
+                                        .retain(|pending| !pending.matches(cat_label, &m.name));
                                 }
                             });
                         }

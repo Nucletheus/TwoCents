@@ -242,6 +242,10 @@ pub fn render_period_comparison_chart(
             data.period_a_label, data.period_b_label
         ),
     );
+    crate::ui::components::label_muted(
+        ui,
+        "Connector width = proportional change; widens toward Period B.",
+    );
     ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
     // Chart + picker column take the whole remaining viewport — no
@@ -398,6 +402,16 @@ fn render_paired_chart(
     reseed: bool,
 ) {
     let n = data.category_comparisons.len();
+    let max_change = data
+        .category_comparisons
+        .iter()
+        .map(|cat| {
+            (super::charts_common::ln1p(cat.period_b_amount)
+                - super::charts_common::ln1p(cat.period_a_amount))
+            .abs()
+        })
+        .fold(0.0_f64, f64::max);
+    let grid_color = crate::ui::theme::fg_secondary().gamma_multiply(0.5);
     // y = n-1-i puts sorted-desc index 0 at the TOP of the axis.
     let labels_by_y: Vec<String> = data
         .category_comparisons
@@ -436,9 +450,10 @@ fn render_paired_chart(
         .allow_zoom(true)
         .allow_scroll(true)
         .show_grid([true, false])
+        .grid_color(grid_color)
         .x_grid_spacer(super::charts_common::money_grid_spacer)
         .y_grid_spacer(super::charts_common::category_grid_spacer)
-        .x_axis_formatter(|m, _r| super::charts_common::money_label(m.value.exp_m1()))
+        .custom_x_axes(vec![super::charts_common::money_axis_hints()])
         .y_axis_formatter(y_formatter);
     let plot = if reseed { plot.reset() } else { plot };
 
@@ -454,12 +469,28 @@ fn render_paired_chart(
             let a_color = base.gamma_multiply(0.55);
             let a_x = super::charts_common::ln1p(cat.period_a_amount);
             let b_x = super::charts_common::ln1p(cat.period_b_amount);
-            // Connector between the two bar tips — color = direction.
-            plot_ui.line(
-                Line::new(format!("conn_{i}"), vec![[a_x, y + 0.18], [b_x, y - 0.18]])
-                    .color(dir_colors[i])
-                    .width(2.0_f32),
-            );
+            let connector_from = [a_x, y + 0.18];
+            let connector_to = [b_x, y - 0.18];
+            let connector_widths =
+                super::charts_common::comparison_connector_widths((b_x - a_x).abs(), max_change);
+            for (segment, width) in connector_widths.iter().enumerate() {
+                let segment_start = segment as f64 / connector_widths.len() as f64;
+                let segment_end = (segment + 1) as f64 / connector_widths.len() as f64;
+                let start = [
+                    connector_from[0] + (connector_to[0] - connector_from[0]) * segment_start,
+                    connector_from[1] + (connector_to[1] - connector_from[1]) * segment_start,
+                ];
+                let end = [
+                    connector_from[0] + (connector_to[0] - connector_from[0]) * segment_end,
+                    connector_from[1] + (connector_to[1] - connector_from[1]) * segment_end,
+                ];
+                plot_ui.line(
+                    Line::new(format!("conn_{i}_{segment}"), vec![start, end])
+                        .color(dir_colors[i])
+                        .width(*width)
+                        .allow_hover(false),
+                );
+            }
             let bar_a = Bar::new(y + 0.18, a_x)
                 .width(0.32)
                 .fill(a_color)

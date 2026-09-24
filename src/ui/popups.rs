@@ -151,22 +151,81 @@ pub fn category_picker_menu_ui(
     picked
 }
 impl TwoCentsApp {
+    fn reload_color_state(&mut self) {
+        let household_id = self.household_id;
+        self.categories = load_categories(&self.conn, household_id).unwrap_or_default();
+        self.members = load_household_members(&self.conn, household_id).unwrap_or_default();
+        self.rebuild_cached_candidates();
+    }
+
     fn set_member_color(&mut self, member_id: i64, color: Color32) {
-        match update_member_color_db(&self.conn, self.household_id, member_id, color) {
-            Ok(()) => {
-                if let Some(member) = self
-                    .members
-                    .iter_mut()
-                    .find(|member| member.id == member_id)
-                {
-                    member.color = color;
+        self.flush_deferred_expense_commits();
+        let household_id = self.household_id;
+        let pending = self
+            .household_color_pending
+            .clone()
+            .filter(|pending| !pending.category && pending.target_id == member_id);
+        if self.household_color_pending.is_some() && pending.is_none() {
+            self.household_color_pending = None;
+        }
+        let result = if let Some(pending) = pending {
+            update_household_undo_action(
+                &mut self.conn,
+                household_id,
+                pending.action_id,
+                pending.before.clone(),
+                &pending.last_after,
+                |tx| update_member_color_db(tx, household_id, member_id, color),
+                |before, after| UndoAction::MemberColor { before, after },
+            )
+        } else {
+            let before = match capture_household_state(&self.conn, household_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    self.set_transient_status(error.to_string());
+                    return;
+                }
+            };
+            let result = run_household_action(
+                &mut self.conn,
+                household_id,
+                |tx| update_member_color_db(tx, household_id, member_id, color),
+                |before, after| UndoAction::MemberColor { before, after },
+            );
+            if let Ok(Some(action_id)) = &result {
+                if let Ok(after) = capture_household_state(&self.conn, household_id) {
+                    self.household_color_pending = Some(PendingColorUndo {
+                        action_id: *action_id,
+                        target_id: member_id,
+                        category: false,
+                        before,
+                        last_after: after,
+                    });
                 }
             }
-            Err(_err) => {}
+            result
+        };
+        match result {
+            Ok(Some(action_id)) => {
+                self.reload_color_state();
+                if let Some(pending) = &mut self.household_color_pending {
+                    if pending.action_id == action_id {
+                        if let Ok(state) = capture_household_state(&self.conn, household_id) {
+                            pending.last_after = state;
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                self.household_color_pending = None;
+                self.reload_color_state();
+            }
+            Err(error) => self.set_transient_status(error.to_string()),
         }
     }
 
     pub fn open_member_color_popup(&mut self, id: i64, name: String, color: Color32) {
+        self.household_color_pending = None;
         self.member_color_popup = Some(MemberColorPopup { id, name, color });
     }
 
@@ -208,135 +267,165 @@ impl TwoCentsApp {
         if let Some((id, color)) = color_changed {
             self.set_member_color(id, color);
         }
-        self.member_color_popup = if close_requested { None } else { popup_state };
+        if close_requested || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.household_color_pending = None;
+            self.member_color_popup = None;
+        } else {
+            self.member_color_popup = popup_state;
+        }
     }
 
     fn set_category_color(&mut self, category_id: i64, color: Color32) {
-        let is_parent = self
-            .categories
-            .iter()
-            .find(|category| category.id == category_id)
-            .is_some_and(|category| category.parent_id.is_none());
-
-        match update_category_color_db(&self.conn, self.household_id, category_id, color) {
-            Ok(()) => {
-                if let Some(category) = self
-                    .categories
-                    .iter_mut()
-                    .find(|category| category.id == category_id)
-                {
-                    category.color = color;
+        self.flush_deferred_expense_commits();
+        let household_id = self.household_id;
+        let pending = self
+            .household_color_pending
+            .clone()
+            .filter(|pending| pending.category && pending.target_id == category_id);
+        if self.household_color_pending.is_some() && pending.is_none() {
+            self.household_color_pending = None;
+        }
+        let result = if let Some(pending) = pending {
+            update_household_undo_action(
+                &mut self.conn,
+                household_id,
+                pending.action_id,
+                pending.before.clone(),
+                &pending.last_after,
+                |tx| update_category_color_cascade_db(tx, household_id, category_id, color),
+                |before, after| UndoAction::CategoryColor { before, after },
+            )
+        } else {
+            let before = match capture_household_state(&self.conn, household_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    self.set_transient_status(error.to_string());
+                    return;
                 }
-                if is_parent {
-                    self.recolor_subcategories_for_parent(category_id, color);
+            };
+            let result = run_household_action(
+                &mut self.conn,
+                household_id,
+                |tx| update_category_color_cascade_db(tx, household_id, category_id, color),
+                |before, after| UndoAction::CategoryColor { before, after },
+            );
+            if let Ok(Some(action_id)) = &result {
+                if let Ok(after) = capture_household_state(&self.conn, household_id) {
+                    self.household_color_pending = Some(PendingColorUndo {
+                        action_id: *action_id,
+                        target_id: category_id,
+                        category: true,
+                        before,
+                        last_after: after,
+                    });
                 }
             }
-            Err(_err) => {}
+            result
+        };
+        match result {
+            Ok(Some(action_id)) => {
+                self.reload_color_state();
+                if let Some(pending) = &mut self.household_color_pending {
+                    if pending.action_id == action_id {
+                        if let Ok(state) = capture_household_state(&self.conn, household_id) {
+                            pending.last_after = state;
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                self.household_color_pending = None;
+                self.reload_color_state();
+            }
+            Err(error) => self.set_transient_status(error.to_string()),
         }
     }
 
     fn set_category_excluded(&mut self, category_id: i64, excluded: bool) {
-        let _ = self.conn.execute(
-            "UPDATE categories SET excluded = ?1 WHERE id = ?2 AND household_id = ?3",
-            rusqlite::params![excluded as i64, category_id, self.household_id],
+        let household_id = self.household_id;
+        let result = self.run_household_mutation(
+            |tx| {
+                tx.execute(
+                    "UPDATE categories SET excluded = ?1 WHERE id = ?2 AND household_id = ?3",
+                    rusqlite::params![excluded as i64, category_id, household_id],
+                )?;
+                Ok(())
+            },
+            |before, after| UndoAction::CategoryExclusion { before, after },
         );
-        if let Some(category) = self
-            .categories
-            .iter_mut()
-            .find(|category| category.id == category_id)
-        {
-            category.excluded = excluded;
+        if let Err(error) = result {
+            self.set_transient_status(error);
         }
     }
 
-    fn recolor_subcategories_for_parent(&mut self, parent_id: i64, parent_color: Color32) {
-        let mut sub_ids: Vec<i64> = self
-            .categories
-            .iter()
-            .filter(|category| category.parent_id == Some(parent_id))
-            .map(|category| category.id)
-            .collect();
-        sub_ids.sort_by(|a, b| {
-            let name_a = self
-                .categories
-                .iter()
-                .find(|category| category.id == *a)
-                .map(|category| category.name.as_str())
-                .unwrap_or("");
-            let name_b = self
-                .categories
-                .iter()
-                .find(|category| category.id == *b)
-                .map(|category| category.name.as_str())
-                .unwrap_or("");
-            name_a.to_lowercase().cmp(&name_b.to_lowercase())
-        });
-        let sub_count = sub_ids.len().max(1);
-        for (sub_index, sub_id) in sub_ids.iter().enumerate() {
-            let sub_color = subcategory_color_from_parent(parent_color, sub_index, sub_count);
-            match update_category_color_db(&self.conn, self.household_id, *sub_id, sub_color) {
-                Ok(()) => {
-                    if let Some(sub) = self
-                        .categories
-                        .iter_mut()
-                        .find(|category| category.id == *sub_id)
-                    {
-                        sub.color = sub_color;
-                    }
-                }
-                Err(_err) => {}
-            }
+    pub(crate) fn rename_category_with_undo(
+        &mut self,
+        category_id: i64,
+        name: &str,
+    ) -> Result<(), String> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("Enter a category name first.".to_string());
         }
+        let household_id = self.household_id;
+        let result = self.run_household_mutation(
+            |tx| rename_category_db(tx, household_id, category_id, &name),
+            |before, after| UndoAction::CategoryRename { before, after },
+        )?;
+        if result {
+            self.set_transient_status("Category renamed.");
+        }
+        Ok(())
     }
 
-    fn delete_category(&mut self, category_id: i64) {
-        // the Income root drives the credit/debit sign convention —
-        // deleting it would strand income rows. Everything else is deletable;
-        // exclusion is a user-set flag now, not name-based protection.
+    pub(crate) fn delete_category_with_undo(&mut self, category_id: i64) -> Result<(), String> {
         let is_income_root = self
             .categories
             .iter()
             .find(|category| category.id == category_id)
             .is_some_and(|category| category.name.eq_ignore_ascii_case(INCOME_PARENT));
         if is_income_root {
-            return;
+            return Err("The Income category cannot be deleted.".to_string());
         }
-        match delete_category_from_db(&self.conn, self.household_id, category_id) {
-            Ok(()) => {
-                self.expenses = load_expenses(&self.conn, self.household_id).unwrap_or_default();
-                self.reload_categories();
-            }
-            Err(_err) => {}
+        let household_id = self.household_id;
+        let result = self.run_household_mutation(
+            |tx| delete_category_from_db(tx, household_id, category_id),
+            |before, after| UndoAction::CategoryDelete { before, after },
+        )?;
+        if result {
+            self.set_transient_status("Category deleted.");
         }
+        Ok(())
     }
 
-    fn add_parent_category(&mut self, name: &str) {
+    fn add_parent_category(&mut self, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
-            return;
+            return Ok(());
         }
-        match add_parent_category_db(&self.conn, self.household_id, name) {
-            Ok(()) => {
-                self.reload_categories();
-            }
-            Err(_err) => {}
-        }
+        let household_id = self.household_id;
+        self.run_household_mutation(
+            |tx| add_parent_category_db(tx, household_id, name),
+            |before, after| UndoAction::CategoryAdd { before, after },
+        )?;
+        Ok(())
     }
 
-    fn add_subcategory(&mut self, parent_id: i64, name: &str) {
+    fn add_subcategory(&mut self, parent_id: i64, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
-            return;
+            return Ok(());
         }
-        match add_subcategory_db(&self.conn, self.household_id, parent_id, name) {
-            Ok(()) => {
-                self.reload_categories();
-            }
-            Err(_err) => {}
-        }
+        let household_id = self.household_id;
+        self.run_household_mutation(
+            |tx| add_subcategory_db(tx, household_id, parent_id, name),
+            |before, after| UndoAction::CategoryAdd { before, after },
+        )?;
+        Ok(())
     }
 
     pub fn open_category_color_popup(&mut self, category_id: i64, name: String, color: Color32) {
+        self.household_color_pending = None;
         self.category_color_popup = Some(CategoryColorPopup {
             id: category_id,
             name,
@@ -350,6 +439,9 @@ impl TwoCentsApp {
         let parent_ids = sorted_parent_category_ids(&categories);
 
         let mut delete_target: Option<i64> = None;
+        let mut start_rename: Option<(i64, String)> = None;
+        let mut commit_rename: Option<(i64, String)> = None;
+        let mut cancel_rename = false;
         let mut start_add_sub: Option<i64> = None;
         let mut commit_sub = false;
         let mut cancel_sub = false;
@@ -380,8 +472,24 @@ impl TwoCentsApp {
                             .stroke(egui::Stroke::new(1.0_f32, crate::ui::theme::border())),
                         )
                         .clicked()
+                        && !parent.name.eq_ignore_ascii_case(INCOME_PARENT)
                     {
                         delete_target = Some(parent.id);
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Rename")
+                                    .small()
+                                    .color(crate::ui::theme::fg_primary()),
+                            )
+                            .fill(crate::ui::theme::bg_hover())
+                            .stroke(egui::Stroke::new(1.0_f32, crate::ui::theme::border())),
+                        )
+                        .clicked()
+                        && !parent.name.eq_ignore_ascii_case(INCOME_PARENT)
+                    {
+                        start_rename = Some((parent.id, parent.name.clone()));
                     }
                     if ui
                         .add(
@@ -405,6 +513,28 @@ impl TwoCentsApp {
                     }
                 });
             });
+
+            if self.editing_category_id == Some(parent.id) {
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.editing_category_name)
+                            .id(egui::Id::new(("editing_category_name", parent.id)))
+                            .desired_width(180.0),
+                    );
+                    if response.lost_focus()
+                        || (response.has_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                    {
+                        commit_rename = Some((parent.id, self.editing_category_name.clone()));
+                    }
+                    if ui.small_button("Cancel").clicked()
+                        || ((response.has_focus() || response.lost_focus())
+                            && ui.input(|input| input.key_pressed(egui::Key::Escape)))
+                    {
+                        cancel_rename = true;
+                    }
+                });
+            }
 
             // Inline subcategory input row
             if self.adding_subcategory_to == Some(parent.id) {
@@ -477,12 +607,48 @@ impl TwoCentsApp {
                         {
                             delete_target = Some(sub.id);
                         }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Rename")
+                                        .small()
+                                        .color(crate::ui::theme::fg_primary()),
+                                )
+                                .fill(crate::ui::theme::bg_hover())
+                                .stroke(egui::Stroke::new(1.0_f32, crate::ui::theme::border())),
+                            )
+                            .clicked()
+                        {
+                            start_rename = Some((sub.id, sub.name.clone()));
+                        }
                         let mut sub_excluded = sub.excluded;
                         if ui.checkbox(&mut sub_excluded, "Excluded").changed() {
                             excluded_toggles.push((sub.id, sub_excluded));
                         }
                     });
                 });
+                if self.editing_category_id == Some(sub.id) {
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.editing_category_name)
+                                .id(egui::Id::new(("editing_category_name", sub.id)))
+                                .desired_width(180.0),
+                        );
+                        if response.lost_focus()
+                            || (response.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                        {
+                            commit_rename = Some((sub.id, self.editing_category_name.clone()));
+                        }
+                        if ui.small_button("Cancel").clicked()
+                            || ((response.has_focus() || response.lost_focus())
+                                && ui.input(|input| input.key_pressed(egui::Key::Escape)))
+                        {
+                            cancel_rename = true;
+                        }
+                    });
+                }
             }
             ui.separator();
         }
@@ -491,6 +657,30 @@ impl TwoCentsApp {
             self.set_category_excluded(category_id, excluded);
         }
 
+        if let Some((category_id, name)) = start_rename {
+            self.editing_category_id = Some(category_id);
+            self.editing_category_name = name;
+            ui.ctx().memory_mut(|memory| {
+                memory.request_focus(egui::Id::new(("editing_category_name", category_id)))
+            });
+        }
+        if let Some((category_id, name)) = commit_rename {
+            if cancel_rename {
+                self.editing_category_id = None;
+                self.editing_category_name.clear();
+            } else {
+                match self.rename_category_with_undo(category_id, &name) {
+                    Ok(()) => {
+                        self.editing_category_id = None;
+                        self.editing_category_name.clear();
+                    }
+                    Err(error) => self.set_transient_status(error),
+                }
+            }
+        } else if cancel_rename {
+            self.editing_category_id = None;
+            self.editing_category_name.clear();
+        }
         if let Some(parent_id) = start_add_sub {
             self.adding_subcategory_to = Some(parent_id);
             self.inline_subcategory_name.clear();
@@ -504,18 +694,45 @@ impl TwoCentsApp {
             if let Some(parent_id) = self.adding_subcategory_to {
                 let name = self.inline_subcategory_name.trim().to_string();
                 if !name.is_empty() {
-                    self.add_subcategory(parent_id, &name);
+                    match self.add_subcategory(parent_id, &name) {
+                        Ok(()) => {
+                            self.adding_subcategory_to = None;
+                            self.inline_subcategory_name.clear();
+                        }
+                        Err(error) => self.set_transient_status(error),
+                    }
                 }
             }
-            self.adding_subcategory_to = None;
-            self.inline_subcategory_name.clear();
         }
         if cancel_sub {
             self.adding_subcategory_to = None;
             self.inline_subcategory_name.clear();
         }
         if let Some(category_id) = delete_target {
-            self.delete_category(category_id);
+            if let Some(category) = categories
+                .iter()
+                .find(|category| category.id == category_id)
+            {
+                let mut descendant_ids = vec![category_id];
+                let mut descendant_index = 0;
+                while descendant_index < descendant_ids.len() {
+                    let parent_id = descendant_ids[descendant_index];
+                    for child in categories
+                        .iter()
+                        .filter(|candidate| candidate.parent_id == Some(parent_id))
+                    {
+                        if !descendant_ids.contains(&child.id) {
+                            descendant_ids.push(child.id);
+                        }
+                    }
+                    descendant_index += 1;
+                }
+                self.open_destructive_confirmation(DestructiveConfirm::Category {
+                    id: category.id,
+                    label: category.full_label(&parents),
+                    descendant_count: descendant_ids.len().saturating_sub(1),
+                });
+            }
         }
     }
 
@@ -551,10 +768,14 @@ impl TwoCentsApp {
         if add_parent {
             let name = self.new_parent_category_name.trim().to_string();
             if !name.is_empty() {
-                self.add_parent_category(&name);
-                self.new_parent_category_name.clear();
-                if let Some(response) = add_response {
-                    response.request_focus();
+                match self.add_parent_category(&name) {
+                    Ok(()) => {
+                        self.new_parent_category_name.clear();
+                        if let Some(response) = add_response {
+                            response.request_focus();
+                        }
+                    }
+                    Err(error) => self.set_transient_status(error),
                 }
             }
         }
@@ -597,15 +818,155 @@ impl TwoCentsApp {
         if let Some((id, color)) = color_changed {
             self.set_category_color(id, color);
         }
-        self.category_color_popup = if close_requested { None } else { popup_state };
+        if close_requested || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.household_color_pending = None;
+            self.category_color_popup = None;
+        } else {
+            self.category_color_popup = popup_state;
+        }
     }
 
     pub fn ui_delete_confirmations(&mut self, ctx: &egui::Context) {
+        if let Some(confirmation) = self.destructive_confirm.clone() {
+            let mut open = true;
+            let mut confirmed = false;
+            let (title, message, action_label) = match &confirmation {
+                DestructiveConfirm::Category {
+                    label,
+                    descendant_count,
+                    ..
+                } => {
+                    let scope = if *descendant_count == 0 {
+                        "this category".to_string()
+                    } else {
+                        format!("this category and {descendant_count} subcategory/subcategories")
+                    };
+                    (
+                        "Delete category?",
+                        format!(
+                            "Delete {scope} ({label})? Linked expenses, vendor rules, and split rows will be cleared. You can restore this with Ctrl+Z."
+                        ),
+                        "Delete",
+                    )
+                }
+                DestructiveConfirm::Member { name, .. } => (
+                    "Remove member?",
+                    format!(
+                        "Remove {name}? Their expenses will be unassigned and split rows removed. You can restore this with Ctrl+Z."
+                    ),
+                    "Remove",
+                ),
+                DestructiveConfirm::Settlement {
+                    label,
+                    include_subcategories,
+                    descendant_count,
+                } => {
+                    let scope = if *include_subcategories && *descendant_count > 0 {
+                        format!("{label} and {descendant_count} subcategory/subcategories")
+                    } else {
+                        label.clone()
+                    };
+                    (
+                        "Clear settlement splits?",
+                        format!(
+                            "Clear all split percentages for {scope}? You can restore this with Ctrl+Z."
+                        ),
+                        "Clear",
+                    )
+                }
+            };
+            let text_width = ctx.fonts_mut(|fonts| {
+                let title_width = fonts
+                    .layout_no_wrap(
+                        title.to_string(),
+                        egui::FontId::proportional(15.0),
+                        theme::fg_primary(),
+                    )
+                    .size()
+                    .x;
+                let message_width = fonts
+                    .layout_no_wrap(
+                        message.clone(),
+                        egui::FontId::proportional(14.0),
+                        theme::fg_primary(),
+                    )
+                    .size()
+                    .x;
+                title_width.max(message_width)
+            });
+            let content_width = text_width.max(220.0).clamp(220.0, 400.0);
+            let frame = egui::Frame::window(&ctx.global_style())
+                .fill(ctx.global_style().visuals.panel_fill)
+                .stroke(egui::Stroke::new(2.0_f32, theme::error()))
+                .corner_radius(10.0)
+                .inner_margin(egui::Margin::symmetric(10, 16));
+            egui::Area::new(Id::new((
+                "destructive_confirmation_compact",
+                self.destructive_dialog_generation,
+            )))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                frame.show(ui, |ui| {
+                    ui.set_width(content_width);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        if window_close_button(ui).clicked() {
+                            open = false;
+                        }
+                    });
+                    ui.vertical_centered(|ui| {
+                        crate::ui::components::heading_md(ui, title);
+                        ui.add_space(8.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(message.clone())
+                                    .font(egui::FontId::proportional(14.0))
+                                    .color(crate::ui::theme::fg_primary()),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(16.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if styled_button(ui, "Cancel", false).clicked() {
+                                open = false;
+                            }
+                            ui.add_space(12.0);
+                            let style = crate::ui::components::button_danger(ui);
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(action_label).color(style.text_color),
+                                    )
+                                    .fill(style.fill)
+                                    .stroke(style.stroke),
+                                )
+                                .clicked()
+                            {
+                                confirmed = true;
+                            }
+                        });
+                    });
+                });
+            });
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                open = false;
+            }
+            if !open {
+                self.destructive_confirm = None;
+            } else if confirmed {
+                self.destructive_confirm = None;
+                if let Err(error) = self.confirm_destructive_action(confirmation) {
+                    self.set_transient_status(error);
+                }
+            }
+        }
+
         if self.show_delete_expense_confirm {
             let mut open = self.show_delete_expense_confirm;
             let row_count = self.delete_expense_indices.len();
 
             egui::Window::new("Confirm Deletion")
+                .order(egui::Order::Foreground)
                 .resizable(false)
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -678,7 +1039,8 @@ impl TwoCentsApp {
             let row_count = self.delete_import_indices.len();
 
             egui::Window::new("Remove staged rows?")
-        .resizable(false)
+                .order(egui::Order::Foreground)
+                .resizable(false)
         .collapsible(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .default_width(320.0)

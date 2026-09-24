@@ -27,6 +27,7 @@ use eframe::egui::{self};
 use rusqlite::{params, Connection};
 use std::{collections::HashMap, env, fs, path::PathBuf};
 
+mod budget;
 mod db;
 mod models;
 mod ui;
@@ -100,6 +101,10 @@ struct TwoCentsApp {
     new_member_name: String,
     editing_self_name: String,
     editing_household_name: String,
+    editing_member_id: Option<i64>,
+    editing_member_name: String,
+    editing_category_id: Option<i64>,
+    editing_category_name: String,
     import_rows: Vec<ImportRow>,
     pub show_import_review: bool,
     import_account_name: String,
@@ -113,6 +118,12 @@ struct TwoCentsApp {
     inline_subcategory_name: String,
     category_color_popup: Option<CategoryColorPopup>,
     member_color_popup: Option<MemberColorPopup>,
+    household_color_pending: Option<PendingColorUndo>,
+    destructive_confirm: Option<DestructiveConfirm>,
+    destructive_dialog_generation: u64,
+    settlement_pending_edits: Vec<PendingSettlementEdit>,
+    transient_status: Option<String>,
+    transient_status_until: Option<std::time::Instant>,
     pub expense_grid_state: GridState,
     pub import_grid_state: GridState,
     startup_window_frames: u8,
@@ -336,6 +347,10 @@ impl TwoCentsApp {
             new_member_name: String::new(),
             editing_self_name: String::new(),
             editing_household_name: String::new(),
+            editing_member_id: None,
+            editing_member_name: String::new(),
+            editing_category_id: None,
+            editing_category_name: String::new(),
             import_rows: Vec::new(),
             csv_import_rx: None,
             show_import_review: false,
@@ -350,6 +365,12 @@ impl TwoCentsApp {
             inline_subcategory_name: String::new(),
             category_color_popup: None,
             member_color_popup: None,
+            household_color_pending: None,
+            destructive_confirm: None,
+            destructive_dialog_generation: 0,
+            settlement_pending_edits: Vec::new(),
+            transient_status: None,
+            transient_status_until: None,
             expense_grid_state: GridState::default(),
             import_grid_state: GridState::default(),
             startup_window_frames: 0,
@@ -382,7 +403,12 @@ impl TwoCentsApp {
             // of the session.
             budget_year: chrono::Local::now().year(),
             budget_month: chrono::Local::now().month() as i32,
-            budget_week: chrono::Local::now().iso_week().week(),
+            budget_week: crate::models::budget_period_for_date(
+                crate::models::BudgetGranularity::Weekly,
+                chrono::Local::now().year(),
+                chrono::Local::now().date_naive(),
+            )
+            .unwrap_or(1) as u32,
             budget_quarter: ((chrono::Local::now().month() - 1) / 3 + 1) as u32,
             budget_filter: BudgetFilter::All,
             budget_granularity: BudgetGranularity::Monthly,
@@ -410,6 +436,14 @@ impl TwoCentsApp {
     }
 
     fn reload(&mut self) {
+        let household_id = self.household_id;
+        if let Ok(name) = self.conn.query_row(
+            "SELECT name FROM households WHERE id = ?1",
+            rusqlite::params![household_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            self.household_name = name;
+        }
         // pending grid edits reference expense indices; flush before
         // the row vec is rebuilt or they'd hit the wrong rows.
         self.flush_deferred_expense_commits();
@@ -417,7 +451,6 @@ impl TwoCentsApp {
             load_accounts(&self.conn, self.household_id).unwrap_or_else(|err| Vec::new());
         self.expenses =
             load_expenses(&self.conn, self.household_id).unwrap_or_else(|err| Vec::new());
-        let _ = seed_default_categories(&self.conn, self.household_id);
         self.categories =
             load_categories(&self.conn, self.household_id).unwrap_or_else(|err| Vec::new());
         self.members =
@@ -445,7 +478,10 @@ impl TwoCentsApp {
             BudgetGranularity::Yearly => 0,
             BudgetGranularity::Monthly => self.budget_month,
             BudgetGranularity::Quarterly => 20 + self.budget_quarter as i32,
-            BudgetGranularity::Weekly => 100 + self.budget_week as i32,
+            BudgetGranularity::Weekly => crate::models::budget_period_code(
+                BudgetGranularity::Weekly,
+                self.budget_week as i32,
+            ),
         };
 
         // Compute budgets from snapshots (annual cap + overrides → default per period)
@@ -459,7 +495,7 @@ impl TwoCentsApp {
         }
 
         // Fallback: if no snapshot data exists, try legacy budgets table
-        if budgets.is_empty() {
+        if self.cached_budget_snapshots.is_empty() {
             if let Ok(list) =
                 load_budgets(&self.conn, self.household_id, self.budget_year, month_code)
             {
@@ -504,6 +540,176 @@ impl TwoCentsApp {
 
     fn reload_categories(&mut self) {
         self.categories = load_categories(&self.conn, self.household_id).unwrap_or_default();
+    }
+
+    pub(crate) fn set_transient_status(&mut self, message: impl Into<String>) {
+        self.transient_status = Some(message.into());
+        self.transient_status_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
+    }
+
+    pub(crate) fn expire_transient_status(&mut self) {
+        if self
+            .transient_status_until
+            .is_some_and(|until| std::time::Instant::now() >= until)
+        {
+            self.transient_status = None;
+            self.transient_status_until = None;
+        }
+    }
+
+    pub(crate) fn has_blocking_overlay(&self) -> bool {
+        self.show_import_review
+            || self.show_duplicate_review
+            || self.show_delete_expense_confirm
+            || self.show_delete_import_confirm
+            || self.destructive_confirm.is_some()
+            || self.category_color_popup.is_some()
+            || self.member_color_popup.is_some()
+            || self.csv_import_rx.is_some()
+    }
+
+    pub(crate) fn run_household_mutation<F, G>(
+        &mut self,
+        mutate: F,
+        make_action: G,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce(&Connection) -> rusqlite::Result<()>,
+        G: FnOnce(HouseholdState, HouseholdState) -> UndoAction,
+    {
+        self.flush_deferred_expense_commits();
+        let household_id = self.household_id;
+        let result = run_household_action(&mut self.conn, household_id, mutate, make_action);
+        match result {
+            Ok(action_id) => {
+                self.reload();
+                Ok(action_id.is_some())
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub(crate) fn run_settlement_mutation<F, G>(
+        &mut self,
+        mutate: F,
+        make_action: G,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce(&Connection) -> rusqlite::Result<()>,
+        G: FnOnce(SettlementState, SettlementState) -> UndoAction,
+    {
+        self.flush_deferred_expense_commits();
+        let household_id = self.household_id;
+        let result = run_settlement_action(&mut self.conn, household_id, mutate, make_action);
+        match result {
+            Ok(action_id) => {
+                let household_id = self.household_id;
+                self.category_splits =
+                    load_category_splits(&self.conn, household_id).unwrap_or_default();
+                Ok(action_id.is_some())
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub(crate) fn open_destructive_confirmation(&mut self, confirmation: DestructiveConfirm) {
+        self.destructive_dialog_generation = self.destructive_dialog_generation.wrapping_add(1);
+        self.destructive_confirm = Some(confirmation);
+    }
+
+    pub(crate) fn save_budget_plan(&mut self, category: &str, amount: i64) -> Result<(), String> {
+        crate::budget::save_budget_plan(self, category, amount)
+    }
+
+    pub(crate) fn copy_budget_year(&mut self) -> Result<usize, String> {
+        crate::budget::copy_budget_year(self)
+    }
+
+    pub(crate) fn confirm_destructive_action(
+        &mut self,
+        confirmation: DestructiveConfirm,
+    ) -> Result<(), String> {
+        match confirmation {
+            DestructiveConfirm::Category { id, .. } => self.delete_category_with_undo(id),
+            DestructiveConfirm::Member { id, .. } => self.delete_member_with_undo(id),
+            DestructiveConfirm::Settlement {
+                label,
+                include_subcategories,
+                ..
+            } => self.clear_settlement_splits_with_undo(&label, include_subcategories),
+        }
+    }
+
+    fn undo_current_domain(&mut self, domain: UndoDomain) {
+        self.flush_deferred_expense_commits();
+        let household_id = self.household_id;
+        match undo_latest_action(&mut self.conn, household_id, domain) {
+            Ok(_) => {
+                match domain {
+                    UndoDomain::Household => self.reload(),
+                    UndoDomain::Settlements => {
+                        let household_id = self.household_id;
+                        self.category_splits =
+                            load_category_splits(&self.conn, household_id).unwrap_or_default()
+                    }
+                }
+                self.set_transient_status("Undone.");
+            }
+            Err(error) => {
+                match domain {
+                    UndoDomain::Household => self.reload(),
+                    UndoDomain::Settlements => {
+                        let household_id = self.household_id;
+                        self.category_splits =
+                            load_category_splits(&self.conn, household_id).unwrap_or_default()
+                    }
+                }
+                self.set_transient_status(error)
+            }
+        }
+    }
+
+    fn handle_undo_shortcut(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let domain = match self.tab {
+            Tab::Households => UndoDomain::Household,
+            Tab::Settlements => UndoDomain::Settlements,
+            _ => return,
+        };
+        if self.has_blocking_overlay()
+            || ctx.any_popup_open()
+            || ctx.text_edit_focused()
+            || (domain == UndoDomain::Settlements && !self.settlement_pending_edits.is_empty())
+        {
+            return;
+        }
+        let mut undo = false;
+        raw_input.events.retain(|event| {
+            let matches = matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Z,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if (modifiers.command
+                    || modifiers.mac_cmd
+                    || (!cfg!(target_os = "macos") && modifiers.ctrl))
+                    && !modifiers.shift
+                    && !modifiers.alt
+            );
+            if matches {
+                undo = true;
+                false
+            } else {
+                true
+            }
+        });
+        if undo {
+            self.undo_current_domain(domain);
+            ctx.request_repaint();
+        }
     }
 
     // ── Budget Snapshot Computation ──────────────────────────────────────
@@ -553,7 +759,26 @@ impl eframe::App for TwoCentsApp {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
+    fn on_exit(&mut self) {
+        self.commit_pending_settlement_edits();
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.handle_undo_shortcut(ctx, raw_input);
+        if self.destructive_confirm.is_some()
+            || self.show_delete_expense_confirm
+            || self.show_delete_import_confirm
+            || self.show_duplicate_review
+            || self.category_color_popup.is_some()
+            || self.member_color_popup.is_some()
+            || self.csv_import_rx.is_some()
+        {
+            self.expense_grid_state.active_cell = None;
+            if let Some(id) = ctx.memory(|memory| memory.focused()) {
+                ctx.memory_mut(|memory| memory.surrender_focus(id));
+            }
+            return;
+        }
         if self.show_import_review {
             // The import modal is open. If the expense grid still has an active edit cell
             // or focused TextEdit, it will swallow ALL keyboard input meant for the import
@@ -618,6 +843,7 @@ impl eframe::App for TwoCentsApp {
     // eframe 0.35+ removed App::update; logic runs before each ui() and
     // also while hidden on repaint — no painting allowed here.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.expire_transient_status();
         for log_msg in take_panic_logs() {
             eprintln!("{log_msg}");
         }
@@ -657,7 +883,11 @@ impl eframe::App for TwoCentsApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let modal_open = self.show_import_review || self.show_duplicate_review;
+        let modal_open = self.show_import_review
+            || self.show_duplicate_review
+            || self.show_delete_expense_confirm
+            || self.show_delete_import_confirm
+            || self.destructive_confirm.is_some();
 
         // Paint background fill manually, then allocate a padded content area
         let full = ui.max_rect();
@@ -720,13 +950,39 @@ impl TwoCentsApp {
         }
 
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
+        let previous_tab = self.tab;
+        let transient_status = self.transient_status.clone();
+        ui.horizontal(|ui| {
             tab_button(ui, &mut self.tab, Tab::Expenses, "Expenses");
             tab_button(ui, &mut self.tab, Tab::Budgets, "Budgets");
             tab_button(ui, &mut self.tab, Tab::Analytics, "Analytics");
             tab_button(ui, &mut self.tab, Tab::Settlements, "Settlements");
             tab_button(ui, &mut self.tab, Tab::Households, "Household");
+            let status_width = ui.available_width().min(320.0);
+            if status_width >= 80.0 {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(status_width, ui.spacing().interact_size.y),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if let Some(message) = &transient_status {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(message).color(theme::accent()),
+                                )
+                                .truncate(),
+                            );
+                        }
+                    },
+                );
+            }
         });
+        if previous_tab == Tab::Settlements && self.tab != Tab::Settlements {
+            self.commit_pending_settlement_edits();
+        }
+        if previous_tab == Tab::Budgets && self.tab != Tab::Budgets {
+            self.budget_editing_category = None;
+            self.budget_editing_input.clear();
+        }
         ui.separator();
 
         // --- Content area — fills the full window below the chrome ---
@@ -757,8 +1013,10 @@ impl TwoCentsApp {
             },
         );
 
-        self.ui_category_color_popup(&ctx);
-        self.ui_member_color_popup(&ctx);
+        if self.destructive_confirm.is_none() {
+            self.ui_category_color_popup(&ctx);
+            self.ui_member_color_popup(&ctx);
+        }
         self.ui_delete_confirmations(&ctx);
 
         // When the import modal is open, paint a dim overlay AND place a full-screen
@@ -767,25 +1025,25 @@ impl TwoCentsApp {
         // sits above this blocker and remains fully interactive.
         // We deliberately do NOT use add_enabled_ui — it propagates into ctx-level
         // Windows and would break the import grid's cell editing.
+        let show_scrim = self.show_import_review
+            || self.show_duplicate_review
+            || self.show_delete_expense_confirm
+            || self.show_delete_import_confirm;
         if modal_open {
             let screen = ctx.content_rect();
-            let bg_layer =
-                egui::LayerId::new(egui::Order::Background, egui::Id::new("import_blocker"));
-            // theme-aware dim overlay. Solid black/white at 50% alpha
-            // instead of multiplying the panel color (which was muddy on every
-            // theme). In dark mode the dim is a translucent black; in light mode
-            // a translucent dark gray.
-            let overlay = if theme::active_is_dark() {
-                egui::Color32::from_black_alpha(160)
-            } else {
-                egui::Color32::from_black_alpha(120)
-            };
-            ctx.layer_painter(bg_layer)
-                .rect_filled(screen, 0.0, overlay);
-            // Interaction blocker: a transparent clickable Area that eats all pointer events
-            // over the background so nothing underneath can be focused or clicked.
+            if show_scrim {
+                let bg_layer =
+                    egui::LayerId::new(egui::Order::Middle, egui::Id::new("import_blocker"));
+                let overlay = if theme::active_is_dark() {
+                    egui::Color32::from_black_alpha(160)
+                } else {
+                    egui::Color32::from_black_alpha(120)
+                };
+                ctx.layer_painter(bg_layer)
+                    .rect_filled(screen, 0.0, overlay);
+            }
             egui::Area::new(egui::Id::new("import_blocker_area"))
-                .order(egui::Order::Background)
+                .order(egui::Order::Middle)
                 .fixed_pos(screen.min)
                 .show(&ctx, |ui| {
                     let _ = ui.allocate_rect(screen, egui::Sense::click_and_drag());
@@ -804,7 +1062,9 @@ impl TwoCentsApp {
             BudgetGranularity::Yearly => 1,
             BudgetGranularity::Quarterly => 4,
             BudgetGranularity::Monthly => 12,
-            BudgetGranularity::Weekly => 52,
+            BudgetGranularity::Weekly => {
+                crate::models::budget_period_count(granularity, self.budget_year)
+            }
         }
     }
 
@@ -814,28 +1074,30 @@ impl TwoCentsApp {
             BudgetGranularity::Yearly => 1,
             BudgetGranularity::Quarterly => ((now.month() - 1) / 3 + 1) as i32,
             BudgetGranularity::Monthly => now.month() as i32,
-            BudgetGranularity::Weekly => now.iso_week().week() as i32,
+            BudgetGranularity::Weekly => crate::models::budget_period_for_date(
+                BudgetGranularity::Weekly,
+                self.budget_year,
+                now.date_naive(),
+            )
+            .unwrap_or(1),
+        }
+    }
+
+    fn selected_period(&self, granularity: BudgetGranularity) -> i32 {
+        match granularity {
+            BudgetGranularity::Yearly => 1,
+            BudgetGranularity::Quarterly => self.budget_quarter as i32,
+            BudgetGranularity::Monthly => self.budget_month,
+            BudgetGranularity::Weekly => self.budget_week as i32,
         }
     }
 
     fn period_end(&self, granularity: BudgetGranularity) -> i32 {
-        match granularity {
-            BudgetGranularity::Yearly => 1,
-            BudgetGranularity::Quarterly => 4,
-            BudgetGranularity::Monthly => 12,
-            BudgetGranularity::Weekly => chrono::NaiveDate::from_ymd_opt(self.budget_year, 12, 31)
-                .map(|d| d.iso_week().week() as i32)
-                .unwrap_or(52),
-        }
+        crate::models::budget_period_count(granularity, self.budget_year)
     }
 
     fn period_code(&self, granularity: BudgetGranularity, period: i32) -> i32 {
-        match granularity {
-            BudgetGranularity::Yearly => 0,
-            BudgetGranularity::Quarterly => 20 + period,
-            BudgetGranularity::Monthly => period,
-            BudgetGranularity::Weekly => 100 + period,
-        }
+        crate::models::budget_period_code(granularity, period)
     }
 
     fn is_period_past(&self, granularity: BudgetGranularity, period: i32) -> bool {
@@ -847,7 +1109,9 @@ impl TwoCentsApp {
         if self.budget_year > current_year {
             return false;
         }
-        period < self.current_period(granularity)
+        let current_period =
+            crate::budget::budget_current_period(self.budget_year, granularity, now.date_naive());
+        period < current_period
     }
 
     fn annual_cap(&self, category: &str, year: i32, snaps: &[BudgetSnapshot]) -> i64 {
@@ -917,7 +1181,10 @@ impl TwoCentsApp {
             BudgetGranularity::Yearly => 0,
             BudgetGranularity::Quarterly => 20 + period.unwrap_or(self.budget_quarter as i32),
             BudgetGranularity::Monthly => period.unwrap_or(self.budget_month),
-            BudgetGranularity::Weekly => 100 + period.unwrap_or(self.budget_week as i32),
+            BudgetGranularity::Weekly => crate::models::budget_period_code(
+                BudgetGranularity::Weekly,
+                period.unwrap_or(self.budget_week as i32),
+            ),
         };
 
         // Check for override first

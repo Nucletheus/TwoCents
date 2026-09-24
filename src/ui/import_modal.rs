@@ -137,6 +137,7 @@ impl TwoCentsApp {
         // causing TextEdit focus to be stolen on every frame (manifesting as
         // "one letter at a time" erasure during typing). We render our own header row.
         egui::Window::new("Statement Import Review")
+      .order(egui::Order::Foreground)
       .title_bar(false)
       .resizable(false)
       .collapsible(false)

@@ -152,6 +152,7 @@ pub fn render_budget_vs_actual_chart(
     // Capture the palette up-front. `plot.show` mutably borrows `ui`,
     // so we can't reach for color accessors inside the closure.
     let zero_color = crate::ui::theme::border_strong();
+    let grid_color = crate::ui::theme::fg_secondary().gamma_multiply(0.5);
     let success = crate::ui::theme::success();
     let error = crate::ui::theme::error();
     let fg_default = crate::ui::theme::fg_primary();
@@ -187,6 +188,14 @@ pub fn render_budget_vs_actual_chart(
                 }
 
                 let n = comparisons.len();
+                let max_change = comparisons
+                    .iter()
+                    .map(|comp| {
+                        (super::charts_common::ln1p(comp.actual)
+                            - super::charts_common::ln1p(comp.budgeted))
+                        .abs()
+                    })
+                    .fold(0.0_f64, f64::max);
                 // y = n-1-i puts sorted-desc index 0 at the TOP of the axis;
                 // labels indexed the same way for the y formatter.
                 let labels_by_y: Vec<String> = comparisons
@@ -208,9 +217,10 @@ pub fn render_budget_vs_actual_chart(
                     .allow_zoom(true)
                     .allow_scroll(true)
                     .show_grid([true, false])
+                    .grid_color(grid_color)
                     .x_grid_spacer(super::charts_common::money_grid_spacer)
                     .y_grid_spacer(super::charts_common::category_grid_spacer)
-                    .x_axis_formatter(|m, _r| super::charts_common::money_label(m.value.exp_m1()))
+                    .custom_x_axes(vec![super::charts_common::money_axis_hints()])
                     .y_axis_formatter(y_formatter);
                 let plot = if reseed { plot.reset() } else { plot };
 
@@ -228,11 +238,34 @@ pub fn render_budget_vs_actual_chart(
                         let budget_x = super::charts_common::ln1p(comp.budgeted);
                         let actual_x = super::charts_common::ln1p(comp.actual);
                         let conn_color = if comp.variance >= 0.0 { success } else { error };
-                        plot_ui.line(
-                            Line::new(format!("conn_{i}"), vec![[budget_x, y + 0.18], [actual_x, y - 0.18]])
-                                .color(conn_color)
-                                .width(2.0_f32),
+                        let connector_from = [budget_x, y + 0.18];
+                        let connector_to = [actual_x, y - 0.18];
+                        let connector_widths = super::charts_common::comparison_connector_widths(
+                            (actual_x - budget_x).abs(),
+                            max_change,
                         );
+                        for (segment, width) in connector_widths.iter().enumerate() {
+                            let segment_start = segment as f64 / connector_widths.len() as f64;
+                            let segment_end = (segment + 1) as f64 / connector_widths.len() as f64;
+                            let start = [
+                                connector_from[0]
+                                    + (connector_to[0] - connector_from[0]) * segment_start,
+                                connector_from[1]
+                                    + (connector_to[1] - connector_from[1]) * segment_start,
+                            ];
+                            let end = [
+                                connector_from[0]
+                                    + (connector_to[0] - connector_from[0]) * segment_end,
+                                connector_from[1]
+                                    + (connector_to[1] - connector_from[1]) * segment_end,
+                            ];
+                            plot_ui.line(
+                                Line::new(format!("conn_{i}_{segment}"), vec![start, end])
+                                    .color(conn_color)
+                                    .width(*width)
+                                    .allow_hover(false),
+                            );
+                        }
                         let budget_bar = Bar::new(y + 0.18, budget_x)
                             .width(0.32)
                             .fill(dim)
@@ -293,6 +326,10 @@ pub fn render_budget_vs_actual_chart(
                             crate::ui::components::label_muted(
                                 ui,
                                 "Bars: Budget (top) vs Actual (bottom); green = under budget, red = over",
+                            );
+                            crate::ui::components::label_muted(
+                                ui,
+                                "Connector width = proportional change; widens toward Actual.",
                             );
                             ui.add_space(crate::ui::theme_tokens::SPACE_3);
 

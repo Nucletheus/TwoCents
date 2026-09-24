@@ -19,11 +19,76 @@ fn clip_text(
 use crate::TwoCentsApp;
 
 fn week_range(year: i32, week: u32) -> (chrono::NaiveDate, chrono::NaiveDate) {
-    let w = week.clamp(1, 53);
-    let first_day = chrono::NaiveDate::from_isoywd_opt(year, w, chrono::Weekday::Mon)
-        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap());
-    let last_day = first_day + chrono::Duration::days(6);
-    (first_day, last_day)
+    budget_period_date_range(BudgetGranularity::Weekly, year, week as i32)
+}
+
+const MAX_BUDGET_CENTS: i64 = i64::MAX / 1_000_000;
+
+fn parse_budget_cents(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    let value = trimmed.strip_prefix('$').unwrap_or(trimmed);
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+
+    if whole.contains(',') {
+        let mut groups = whole.split(',');
+        let first = groups.next().unwrap_or_default();
+        if first.is_empty()
+            || first.len() > 3
+            || !first.bytes().all(|byte| byte.is_ascii_digit())
+            || groups
+                .any(|group| group.len() != 3 || !group.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return None;
+        }
+    }
+    let whole_digits = whole.replace(',', "");
+    if whole_digits.is_empty() || !whole_digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if fraction.len() > 2
+        || (value.contains('.') && fraction.is_empty())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let dollars = whole_digits.parse::<i64>().ok()?;
+    let cents = match fraction.len() {
+        0 => 0,
+        1 => i64::from(fraction.as_bytes()[0] - b'0') * 10,
+        _ => fraction.parse::<i64>().ok()?,
+    };
+    let value = dollars.checked_mul(100)?.checked_add(cents)?;
+    (value <= MAX_BUDGET_CENTS).then_some(value)
+}
+
+fn initialize_budget_text_edit(
+    ui: &egui::Ui,
+    output: &mut egui::widgets::text_edit::TextEditOutput,
+    value_char_count: usize,
+    text_edit_id: egui::Id,
+    init_id: egui::Id,
+) {
+    if ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(init_id).unwrap_or(false))
+    {
+        return;
+    }
+
+    output.response.request_focus();
+    let mut state =
+        egui::widgets::text_edit::TextEditState::load(ui.ctx(), text_edit_id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::default(),
+            egui::text::CCursor::new(value_char_count),
+        )));
+    state.store(ui.ctx(), text_edit_id);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp::<bool>(init_id, true));
+    ui.ctx().request_repaint();
 }
 
 impl TwoCentsApp {
@@ -67,199 +132,172 @@ impl TwoCentsApp {
 
         // 2. Dynamic Period Selector Control Bar
         ui.horizontal_wrapped(|ui| {
-      ui.style_mut().spacing.button_padding = egui::vec2(10.0, 6.0);
+            ui.style_mut().spacing.button_padding = egui::vec2(10.0, 6.0);
 
-      let prev_clicked = crate::ui::popups::styled_button(ui, "‹", false).clicked();
+            let prev_clicked = crate::ui::popups::styled_button(ui, "‹", false).clicked();
 
-      // Build title text for the fixed-width area
-      let title_text = match self.budget_granularity {
-        BudgetGranularity::Weekly => {
-          let (start, end) = week_range(self.budget_year, self.budget_week);
-          let start_str = start.format("%b %d").to_string();
-          let end_str = end.format("%b %d").to_string();
-          format!("Week {} ({} - {})", self.budget_week, start_str, end_str)
-        }
-        BudgetGranularity::Monthly => {
-          let month_names = [
-            "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December"
-          ];
-          let month_name = month_names[(self.budget_month as usize - 1).min(11)];
-          format!("{} {}", month_name, self.budget_year)
-        }
-        BudgetGranularity::Quarterly => {
-          format!("Q{} {}", self.budget_quarter, self.budget_year)
-        }
-        BudgetGranularity::Yearly => {
-          format!("{}", self.budget_year)
-        }
-      };
-      // Fixed-width title area so arrow buttons stay in the same place
-      let title_w = 195.0;
-      let (title_rect, _) = ui.allocate_exact_size(
-        egui::vec2(title_w, ui.style().spacing.interact_size.y),
-        egui::Sense::hover(),
-      );
-      ui.painter().text(
-        egui::pos2(title_rect.left() + title_w / 2.0, title_rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        &title_text,
-        egui::FontId::proportional(16.0),
-        crate::ui::theme::fg_primary(),
-      );
+            // Build title text for the fixed-width area
+            let title_text = match self.budget_granularity {
+                BudgetGranularity::Weekly => {
+                    let (start, end) = week_range(self.budget_year, self.budget_week);
+                    let start_str = start.format("%b %d").to_string();
+                    let end_str = end.format("%b %d").to_string();
+                    format!("Week {} ({} - {})", self.budget_week, start_str, end_str)
+                }
+                BudgetGranularity::Monthly => {
+                    let month_names = [
+                        "January",
+                        "February",
+                        "March",
+                        "April",
+                        "May",
+                        "June",
+                        "July",
+                        "August",
+                        "September",
+                        "October",
+                        "November",
+                        "December",
+                    ];
+                    let month_name = month_names[(self.budget_month as usize - 1).min(11)];
+                    format!("{} {}", month_name, self.budget_year)
+                }
+                BudgetGranularity::Quarterly => {
+                    format!("Q{} {}", self.budget_quarter, self.budget_year)
+                }
+                BudgetGranularity::Yearly => {
+                    format!("{}", self.budget_year)
+                }
+            };
+            // Fixed-width title area so arrow buttons stay in the same place
+            let title_w = 195.0;
+            let (title_rect, _) = ui.allocate_exact_size(
+                egui::vec2(title_w, ui.style().spacing.interact_size.y),
+                egui::Sense::hover(),
+            );
+            ui.painter().text(
+                egui::pos2(title_rect.left() + title_w / 2.0, title_rect.center().y),
+                egui::Align2::CENTER_CENTER,
+                &title_text,
+                egui::FontId::proportional(16.0),
+                crate::ui::theme::fg_primary(),
+            );
 
-      let next_clicked = crate::ui::popups::styled_button(ui, "›", false).clicked();
-      let snap_clicked = crate::ui::popups::styled_button(ui, "⟲", false)
-        .on_hover_text("Snap to current period")
-        .clicked();
+            let next_clicked = crate::ui::popups::styled_button(ui, "›", false).clicked();
+            let snap_clicked = crate::ui::popups::styled_button(ui, "⟲", false)
+                .on_hover_text("Snap to current period")
+                .clicked();
 
-      if prev_clicked {
-        match self.budget_granularity {
-          BudgetGranularity::Weekly => {
-            if self.budget_week == 1 {
-              self.budget_week = 52;
-              self.budget_year -= 1;
-            } else {
-              self.budget_week -= 1;
+            if prev_clicked {
+                match self.budget_granularity {
+                    BudgetGranularity::Weekly => {
+                        if self.budget_week <= 1 {
+                            self.budget_year -= 1;
+                            self.budget_week =
+                                budget_period_count(BudgetGranularity::Weekly, self.budget_year)
+                                    as u32;
+                        } else {
+                            self.budget_week -= 1;
+                        }
+                    }
+                    BudgetGranularity::Monthly => {
+                        if self.budget_month == 1 {
+                            self.budget_month = 12;
+                            self.budget_year -= 1;
+                        } else {
+                            self.budget_month -= 1;
+                        }
+                    }
+                    BudgetGranularity::Quarterly => {
+                        if self.budget_quarter == 1 {
+                            self.budget_quarter = 4;
+                            self.budget_year -= 1;
+                        } else {
+                            self.budget_quarter -= 1;
+                        }
+                    }
+                    BudgetGranularity::Yearly => {
+                        self.budget_year -= 1;
+                    }
+                }
+                self.budget_editing_category = None;
+                self.reload();
             }
-          }
-          BudgetGranularity::Monthly => {
-            if self.budget_month == 1 {
-              self.budget_month = 12;
-              self.budget_year -= 1;
-            } else {
-              self.budget_month -= 1;
+
+            if next_clicked {
+                match self.budget_granularity {
+                    BudgetGranularity::Weekly => {
+                        let count =
+                            budget_period_count(BudgetGranularity::Weekly, self.budget_year) as u32;
+                        if self.budget_week >= count {
+                            self.budget_week = 1;
+                            self.budget_year += 1;
+                        } else {
+                            self.budget_week += 1;
+                        }
+                    }
+                    BudgetGranularity::Monthly => {
+                        if self.budget_month == 12 {
+                            self.budget_month = 1;
+                            self.budget_year += 1;
+                        } else {
+                            self.budget_month += 1;
+                        }
+                    }
+                    BudgetGranularity::Quarterly => {
+                        if self.budget_quarter == 4 {
+                            self.budget_quarter = 1;
+                            self.budget_year += 1;
+                        } else {
+                            self.budget_quarter += 1;
+                        }
+                    }
+                    BudgetGranularity::Yearly => {
+                        self.budget_year += 1;
+                    }
+                }
+                self.budget_editing_category = None;
+                self.reload();
             }
-          }
-          BudgetGranularity::Quarterly => {
-            if self.budget_quarter == 1 {
-              self.budget_quarter = 4;
-              self.budget_year -= 1;
-            } else {
-              self.budget_quarter -= 1;
+
+            if snap_clicked {
+                let now = chrono::Local::now();
+                self.budget_year = now.year();
+                self.budget_month = now.month() as i32;
+                self.budget_quarter = ((now.month() - 1) / 3 + 1) as u32;
+                self.budget_week = budget_period_for_date(
+                    BudgetGranularity::Weekly,
+                    self.budget_year,
+                    now.date_naive(),
+                )
+                .unwrap_or(1) as u32;
+                self.budget_editing_category = None;
+                self.reload();
             }
-          }
-          BudgetGranularity::Yearly => {
-            self.budget_year -= 1;
-          }
-        }
-        self.budget_editing_category = None;
-        self.reload();
-      }
 
-      if next_clicked {
-        match self.budget_granularity {
-          BudgetGranularity::Weekly => {
-            if self.budget_week == 52 {
-              self.budget_week = 1;
-              self.budget_year += 1;
-            } else {
-              self.budget_week += 1;
-            }
-          }
-          BudgetGranularity::Monthly => {
-            if self.budget_month == 12 {
-              self.budget_month = 1;
-              self.budget_year += 1;
-            } else {
-              self.budget_month += 1;
-            }
-          }
-          BudgetGranularity::Quarterly => {
-            if self.budget_quarter == 4 {
-              self.budget_quarter = 1;
-              self.budget_year += 1;
-            } else {
-              self.budget_quarter += 1;
-            }
-          }
-          BudgetGranularity::Yearly => {
-            self.budget_year += 1;
-          }
-        }
-        self.budget_editing_category = None;
-        self.reload();
-      }
-
-      if snap_clicked {
-        let now = chrono::Local::now();
-        self.budget_year = now.year();
-        self.budget_month = now.month() as i32;
-        self.budget_quarter = ((now.month() - 1) / 3 + 1) as u32;
-        self.budget_week = now.iso_week().week();
-        self.budget_editing_category = None;
-        self.reload();
-      }
-
-      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        // Copy allocations from the previous period (Weekly, Monthly, Quarterly)
-        let (prev_val, prev_year) = match self.budget_granularity {
-          BudgetGranularity::Weekly => {
-            let pw = if self.budget_week == 1 { 52 } else { self.budget_week - 1 };
-            let py = if self.budget_week == 1 { self.budget_year - 1 } else { self.budget_year };
-            (pw as i32 + 100, py)
-          }
-          BudgetGranularity::Monthly => {
-            let pm = if self.budget_month == 1 { 12 } else { self.budget_month - 1 };
-            let py = if self.budget_month == 1 { self.budget_year - 1 } else { self.budget_year };
-            (pm, py)
-          }
-          BudgetGranularity::Quarterly => {
-            let pq = if self.budget_quarter == 1 { 4 } else { self.budget_quarter - 1 };
-            let py = if self.budget_quarter == 1 { self.budget_year - 1 } else { self.budget_year };
-            (pq as i32 + 20, py)
-          }
-          BudgetGranularity::Yearly => {
-            (0, self.budget_year - 1)
-          }
-        };
-
-        let copy_label = match self.budget_granularity {
-          BudgetGranularity::Weekly => format!("Copy Limits from W{}", prev_val - 100),
-          BudgetGranularity::Monthly => format!("Copy Limits from {:02}/{}", prev_val, prev_year),
-          BudgetGranularity::Quarterly => format!("Copy Limits from Q{}", prev_val - 20),
-          BudgetGranularity::Yearly => format!("Copy Limits from {}", prev_year),
-        };
-
-        if crate::ui::popups::styled_button(ui, &copy_label, false)
-          .on_hover_text("Copy all budget allocations from the previous period to the current period.")
-          .clicked()
-        {
-          let mut copied_count = 0;
-
-          // Primary: copy yearly caps from previous year's snapshots
-          if let Ok(prev_snaps) = load_budget_snapshots_for_year(&self.conn, self.household_id, prev_year) {
-            for snap in &prev_snaps {
-              if snap.period_code == 0 && snap.is_override && snap.amount_cents > 0 {
-                let _ = save_budget_snapshot(
-                  &self.conn, self.household_id, &snap.category,
-                  self.budget_year, 0, snap.amount_cents, true,
-                );
-                self.propagate_yearly_to_others(&snap.category, snap.amount_cents);
-                copied_count += 1;
-              }
-            }
-          }
-
-          // Fallback: legacy budgets table (pre-snapshot data)
-          if copied_count == 0 {
-            if let Ok(prev_budgets) = load_budgets(&self.conn, self.household_id, prev_year, prev_val) {
-              let current_period_code = match self.budget_granularity {
-                BudgetGranularity::Yearly => 0,
-                BudgetGranularity::Monthly => self.budget_month,
-                BudgetGranularity::Quarterly => 20 + self.budget_quarter as i32,
-                BudgetGranularity::Weekly => 100 + self.budget_week as i32,
-              };
-              for pb in prev_budgets {
-                let _ = save_budget(&self.conn, self.household_id, &pb.category, pb.amount_cents, self.budget_year, current_period_code);
-              }
-            }
-          }
-
-          self.reload();
-        }
-      });
-    });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let source_year = self.budget_year - 1;
+                let copy_label = format!("Copy Limits from {source_year}");
+                if crate::ui::popups::styled_button(ui, &copy_label, false)
+                    .on_hover_text("Copy the complete previous-year budget plan to this year.")
+                    .clicked()
+                {
+                    match self.copy_budget_year() {
+                        Ok(0) => {
+                            self.set_transient_status(format!(
+                                "No budget limits found in {source_year}."
+                            ));
+                        }
+                        Ok(count) => {
+                            self.set_transient_status(format!(
+                                "Copied {count} budget limits from {source_year}."
+                            ));
+                        }
+                        Err(error) => self.set_transient_status(error),
+                    }
+                }
+            });
+        });
 
         ui.add_space(10.0);
 
@@ -403,6 +441,7 @@ impl TwoCentsApp {
                     ui.selectable_label(selected, crate::ui::theme::sel_text(ui, selected, label));
                 if button.clicked() {
                     self.budget_filter = filter;
+                    self.budget_editing_category = None;
                 }
             }
         });
@@ -644,17 +683,7 @@ impl TwoCentsApp {
                     .show(ui, |ui| {
                         let mut row_idx = 0usize;
                         let mut i = 0;
-                        let past_period = if self.budget_granularity != BudgetGranularity::Yearly {
-                            let period = match self.budget_granularity {
-                                BudgetGranularity::Monthly => self.budget_month,
-                                BudgetGranularity::Quarterly => self.budget_quarter as i32,
-                                BudgetGranularity::Weekly => self.budget_week as i32,
-                                _ => unreachable!(),
-                            };
-                            self.is_period_past(self.budget_granularity, period)
-                        } else {
-                            false
-                        };
+                        let past_period = self.budget_year < chrono::Local::now().year();
                         while i < rows.len() {
                             let cat = &rows[i];
                             let y0 = ui.cursor().top();
@@ -1036,40 +1065,62 @@ impl TwoCentsApp {
         cell_rect: egui::Rect,
         past_period: bool,
     ) {
+        let original_cents = limit_cents.max(0);
+        let limit_text = money(original_cents);
+        let limit_input = limit_text
+            .strip_prefix('$')
+            .unwrap_or(&limit_text)
+            .to_string();
+        let text_edit_id = egui::Id::new(("budget_limit_edit", full_label));
+        let init_id = text_edit_id.with("initialize");
+        let input_char_count = self.budget_editing_input.chars().count();
+
         if !past_period && self.budget_editing_category.as_deref() == Some(full_label) {
             // Use an Area overlay so the TextEdit doesn't participate in layout
             // (no cursor advancement, no ghost rows).
-            let area_id = egui::Id::new(("budget_edit_area", full_label));
-            let resp = egui::Area::new(area_id)
+            let area_id = text_edit_id.with("area");
+            let (ready, resp) = egui::Area::new(area_id)
                 .fixed_pos(cell_rect.left_top())
                 .show(ui.ctx(), |ui| {
                     ui.set_width(cell_rect.width());
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.budget_editing_input)
-                            .font(egui::FontId::monospace(13.0))
-                            .desired_width(cell_rect.width() - 8.0),
-                    )
+                    let mut output = egui::TextEdit::singleline(&mut self.budget_editing_input)
+                        .id(text_edit_id)
+                        .font(egui::FontId::monospace(13.0))
+                        .desired_width(cell_rect.width() - 8.0)
+                        .show(ui);
+                    let ready = !ui.is_sizing_pass();
+                    if ready {
+                        initialize_budget_text_edit(
+                            ui,
+                            &mut output,
+                            input_char_count,
+                            text_edit_id,
+                            init_id,
+                        );
+                    }
+                    (ready, output.response)
                 })
                 .inner;
-            resp.request_focus();
-            let pressed_enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let pressed_esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-            if pressed_esc {
+            let plain_enter =
+                ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            let pressed_escape =
+                ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            if pressed_escape {
+                self.budget_editing_input = limit_input;
                 self.budget_editing_category = None;
-            } else if pressed_enter || resp.lost_focus() {
-                let cleaned = self.budget_editing_input.trim().replace('$', "");
-                if let Ok(val) = cleaned.parse::<f32>() {
-                    let val_cents = (val * 100.0).round() as i64;
-                    self.save_budget_with_forward_propagation(full_label, val_cents);
+            } else if ready && plain_enter {
+                if let Some(value_cents) = parse_budget_cents(&self.budget_editing_input) {
+                    if value_cents != original_cents {
+                        self.save_budget_with_forward_propagation(full_label, value_cents);
+                    }
                 }
+                self.budget_editing_input = limit_input;
+                self.budget_editing_category = None;
+            } else if ready && resp.lost_focus() {
+                self.budget_editing_input = limit_input;
                 self.budget_editing_category = None;
             }
         } else {
-            let limit_text = if limit_cents > 0 {
-                format!("${:.2}", (limit_cents as f32) / 100.0)
-            } else {
-                "$0.00".to_string()
-            };
             if past_period {
                 // Dimmed display, no interaction for past periods
                 ui.painter().text(
@@ -1095,52 +1146,121 @@ impl TwoCentsApp {
                 let resp = ui.interact(cell_rect, id, egui::Sense::click());
                 if resp.clicked() {
                     self.budget_editing_category = Some(full_label.to_string());
-                    self.budget_editing_input = limit_text.trim_start_matches('$').to_string();
+                    self.budget_editing_input = limit_input;
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp::<bool>(init_id, false));
                 }
             }
         }
     }
 
     fn save_budget_with_forward_propagation(&mut self, full_label: &str, val_cents: i64) {
-        let gran = self.budget_granularity;
-
-        // Special handling for yearly budgets
-        if gran == BudgetGranularity::Yearly {
-            // Save yearly cap as override
-            self.apply_budget_override(full_label, 0, val_cents);
-
-            // Propagate to monthly, quarterly, and weekly
-            self.propagate_yearly_to_others(full_label, val_cents);
-
-            self.reload();
-            return;
+        if let Err(error) = self.save_budget_plan(full_label, val_cents) {
+            self.set_transient_status(error);
         }
+    }
+}
 
-        // Existing logic for other granularities
-        let cur = self.current_period(gran);
-        let end = self.period_end(gran);
+#[cfg(test)]
+mod tests {
+    use super::{egui, initialize_budget_text_edit, parse_budget_cents, MAX_BUDGET_CENTS};
 
-        // 1. Save current period as override
-        let cur_code = self.period_code(gran, cur);
-        self.apply_budget_override(full_label, cur_code, val_cents);
+    #[test]
+    fn budget_parser_accepts_exact_currency() {
+        for (input, expected) in [
+            ("0", 0),
+            (" $0.00 ", 0),
+            ("7", 700),
+            ("7.1", 710),
+            ("$7.09", 709),
+            ("1,234", 123_400),
+            ("$1,234,567.8", 123_456_780),
+            ("0007", 700),
+        ] {
+            assert_eq!(parse_budget_cents(input), Some(expected), "{input:?}");
+        }
+    }
 
-        // 2. Save all future periods as computed defaults
-        for p in (cur + 1)..=end {
-            let code = self.period_code(gran, p);
-            let _ = save_budget_snapshot(
-                &self.conn,
-                self.household_id,
-                full_label,
-                self.budget_year,
-                code,
-                val_cents,
-                false,
+    #[test]
+    fn budget_parser_rejects_invalid_currency() {
+        for input in [
+            "",
+            " ",
+            "$",
+            ".5",
+            "-1",
+            "+1",
+            "1e3",
+            "NaN",
+            "inf",
+            "1.",
+            "1.234",
+            ",123",
+            "1,",
+            "1,00",
+            "1000,000",
+            "1,000,00",
+            "1,,000",
+            "1,000,",
+            "1 000",
+            "$ 1",
+            "1.$",
+            "USD1",
+            "1,000.00,",
+            "1,000.000",
+        ] {
+            assert_eq!(parse_budget_cents(input), None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn budget_parser_rejects_unsafe_values() {
+        assert_eq!(parse_budget_cents("92233720368.54"), Some(MAX_BUDGET_CENTS));
+        assert_eq!(parse_budget_cents("92233720368.55"), None);
+        assert_eq!(parse_budget_cents("92233720368547758.07"), None);
+    }
+
+    #[test]
+    fn budget_text_edit_initializes_once_per_open() {
+        egui::__run_test_ui(|ui| {
+            let text_edit_id = egui::Id::new("budget_limit_edit_test");
+            let init_id = text_edit_id.with("initialize");
+            ui.ctx()
+                .data_mut(|data| data.insert_temp::<bool>(init_id, false));
+            let mut input = String::from("123.45");
+            let input_char_count = input.chars().count();
+            let mut output = egui::TextEdit::singleline(&mut input)
+                .id(text_edit_id)
+                .show(ui);
+
+            initialize_budget_text_edit(ui, &mut output, input_char_count, text_edit_id, init_id);
+
+            assert!(ui.ctx().memory(|memory| memory.has_focus(text_edit_id)));
+            let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                .expect("text edit state");
+            assert_eq!(
+                state.cursor.char_range().unwrap().as_sorted_char_range(),
+                egui::text::CharIndex(0)..egui::text::CharIndex(6)
             );
-        }
+            state.cursor.set_char_range(None);
+            state.store(ui.ctx(), text_edit_id);
 
-        // 3. Propagate to other granularities
-        self.propagate_to_other_granularities(full_label, gran, val_cents);
+            initialize_budget_text_edit(ui, &mut output, input_char_count, text_edit_id, init_id);
 
-        self.reload();
+            let state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                .expect("text edit state");
+            assert!(state.cursor.is_empty());
+
+            ui.ctx()
+                .data_mut(|data| data.insert_temp::<bool>(init_id, false));
+            initialize_budget_text_edit(ui, &mut output, input_char_count, text_edit_id, init_id);
+
+            let state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                .expect("text edit state");
+            assert_eq!(
+                state.cursor.char_range().unwrap().as_sorted_char_range(),
+                egui::text::CharIndex(0)..egui::text::CharIndex(6)
+            );
+        });
     }
 }

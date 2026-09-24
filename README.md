@@ -1,7 +1,7 @@
 # TwoCents
 
 <p align="center">
-  <img src="docs/logo.png" alt="TwoCents logo" width="60%">
+  <img src="docs/banner.png" alt="TwoCents — shared finances for two" width="100%">
 </p>
 
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/Nucletheus)
@@ -41,8 +41,9 @@ A spreadsheet-style grid shared by the expense sheet and the import review modal
 
 ### Budgets
 - Per-category limits at weekly, monthly, quarterly, or yearly granularity.
-- Editing a limit automatically propagates to other periods.
-- Copy Limits from the previous period or year in one click.
+- Yearly caps catch up against spending already recorded earlier in the year, then allocate the remainder across the remaining periods.
+- Monthly, quarterly, and weekly edits apply from the selected period through the end of the year and update the yearly cap consistently.
+- Copy Limits clones the complete previous calendar-year plan when you explicitly want to carry it forward.
 - Progress bars per category with over/under/unbudgeted filters.
 - Budget prices are year-scoped, so viewing a past year never borrows the current year's numbers.
 
@@ -65,6 +66,12 @@ Three chart views over the same filters (members, vendors, dates):
 - Minimal who-owes-whom payment suggestions.
 
 <p align="center"><img src="docs/screenshots/settlements.png" alt="Settlements tab with split percentages and balances" width="100%"></p>
+
+### Household
+- Manage household details, members, and categories from one responsive panel.
+- Mark the default member clearly and keep category membership easy to scan.
+- Rename, recolor, remove, and restore shared household changes with persistent undo history.
+- Destructive actions use compact confirmations while the surrounding app remains visible.
 
 ### Theming
 - 13 presets: One Dark, Nord, Dracula, Catppuccin (Mocha and Macchiato), GitHub, Solarized, Tokyonight, Everforest, Gruvbox, Kanagawa, Ayu, Matrix.
@@ -134,7 +141,8 @@ All data lives in one file inside the install folder: `<install dir>\data\twocen
 
 ```
 src/
-├── main.rs          # App state, budget pricing engine, window/event plumbing
+├── main.rs          # App state, window/event plumbing, and UI orchestration
+├── budget.rs        # Year-scoped budget planning and allocation rules
 ├── models.rs        # Domain structs and the shared GridRow trait
 ├── db.rs            # SQLite schema, migrations, queries
 └── ui/

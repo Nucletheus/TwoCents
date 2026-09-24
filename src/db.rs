@@ -1,6 +1,6 @@
 use crate::models::*;
 use eframe::egui::{ecolor::Hsva, Color32};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -113,7 +113,8 @@ pub fn open_database() -> rusqlite::Result<Connection> {
       household_id INTEGER NOT NULL DEFAULT 1 REFERENCES households(id),
       name TEXT NOT NULL,
       parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
-      color_rgb INTEGER
+      color_rgb INTEGER,
+      excluded INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS vendor_category_rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +132,10 @@ pub fn open_database() -> rusqlite::Result<Connection> {
     )?;
     let _ = conn.execute("ALTER TABLE expenses ADD COLUMN vendor TEXT", []);
     let _ = conn.execute("ALTER TABLE categories ADD COLUMN color_rgb INTEGER", []);
+    let _ = conn.execute(
+        "ALTER TABLE categories ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     migrate_category_colors(&conn)?;
     migrate_category_hierarchy(&conn)?;
     migrate_households(&conn)?;
@@ -148,6 +153,7 @@ pub fn open_database() -> rusqlite::Result<Connection> {
     migrate_sign_protected_v10(&conn)?;
     migrate_demo_cleanup_v11(&conn)?;
     migrate_category_exclusion_v12(&conn)?;
+    migrate_undo_actions_v13(&conn)?;
 
     // legacy DBs carry UNIQUE(vendor_pattern) only — the vendor-rule
     // upserts target (household_id, vendor_pattern), which matches nothing and
@@ -223,11 +229,16 @@ pub fn migrate_household_members(conn: &Connection) -> rusqlite::Result<()> {
       household_id INTEGER NOT NULL REFERENCES households(id),
       name TEXT NOT NULL,
       is_self INTEGER NOT NULL DEFAULT 0,
+      color_rgb INTEGER,
       UNIQUE(household_id, name)
     );
     ",
     )?;
     let _ = conn.execute("ALTER TABLE expenses ADD COLUMN member TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE household_members ADD COLUMN color_rgb INTEGER",
+        [],
+    );
 
     let mut stmt = conn.prepare("SELECT id FROM households ORDER BY id")?;
     let household_ids: Vec<i64> = stmt
@@ -303,17 +314,55 @@ pub fn update_self_member_name(
     household_id: i64,
     name: &str,
 ) -> rusqlite::Result<()> {
-    let old_name: String = conn.query_row(
-        "SELECT name FROM household_members WHERE household_id = ?1 AND is_self = 1 LIMIT 1",
+    let member_id: i64 = conn.query_row(
+        "SELECT id FROM household_members WHERE household_id = ?1 AND is_self = 1 LIMIT 1",
         params![household_id],
         |row| row.get(0),
     )?;
+    rename_household_member(conn, household_id, member_id, name)
+}
+
+pub fn rename_household_member(
+    conn: &Connection,
+    household_id: i64,
+    member_id: i64,
+    name: &str,
+) -> rusqlite::Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    let old_name: String = conn.query_row(
+        "SELECT name FROM household_members WHERE id = ?1 AND household_id = ?2",
+        params![member_id, household_id],
+        |row| row.get(0),
+    )?;
+    if old_name == name {
+        return Ok(());
+    }
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM household_members WHERE household_id = ?1 AND id <> ?2 AND lower(name) = lower(?3)",
+            params![household_id, member_id, name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if exists {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some(format!("member '{name}' already exists")),
+        ));
+    }
     conn.execute(
-        "UPDATE household_members SET name = ?1 WHERE household_id = ?2 AND is_self = 1",
-        params![name, household_id],
+        "UPDATE household_members SET name = ?1 WHERE id = ?2 AND household_id = ?3",
+        params![name, member_id, household_id],
     )?;
     conn.execute(
         "UPDATE expenses SET member = ?1 WHERE household_id = ?2 AND member = ?3",
+        params![name, household_id, old_name],
+    )?;
+    conn.execute(
+        "UPDATE category_splits SET member_name = ?1 WHERE household_id = ?2 AND member_name = ?3",
         params![name, household_id, old_name],
     )?;
     Ok(())
@@ -391,6 +440,10 @@ pub fn delete_household_member(
     )?;
     conn.execute(
         "UPDATE expenses SET member = '' WHERE household_id = ?1 AND member = ?2",
+        params![household_id, name],
+    )?;
+    conn.execute(
+        "DELETE FROM category_splits WHERE household_id = ?1 AND member_name = ?2",
         params![household_id, name],
     )?;
     conn.execute(
@@ -804,22 +857,28 @@ pub fn rgb_to_color(rgb: i32) -> Color32 {
     )
 }
 
-pub fn category_labels_for_subtree(categories: &[Category], root_id: i64) -> Vec<String> {
-    let parents = category_parent_map(categories);
-    let mut labels = Vec::new();
-    if let Some(root) = categories.iter().find(|category| category.id == root_id) {
-        let mut has_children = false;
+fn category_subtree_ids(categories: &[Category], root_id: i64) -> Vec<i64> {
+    let mut ids = vec![root_id];
+    let mut index = 0;
+    while index < ids.len() {
+        let parent_id = ids[index];
         for category in categories {
-            if category.parent_id == Some(root_id) {
-                has_children = true;
-                labels.push(category.full_label(&parents));
+            if category.parent_id == Some(parent_id) && !ids.contains(&category.id) {
+                ids.push(category.id);
             }
         }
-        if !has_children {
-            labels.push(root.name.clone());
-        }
+        index += 1;
     }
-    labels
+    ids
+}
+
+pub fn category_labels_for_subtree(categories: &[Category], root_id: i64) -> Vec<String> {
+    let parents = category_parent_map(categories);
+    category_subtree_ids(categories, root_id)
+        .into_iter()
+        .filter_map(|id| categories.iter().find(|category| category.id == id))
+        .map(|category| category.full_label(&parents))
+        .collect()
 }
 
 pub fn add_parent_category_db(
@@ -831,8 +890,13 @@ pub fn add_parent_category_db(
     if name.is_empty() {
         return Ok(());
     }
+    if name.eq_ignore_ascii_case(INCOME_PARENT) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Income is a reserved category name".into(),
+        ));
+    }
     let exists: bool = conn
-    .query_row(
+        .query_row(
       "SELECT 1 FROM categories WHERE household_id = ?1 AND parent_id IS NULL AND lower(name) = lower(?2)",
       params![household_id, name],
       |_| Ok(true),
@@ -877,6 +941,11 @@ pub fn add_subcategory_db(
     if !parent_exists {
         return Err(rusqlite::Error::InvalidParameterName(
             "parent category not found".into(),
+        ));
+    }
+    if name.eq_ignore_ascii_case(INCOME_PARENT) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Income is a reserved category name".into(),
         ));
     }
     let exists: bool = conn
@@ -927,26 +996,185 @@ pub fn update_category_color_db(
     Ok(())
 }
 
+pub fn update_category_color_cascade_db(
+    conn: &Connection,
+    household_id: i64,
+    category_id: i64,
+    color: Color32,
+) -> rusqlite::Result<()> {
+    let categories = load_categories(conn, household_id)?;
+    let Some(category) = categories
+        .iter()
+        .find(|category| category.id == category_id)
+    else {
+        return Ok(());
+    };
+    if category.parent_id.is_some() {
+        return update_category_color_db(conn, household_id, category_id, color);
+    }
+    update_category_color_db(conn, household_id, category_id, color)?;
+    let mut pending = vec![(category_id, color)];
+    while let Some((parent_id, parent_color)) = pending.pop() {
+        let mut children: Vec<&Category> = categories
+            .iter()
+            .filter(|category| category.parent_id == Some(parent_id))
+            .collect();
+        children.sort_by_key(|category| category.name.to_lowercase());
+        let count = children.len().max(1);
+        for (index, child) in children.iter().enumerate() {
+            let child_color = subcategory_color_from_parent(parent_color, index, count);
+            update_category_color_db(conn, household_id, child.id, child_color)?;
+            pending.push((child.id, child_color));
+        }
+    }
+    Ok(())
+}
+
+pub fn rename_category_db(
+    conn: &Connection,
+    household_id: i64,
+    category_id: i64,
+    new_name: &str,
+) -> rusqlite::Result<()> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Ok(());
+    }
+    let categories = load_categories(conn, household_id)?;
+    let Some(category) = categories
+        .iter()
+        .find(|category| category.id == category_id)
+    else {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "category not found".into(),
+        ));
+    };
+    if category.name.eq_ignore_ascii_case(INCOME_PARENT)
+        || new_name.eq_ignore_ascii_case(INCOME_PARENT)
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Income cannot be renamed or duplicated".into(),
+        ));
+    }
+    if category.name == new_name {
+        return Ok(());
+    }
+    let duplicate = categories.iter().any(|candidate| {
+        candidate.id != category_id
+            && candidate.parent_id == category.parent_id
+            && candidate.name.eq_ignore_ascii_case(new_name)
+    });
+    if duplicate {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some(format!("category '{new_name}' already exists")),
+        ));
+    }
+    let old_parents = category_parent_map(&categories);
+    let mut replacements = Vec::new();
+    for id in category_subtree_ids(&categories, category_id) {
+        let Some(old_category) = categories.iter().find(|category| category.id == id) else {
+            continue;
+        };
+        let old_label = old_category.full_label(&old_parents);
+        let mut names = Vec::new();
+        let mut current = Some(old_category);
+        while let Some(item) = current {
+            names.push((item.id, item.name.clone()));
+            current = item
+                .parent_id
+                .and_then(|parent_id| categories.iter().find(|category| category.id == parent_id));
+        }
+        names.reverse();
+        if let Some((_, name)) = names.iter_mut().find(|(id, _)| *id == category_id) {
+            *name = new_name.to_string();
+        }
+        let new_label = names
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>()
+            .join(CATEGORY_LABEL_SEP);
+        if old_label != new_label {
+            replacements.push((old_label, new_label));
+        }
+    }
+    for (old_label, new_label) in &replacements {
+        if categories.iter().any(|candidate| {
+            let label = candidate.full_label(&old_parents);
+            label.eq_ignore_ascii_case(new_label)
+                && !category_subtree_ids(&categories, category_id).contains(&candidate.id)
+        }) {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+                Some(format!("category label '{new_label}' already exists")),
+            ));
+        }
+    }
+    conn.execute(
+        "UPDATE categories SET name = ?1 WHERE id = ?2 AND household_id = ?3",
+        params![new_name, category_id, household_id],
+    )?;
+    for (old_label, new_label) in replacements {
+        conn.execute(
+            "UPDATE expenses SET category = ?1 WHERE household_id = ?2 AND category = ?3",
+            params![new_label, household_id, old_label],
+        )?;
+        conn.execute(
+            "UPDATE vendor_category_rules SET category = ?1 WHERE household_id = ?2 AND category = ?3",
+            params![new_label, household_id, old_label],
+        )?;
+        conn.execute(
+            "UPDATE category_splits SET category = ?1 WHERE household_id = ?2 AND category = ?3",
+            params![new_label, household_id, old_label],
+        )?;
+        conn.execute(
+            "UPDATE budgets SET category = ?1 WHERE household_id = ?2 AND category = ?3",
+            params![new_label, household_id, old_label],
+        )?;
+        conn.execute(
+            "UPDATE budget_snapshots SET category = ?1 WHERE household_id = ?2 AND category = ?3",
+            params![new_label, household_id, old_label],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn delete_category_from_db(
     conn: &Connection,
     household_id: i64,
     category_id: i64,
 ) -> rusqlite::Result<()> {
     let categories = load_categories(conn, household_id)?;
+    let ids = category_subtree_ids(&categories, category_id);
     for label in category_labels_for_subtree(&categories, category_id) {
         conn.execute(
             "UPDATE expenses SET category = '' WHERE household_id = ?1 AND category = ?2",
             params![household_id, label],
         )?;
         conn.execute(
-      "UPDATE vendor_category_rules SET category = '' WHERE household_id = ?1 AND category = ?2",
-      params![household_id, label],
-    )?;
+            "UPDATE vendor_category_rules SET category = '' WHERE household_id = ?1 AND category = ?2",
+            params![household_id, label],
+        )?;
+        conn.execute(
+            "DELETE FROM category_splits WHERE household_id = ?1 AND category = ?2",
+            params![household_id, label],
+        )?;
     }
-    conn.execute(
-        "DELETE FROM categories WHERE household_id = ?1 AND (id = ?2 OR parent_id = ?2)",
-        params![household_id, category_id],
-    )?;
+    let mut ids = ids;
+    ids.sort_by_key(|id| {
+        std::cmp::Reverse(
+            category_subtree_ids(&categories, category_id)
+                .iter()
+                .position(|candidate| candidate == id)
+                .unwrap_or(0),
+        )
+    });
+    for id in ids {
+        conn.execute(
+            "DELETE FROM categories WHERE household_id = ?1 AND id = ?2",
+            params![household_id, id],
+        )?;
+    }
     Ok(())
 }
 
@@ -1599,17 +1827,110 @@ pub fn load_budget_snapshots_for_year(
     )?;
     let rows = stmt
         .query_map(params![household_id, year], |row| {
+            let period_code: i32 = row.get(3)?;
             Ok(BudgetSnapshot {
                 id: row.get(0)?,
                 category: row.get(1)?,
                 year: row.get(2)?,
-                period_code: row.get(3)?,
+                period_code: normalize_budget_period_code(year, period_code),
                 amount_cents: row.get(4)?,
                 is_override: row.get::<_, i32>(5)? != 0,
             })
         })?
         .collect();
     rows
+}
+
+pub fn replace_budget_plan(
+    conn: &mut Connection,
+    household_id: i64,
+    category: &str,
+    year: i32,
+    plan: &[BudgetSnapshot],
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "DELETE FROM budget_snapshots WHERE household_id = ?1 AND category = ?2 AND year = ?3",
+        params![household_id, category.trim(), year],
+    )?;
+    for snapshot in plan {
+        tx.execute(
+            "INSERT INTO budget_snapshots
+             (household_id, category, year, period_code, amount_cents, is_override)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                household_id,
+                snapshot.category.trim(),
+                year,
+                snapshot.period_code,
+                snapshot.amount_cents,
+                snapshot.is_override as i32
+            ],
+        )?;
+    }
+    tx.commit()
+}
+
+pub fn copy_budget_year(
+    conn: &mut Connection,
+    household_id: i64,
+    source_year: i32,
+    target_year: i32,
+) -> rusqlite::Result<usize> {
+    let mut plan = load_budget_snapshots_for_year(conn, household_id, source_year)?;
+    if plan.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT category, amount_cents, month FROM budgets
+             WHERE household_id = ?1 AND year = ?2",
+        )?;
+        let legacy = stmt
+            .query_map(params![household_id, source_year], |row| {
+                let month: i32 = row.get(2)?;
+                let period_code = match month {
+                    0 => 0,
+                    1..=12 => month,
+                    21..=24 => month,
+                    _ => month,
+                };
+                Ok(BudgetSnapshot {
+                    id: 0,
+                    category: row.get(0)?,
+                    year: target_year,
+                    period_code,
+                    amount_cents: row.get(1)?,
+                    is_override: true,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        plan = legacy;
+        drop(stmt);
+    }
+    if plan.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "DELETE FROM budget_snapshots WHERE household_id = ?1 AND year = ?2",
+        params![household_id, target_year],
+    )?;
+    for snapshot in &plan {
+        tx.execute(
+            "INSERT INTO budget_snapshots
+             (household_id, category, year, period_code, amount_cents, is_override)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                household_id,
+                snapshot.category.trim(),
+                target_year,
+                snapshot.period_code,
+                snapshot.amount_cents,
+                snapshot.is_override as i32
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(plan.len())
 }
 
 // ── Analytics Filters v7 ─────────────────────────────────────────────────
@@ -1897,6 +2218,31 @@ pub fn migrate_category_exclusion_v12(conn: &Connection) -> rusqlite::Result<()>
     Ok(())
 }
 
+pub const UNDO_ACTIONS_V13_MIGRATION: &str = "undo_actions_v13";
+pub const UNDO_ACTION_PAYLOAD_VERSION: i64 = 1;
+
+pub fn migrate_undo_actions_v13(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_migrations_table(conn)?;
+    conn.execute_batch(
+        "
+    CREATE TABLE IF NOT EXISTS undo_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      household_id INTEGER NOT NULL,
+      domain TEXT NOT NULL CHECK (domain IN ('household', 'settlements')),
+      payload_version INTEGER NOT NULL DEFAULT 1,
+      payload_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_undo_actions_household_domain_id
+      ON undo_actions(household_id, domain, id);
+    ",
+    )?;
+    if migration_applied(conn, UNDO_ACTIONS_V13_MIGRATION)? {
+        return Ok(());
+    }
+    mark_migration_applied(conn, UNDO_ACTIONS_V13_MIGRATION)?;
+    Ok(())
+}
+
 pub fn save_category_split(
     conn: &Connection,
     household_id: i64,
@@ -1931,4 +2277,1053 @@ pub fn delete_all_category_splits(conn: &Connection, household_id: i64) -> rusql
         params![household_id],
     )?;
     Ok(())
+}
+
+pub fn capture_household_state(
+    conn: &Connection,
+    household_id: i64,
+) -> rusqlite::Result<HouseholdState> {
+    let household_name = conn
+        .query_row(
+            "SELECT name FROM households WHERE id = ?1",
+            params![household_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+    let mut category_stmt = conn.prepare(
+        "SELECT id, name, parent_id, COALESCE(color_rgb, 0), COALESCE(excluded, 0)
+         FROM categories WHERE household_id = ?1 ORDER BY id",
+    )?;
+    let categories = category_stmt
+        .query_map(params![household_id], |row| {
+            Ok(UndoCategory {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                parent_id: row.get(2)?,
+                color_rgb: row.get(3)?,
+                excluded: row.get::<_, i64>(4)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut member_stmt = conn.prepare(
+        "SELECT id, name, is_self, COALESCE(color_rgb, 0)
+         FROM household_members WHERE household_id = ?1 ORDER BY id",
+    )?;
+    let members = member_stmt
+        .query_map(params![household_id], |row| {
+            Ok(UndoMember {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                is_self: row.get::<_, i64>(2)? != 0,
+                color_rgb: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut expense_stmt = conn.prepare(
+        "SELECT id, category, member
+         FROM expenses WHERE household_id = ?1 ORDER BY id",
+    )?;
+    let expense_links = expense_stmt
+        .query_map(params![household_id], |row| {
+            Ok(UndoExpenseLink {
+                id: row.get(0)?,
+                category: row.get(1)?,
+                member: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut vendor_stmt = conn.prepare(
+        "SELECT id, vendor_pattern, category, created_at
+         FROM vendor_category_rules WHERE household_id = ?1 ORDER BY id",
+    )?;
+    let vendor_rules = vendor_stmt
+        .query_map(params![household_id], |row| {
+            Ok(UndoVendorRule {
+                id: row.get(0)?,
+                vendor_pattern: row.get(1)?,
+                category: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(HouseholdState {
+        household_name,
+        categories,
+        members,
+        expense_links,
+        vendor_rules,
+        splits: capture_settlement_state(conn, household_id)?.splits,
+    })
+}
+
+pub fn capture_settlement_state(
+    conn: &Connection,
+    household_id: i64,
+) -> rusqlite::Result<SettlementState> {
+    let mut stmt = conn.prepare(
+        "SELECT id, category, member_name, percentage
+         FROM category_splits WHERE household_id = ?1 ORDER BY id",
+    )?;
+    let splits = stmt
+        .query_map(params![household_id], |row| {
+            Ok(UndoSplit {
+                id: row.get(0)?,
+                category: row.get(1)?,
+                member_name: row.get(2)?,
+                percentage: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(SettlementState { splits })
+}
+
+fn undo_category_depth(categories: &[UndoCategory], id: i64) -> usize {
+    let mut current = categories.iter().find(|category| category.id == id);
+    let mut depth = 0;
+    while let Some(category) = current {
+        depth += 1;
+        if depth > categories.len() {
+            break;
+        }
+        current = category.parent_id.and_then(|parent_id| {
+            categories
+                .iter()
+                .find(|candidate| candidate.id == parent_id)
+        });
+    }
+    depth
+}
+
+fn undo_state_category_label(state: &HouseholdState, category_id: i64) -> Option<String> {
+    let mut names = Vec::new();
+    let mut current_id = Some(category_id);
+    while let Some(id) = current_id {
+        let category = state.categories.iter().find(|category| category.id == id)?;
+        names.push(category.name.clone());
+        current_id = category.parent_id;
+        if names.len() > state.categories.len() {
+            return None;
+        }
+    }
+    names.reverse();
+    Some(names.join(CATEGORY_LABEL_SEP))
+}
+
+fn undo_category_label_replacements(
+    before: &HouseholdState,
+    after: &HouseholdState,
+) -> Vec<(String, String)> {
+    before
+        .categories
+        .iter()
+        .filter_map(|old_category| {
+            after
+                .categories
+                .iter()
+                .find(|category| category.id == old_category.id)
+                .and_then(|new_category| {
+                    Some((
+                        undo_state_category_label(after, new_category.id)?,
+                        undo_state_category_label(before, old_category.id)?,
+                    ))
+                })
+                .filter(|(new_label, old_label)| new_label != old_label)
+        })
+        .collect()
+}
+
+fn replace_budget_category_labels(
+    conn: &Connection,
+    household_id: i64,
+    replacements: &[(String, String)],
+) -> rusqlite::Result<()> {
+    for (old_label, new_label) in replacements {
+        conn.execute(
+            "UPDATE budgets SET category = ?1 WHERE household_id = ?2 AND category = ?3",
+            params![new_label, household_id, old_label],
+        )?;
+        conn.execute(
+            "UPDATE budget_snapshots SET category = ?1 WHERE household_id = ?2 AND category = ?3",
+            params![new_label, household_id, old_label],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn restore_household_state(
+    conn: &Connection,
+    household_id: i64,
+    state: &HouseholdState,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE households SET name = ?1 WHERE id = ?2",
+        params![state.household_name, household_id],
+    )?;
+    conn.execute(
+        "DELETE FROM category_splits WHERE household_id = ?1",
+        params![household_id],
+    )?;
+    conn.execute(
+        "DELETE FROM vendor_category_rules WHERE household_id = ?1",
+        params![household_id],
+    )?;
+    conn.execute(
+        "DELETE FROM categories WHERE household_id = ?1",
+        params![household_id],
+    )?;
+    conn.execute(
+        "DELETE FROM household_members WHERE household_id = ?1",
+        params![household_id],
+    )?;
+
+    for member in &state.members {
+        conn.execute(
+            "INSERT INTO household_members (id, household_id, name, is_self, color_rgb)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                member.id,
+                household_id,
+                member.name,
+                member.is_self as i32,
+                member.color_rgb
+            ],
+        )?;
+    }
+
+    let mut categories = state.categories.clone();
+    categories.sort_by_key(|category| undo_category_depth(&state.categories, category.id));
+    for category in &categories {
+        if let Some(parent_id) = category.parent_id {
+            if !state
+                .categories
+                .iter()
+                .any(|candidate| candidate.id == parent_id)
+            {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "category parent is missing from undo snapshot".into(),
+                ));
+            }
+        }
+        conn.execute(
+            "INSERT INTO categories (id, household_id, name, parent_id, color_rgb, excluded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                category.id,
+                household_id,
+                category.name,
+                category.parent_id,
+                category.color_rgb,
+                category.excluded as i32
+            ],
+        )?;
+    }
+
+    for link in &state.expense_links {
+        let changed = conn.execute(
+            "UPDATE expenses SET category = ?1, member = ?2
+             WHERE id = ?3 AND household_id = ?4",
+            params![link.category, link.member, link.id, household_id],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+    }
+    for rule in &state.vendor_rules {
+        conn.execute(
+            "INSERT INTO vendor_category_rules
+             (id, household_id, vendor_pattern, category, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                rule.id,
+                household_id,
+                rule.vendor_pattern,
+                rule.category,
+                rule.created_at
+            ],
+        )?;
+    }
+    for split in &state.splits {
+        conn.execute(
+            "INSERT INTO category_splits (id, household_id, category, member_name, percentage)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                split.id,
+                household_id,
+                split.category,
+                split.member_name,
+                split.percentage
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn restore_settlement_state(
+    conn: &Connection,
+    household_id: i64,
+    state: &SettlementState,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM category_splits WHERE household_id = ?1",
+        params![household_id],
+    )?;
+    for split in &state.splits {
+        conn.execute(
+            "INSERT INTO category_splits (id, household_id, category, member_name, percentage)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                split.id,
+                household_id,
+                split.category,
+                split.member_name,
+                split.percentage
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn trim_undo_actions(
+    conn: &Connection,
+    household_id: i64,
+    domain: UndoDomain,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM undo_actions
+         WHERE household_id = ?1 AND domain = ?2
+           AND id NOT IN (
+             SELECT id FROM undo_actions
+             WHERE household_id = ?1 AND domain = ?2
+             ORDER BY id DESC LIMIT 10
+           )",
+        params![household_id, domain.as_str()],
+    )?;
+    Ok(())
+}
+
+pub fn insert_undo_action(
+    conn: &Connection,
+    household_id: i64,
+    domain: UndoDomain,
+    action: &UndoAction,
+) -> rusqlite::Result<i64> {
+    if action.domain() != domain {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "undo action domain mismatch".into(),
+        ));
+    }
+    let payload = serde_json::to_string(action)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    conn.execute(
+        "INSERT INTO undo_actions (household_id, domain, payload_version, payload_json)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            household_id,
+            domain.as_str(),
+            UNDO_ACTION_PAYLOAD_VERSION,
+            payload
+        ],
+    )?;
+    trim_undo_actions(conn, household_id, domain)?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_undo_action(
+    conn: &Connection,
+    household_id: i64,
+    domain: UndoDomain,
+    action_id: i64,
+    action: &UndoAction,
+) -> rusqlite::Result<()> {
+    if action.domain() != domain {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "undo action domain mismatch".into(),
+        ));
+    }
+    let payload = serde_json::to_string(action)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let changed = conn.execute(
+        "UPDATE undo_actions
+         SET payload_version = ?1, payload_json = ?2
+         WHERE id = ?3 AND household_id = ?4 AND domain = ?5",
+        params![
+            UNDO_ACTION_PAYLOAD_VERSION,
+            payload,
+            action_id,
+            household_id,
+            domain.as_str()
+        ],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    trim_undo_actions(conn, household_id, domain)?;
+    Ok(())
+}
+
+pub fn delete_undo_action(
+    conn: &Connection,
+    household_id: i64,
+    domain: UndoDomain,
+    action_id: i64,
+) -> rusqlite::Result<()> {
+    let changed = conn.execute(
+        "DELETE FROM undo_actions WHERE id = ?1 AND household_id = ?2 AND domain = ?3",
+        params![action_id, household_id, domain.as_str()],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+pub fn load_latest_undo_action(
+    conn: &Connection,
+    household_id: i64,
+    domain: UndoDomain,
+) -> rusqlite::Result<Option<(i64, UndoAction)>> {
+    let row = conn
+        .query_row(
+            "SELECT id, payload_version, payload_json
+             FROM undo_actions
+             WHERE household_id = ?1 AND domain = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![household_id, domain.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((id, version, payload)) = row else {
+        return Ok(None);
+    };
+    if version != UNDO_ACTION_PAYLOAD_VERSION {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "unsupported undo payload version {version}"
+        )));
+    }
+    let action = serde_json::from_str(&payload)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    Ok(Some((id, action)))
+}
+
+pub fn run_household_action<F, G>(
+    conn: &mut Connection,
+    household_id: i64,
+    mutate: F,
+    make_action: G,
+) -> rusqlite::Result<Option<i64>>
+where
+    F: FnOnce(&Connection) -> rusqlite::Result<()>,
+    G: FnOnce(HouseholdState, HouseholdState) -> UndoAction,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let before = capture_household_state(&tx, household_id)?;
+    mutate(&tx)?;
+    let after = capture_household_state(&tx, household_id)?;
+    if before == after {
+        return Ok(None);
+    }
+    let action = make_action(before, after);
+    let id = insert_undo_action(&tx, household_id, UndoDomain::Household, &action)?;
+    tx.commit()?;
+    Ok(Some(id))
+}
+
+pub fn run_settlement_action<F, G>(
+    conn: &mut Connection,
+    household_id: i64,
+    mutate: F,
+    make_action: G,
+) -> rusqlite::Result<Option<i64>>
+where
+    F: FnOnce(&Connection) -> rusqlite::Result<()>,
+    G: FnOnce(SettlementState, SettlementState) -> UndoAction,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let before = capture_settlement_state(&tx, household_id)?;
+    mutate(&tx)?;
+    let after = capture_settlement_state(&tx, household_id)?;
+    if before == after {
+        return Ok(None);
+    }
+    let action = make_action(before, after);
+    let id = insert_undo_action(&tx, household_id, UndoDomain::Settlements, &action)?;
+    tx.commit()?;
+    Ok(Some(id))
+}
+
+pub fn update_household_undo_action<F, G>(
+    conn: &mut Connection,
+    household_id: i64,
+    action_id: i64,
+    before: HouseholdState,
+    expected_after: &HouseholdState,
+    mutate: F,
+    make_action: G,
+) -> rusqlite::Result<Option<i64>>
+where
+    F: FnOnce(&Connection) -> rusqlite::Result<()>,
+    G: FnOnce(HouseholdState, HouseholdState) -> UndoAction,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = capture_household_state(&tx, household_id)?;
+    if &current != expected_after {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "undo gesture state changed".into(),
+        ));
+    }
+    mutate(&tx)?;
+    let after = capture_household_state(&tx, household_id)?;
+    if before == after {
+        delete_undo_action(&tx, household_id, UndoDomain::Household, action_id)?;
+        tx.commit()?;
+        return Ok(None);
+    }
+    let action = make_action(before, after);
+    update_undo_action(&tx, household_id, UndoDomain::Household, action_id, &action)?;
+    tx.commit()?;
+    Ok(Some(action_id))
+}
+
+pub fn undo_latest_action(
+    conn: &mut Connection,
+    household_id: i64,
+    domain: UndoDomain,
+) -> Result<UndoAction, String> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("could not start undo transaction: {error}"))?;
+    let result: Result<UndoAction, String> = (|| {
+        let row = tx
+            .query_row(
+                "SELECT id, payload_version, payload_json
+                 FROM undo_actions
+                 WHERE household_id = ?1 AND domain = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![household_id, domain.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("could not read undo history: {error}"))?;
+        let Some((id, version, payload)) = row else {
+            return Err("Nothing to undo.".to_string());
+        };
+        if version != UNDO_ACTION_PAYLOAD_VERSION {
+            return Err(format!("Unsupported undo payload version {version}."));
+        }
+        let action: UndoAction = serde_json::from_str(&payload)
+            .map_err(|error| format!("Could not read undo history: {error}"))?;
+        if action.domain() != domain {
+            return Err("Undo history domain mismatch.".to_string());
+        }
+        match domain {
+            UndoDomain::Household => {
+                let (before, after) = action
+                    .household_states()
+                    .ok_or_else(|| "Invalid household undo payload.".to_string())?;
+                let current = capture_household_state(&tx, household_id)
+                    .map_err(|error| format!("Could not validate undo state: {error}"))?;
+                let splits_changed = before.splits != after.splits;
+                let mut expected_current = after.clone();
+                if !splits_changed {
+                    expected_current.splits = current.splits.clone();
+                }
+                if current != expected_current {
+                    return Err(
+                        "Undo conflict: current household data no longer matches the saved action."
+                            .to_string(),
+                    );
+                }
+                replace_budget_category_labels(
+                    &tx,
+                    household_id,
+                    &undo_category_label_replacements(before, after),
+                )
+                .map_err(|error| format!("Could not restore budget labels: {error}"))?;
+                let mut restore = before.clone();
+                if !splits_changed {
+                    restore.splits = current.splits;
+                }
+                restore_household_state(&tx, household_id, &restore)
+                    .map_err(|error| format!("Could not restore household state: {error}"))?;
+            }
+            UndoDomain::Settlements => {
+                let (before, after) = action
+                    .settlement_states()
+                    .ok_or_else(|| "Invalid settlement undo payload.".to_string())?;
+                let current = capture_settlement_state(&tx, household_id)
+                    .map_err(|error| format!("Could not validate undo state: {error}"))?;
+                if &current != after {
+                    return Err(
+                        "Undo conflict: current settlement data no longer matches the saved action."
+                            .to_string(),
+                    );
+                }
+                restore_settlement_state(&tx, household_id, before)
+                    .map_err(|error| format!("Could not restore settlement state: {error}"))?;
+            }
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM undo_actions WHERE id = ?1 AND household_id = ?2 AND domain = ?3",
+                params![id, household_id, domain.as_str()],
+            )
+            .map_err(|error| format!("could not consume undo history: {error}"))?;
+        if deleted != 1 {
+            return Err("Undo history changed before it could be consumed.".to_string());
+        }
+        Ok(action)
+    })();
+    match result {
+        Ok(action) => {
+            tx.commit()
+                .map_err(|error| format!("could not commit undo: {error}"))?;
+            Ok(action)
+        }
+        Err(error) => {
+            let _ = tx.rollback();
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod undo_tests {
+    use super::*;
+    use rusqlite::OpenFlags;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_schema(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE households (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE categories (
+               id INTEGER PRIMARY KEY,
+               household_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               parent_id INTEGER,
+               color_rgb INTEGER,
+               excluded INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE household_members (
+               id INTEGER PRIMARY KEY,
+               household_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               is_self INTEGER NOT NULL DEFAULT 0,
+               color_rgb INTEGER
+             );
+             CREATE TABLE expenses (
+               id INTEGER PRIMARY KEY,
+               household_id INTEGER NOT NULL,
+               category TEXT,
+               member TEXT
+             );
+             CREATE TABLE vendor_category_rules (
+               id INTEGER PRIMARY KEY,
+               household_id INTEGER NOT NULL,
+               vendor_pattern TEXT NOT NULL,
+               category TEXT,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+              CREATE TABLE category_splits (
+                id INTEGER PRIMARY KEY,
+                household_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                member_name TEXT NOT NULL,
+                percentage REAL NOT NULL,
+                UNIQUE(household_id, category, member_name)
+              );
+             CREATE TABLE budgets (
+                id INTEGER PRIMARY KEY,
+                household_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL
+             );
+             CREATE TABLE budget_snapshots (
+                id INTEGER PRIMARY KEY,
+                household_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                is_override INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .expect("schema");
+        conn.execute("INSERT INTO households (id, name) VALUES (1, 'Home')", [])
+            .expect("household");
+    }
+
+    fn seed_action_data(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO categories (id, household_id, name, parent_id, color_rgb, excluded)
+             VALUES (1, 1, 'Food', NULL, 123, 0),
+                    (2, 1, 'Lunch', 1, 456, 0)",
+            [],
+        )
+        .expect("categories");
+        conn.execute(
+            "INSERT INTO household_members (id, household_id, name, is_self, color_rgb)
+             VALUES (1, 1, 'Me', 1, 111), (2, 1, 'Alex', 0, 222)",
+            [],
+        )
+        .expect("members");
+        conn.execute(
+            "INSERT INTO expenses (id, household_id, category, member)
+             VALUES (1, 1, 'Food › Lunch', 'Alex')",
+            [],
+        )
+        .expect("expense");
+        conn.execute(
+            "INSERT INTO vendor_category_rules (id, household_id, vendor_pattern, category)
+             VALUES (1, 1, 'cafe', 'Food › Lunch')",
+            [],
+        )
+        .expect("rule");
+        conn.execute(
+            "INSERT INTO category_splits (id, household_id, category, member_name, percentage)
+             VALUES (1, 1, 'Food › Lunch', 'Alex', 25)",
+            [],
+        )
+        .expect("split");
+        conn.execute(
+            "INSERT INTO budgets (id, household_id, category, amount_cents, year, month)
+             VALUES (1, 1, 'Food › Lunch', 1200, 2026, 1)",
+            [],
+        )
+        .expect("budget");
+        conn.execute(
+            "INSERT INTO budget_snapshots
+             (id, household_id, category, year, month, amount_cents, is_override)
+             VALUES (1, 1, 'Food › Lunch', 2026, 1, 1200, 1)",
+            [],
+        )
+        .expect("snapshot");
+    }
+
+    fn split_action(value: f64) -> UndoAction {
+        UndoAction::SettlementPercentage {
+            before: SettlementState::default(),
+            after: SettlementState {
+                splits: vec![UndoSplit {
+                    id: value as i64,
+                    category: "Food".into(),
+                    member_name: "Alex".into(),
+                    percentage: value,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn undo_migration_is_idempotent() {
+        let conn = Connection::open_in_memory().expect("db");
+        test_schema(&conn);
+        migrate_undo_actions_v13(&conn).expect("migration");
+        migrate_undo_actions_v13(&conn).expect("repeat migration");
+        assert!(migration_applied(&conn, UNDO_ACTIONS_V13_MIGRATION).expect("marker"));
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'undo_actions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn undo_history_is_capped_per_domain_and_survives_reopen() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let uri = format!("file:twocents_undo_{suffix}?mode=memory&cache=shared");
+        let flags = OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE;
+        let anchor = Connection::open_with_flags(&uri, flags).expect("memory db");
+        test_schema(&anchor);
+        migrate_undo_actions_v13(&anchor).expect("migration");
+        for index in 0..12 {
+            insert_undo_action(
+                &anchor,
+                1,
+                UndoDomain::Household,
+                &UndoAction::MemberColor {
+                    before: HouseholdState::default(),
+                    after: HouseholdState::default(),
+                },
+            )
+            .expect("household action");
+            insert_undo_action(
+                &anchor,
+                1,
+                UndoDomain::Settlements,
+                &split_action(index as f64),
+            )
+            .expect("settlement action");
+        }
+        let reopened = Connection::open_with_flags(&uri, flags).expect("reopen");
+        let household_count: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM undo_actions WHERE household_id = 1 AND domain = 'household'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("household count");
+        let settlement_count: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM undo_actions WHERE household_id = 1 AND domain = 'settlements'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("settlement count");
+        assert_eq!(household_count, 10);
+        assert_eq!(settlement_count, 10);
+    }
+
+    #[test]
+    fn category_and_member_actions_restore_linked_state() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        test_schema(&conn);
+        migrate_undo_actions_v13(&conn).expect("migration");
+        seed_action_data(&conn);
+        run_household_action(
+            &mut conn,
+            1,
+            |tx| rename_category_db(tx, 1, 1, "Dining"),
+            |before, after| UndoAction::CategoryRename { before, after },
+        )
+        .expect("category action");
+        undo_latest_action(&mut conn, 1, UndoDomain::Household).expect("category undo");
+        let category: String = conn
+            .query_row("SELECT name FROM categories WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("category");
+        let expense_category: String = conn
+            .query_row("SELECT category FROM expenses WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("expense");
+        let budget_category: String = conn
+            .query_row("SELECT category FROM budgets WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("budget");
+        assert_eq!(category, "Food");
+        assert_eq!(expense_category, "Food › Lunch");
+        assert_eq!(budget_category, "Food › Lunch");
+        run_household_action(
+            &mut conn,
+            1,
+            |tx| rename_category_db(tx, 1, 2, "Dinner"),
+            |before, after| UndoAction::CategoryRename { before, after },
+        )
+        .expect("subcategory action");
+        undo_latest_action(&mut conn, 1, UndoDomain::Household).expect("subcategory undo");
+        let subcategory: String = conn
+            .query_row("SELECT name FROM categories WHERE id = 2", [], |row| {
+                row.get(0)
+            })
+            .expect("subcategory");
+        let split_category: String = conn
+            .query_row(
+                "SELECT category FROM category_splits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("split category");
+        assert_eq!(subcategory, "Lunch");
+        assert_eq!(split_category, "Food › Lunch");
+        run_household_action(
+            &mut conn,
+            1,
+            |tx| delete_household_member(tx, 1, 2),
+            |before, after| UndoAction::MemberDelete { before, after },
+        )
+        .expect("member action");
+        undo_latest_action(&mut conn, 1, UndoDomain::Household).expect("member undo");
+        let member_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM household_members WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("member");
+        assert_eq!(member_count, 1);
+    }
+
+    #[test]
+    fn household_ignores_unrelated_settlement_edits_during_undo() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        test_schema(&conn);
+        migrate_undo_actions_v13(&conn).expect("migration");
+        seed_action_data(&conn);
+        run_household_action(
+            &mut conn,
+            1,
+            |tx| update_member_color_db(tx, 1, 2, Color32::from_rgb(1, 2, 3)),
+            |before, after| UndoAction::MemberColor { before, after },
+        )
+        .expect("household action");
+        run_settlement_action(
+            &mut conn,
+            1,
+            |tx| save_category_split(tx, 1, "Food › Lunch", "Alex", 50.0),
+            |before, after| UndoAction::SettlementPercentage { before, after },
+        )
+        .expect("settlement action");
+        undo_latest_action(&mut conn, 1, UndoDomain::Household).expect("household undo");
+        let color: i32 = conn
+            .query_row(
+                "SELECT color_rgb FROM household_members WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("color");
+        let percentage: f64 = conn
+            .query_row(
+                "SELECT percentage FROM category_splits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("split");
+        assert_eq!(color, 222);
+        assert_eq!(percentage, 50.0);
+    }
+
+    #[test]
+    fn childless_subcategory_delete_clears_and_restores_full_label() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        test_schema(&conn);
+        migrate_undo_actions_v13(&conn).expect("migration");
+        seed_action_data(&conn);
+        run_household_action(
+            &mut conn,
+            1,
+            |tx| delete_category_from_db(tx, 1, 2),
+            |before, after| UndoAction::CategoryDelete { before, after },
+        )
+        .expect("delete");
+        let expense_category: String = conn
+            .query_row("SELECT category FROM expenses WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("expense");
+        let vendor_category: String = conn
+            .query_row(
+                "SELECT category FROM vendor_category_rules WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("vendor rule");
+        let split_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM category_splits", [], |row| row.get(0))
+            .expect("splits");
+        assert_eq!(expense_category, "");
+        assert_eq!(vendor_category, "");
+        assert_eq!(split_count, 0);
+        undo_latest_action(&mut conn, 1, UndoDomain::Household).expect("undo");
+        let restored: (String, String, i64) = conn
+            .query_row(
+                "SELECT e.category, v.category, (SELECT COUNT(*) FROM category_splits)
+                 FROM expenses e JOIN vendor_category_rules v ON v.id = 1 WHERE e.id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("restored links");
+        assert_eq!(restored, ("Food › Lunch".into(), "Food › Lunch".into(), 1));
+    }
+
+    #[test]
+    fn settlement_action_is_one_batch_undo() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        test_schema(&conn);
+        migrate_undo_actions_v13(&conn).expect("migration");
+        seed_action_data(&conn);
+        run_settlement_action(
+            &mut conn,
+            1,
+            |tx| {
+                save_category_split(tx, 1, "Food", "Me", 100.0)?;
+                save_category_split(tx, 1, "Food", "Alex", 0.0)
+            },
+            |before, after| UndoAction::SettlementEqualSplit { before, after },
+        )
+        .expect("settlement action");
+        let value: f64 = conn
+            .query_row(
+                "SELECT percentage FROM category_splits WHERE category = 'Food' AND member_name = 'Me'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("split");
+        assert_eq!(value, 100.0);
+        undo_latest_action(&mut conn, 1, UndoDomain::Settlements).expect("settlement undo");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM category_splits WHERE category = 'Food'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("split count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn undo_conflict_keeps_newer_state_and_history() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        test_schema(&conn);
+        migrate_undo_actions_v13(&conn).expect("migration");
+        seed_action_data(&conn);
+        run_settlement_action(
+            &mut conn,
+            1,
+            |tx| save_category_split(tx, 1, "Food › Lunch", "Alex", 50.0),
+            |before, after| UndoAction::SettlementPercentage { before, after },
+        )
+        .expect("action");
+        conn.execute(
+            "UPDATE category_splits SET percentage = 75 WHERE id = 1",
+            [],
+        )
+        .expect("newer edit");
+        assert!(undo_latest_action(&mut conn, 1, UndoDomain::Settlements).is_err());
+        let value: f64 = conn
+            .query_row(
+                "SELECT percentage FROM category_splits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("value");
+        let history: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM undo_actions WHERE domain = 'settlements'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("history");
+        assert_eq!(value, 75.0);
+        assert_eq!(history, 1);
+    }
 }

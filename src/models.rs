@@ -1,4 +1,6 @@
+use chrono::{Datelike, Duration, NaiveDate};
 use eframe::egui::Color32;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -437,6 +439,226 @@ pub struct CategorySplit {
     pub percentage: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UndoDomain {
+    Household,
+    Settlements,
+}
+
+impl UndoDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Household => "household",
+            Self::Settlements => "settlements",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "household" => Some(Self::Household),
+            "settlements" => Some(Self::Settlements),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DestructiveConfirm {
+    Category {
+        id: i64,
+        label: String,
+        descendant_count: usize,
+    },
+    Member {
+        id: i64,
+        name: String,
+    },
+    Settlement {
+        label: String,
+        include_subcategories: bool,
+        descendant_count: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingSettlementEdit {
+    pub category: String,
+    pub member_name: String,
+    pub before: Option<f64>,
+    pub value: f64,
+}
+
+impl PendingSettlementEdit {
+    pub fn matches(&self, category: &str, member_name: &str) -> bool {
+        self.category == category && self.member_name == member_name
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingColorUndo {
+    pub action_id: i64,
+    pub target_id: i64,
+    pub category: bool,
+    pub before: HouseholdState,
+    pub last_after: HouseholdState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UndoCategory {
+    pub id: i64,
+    pub name: String,
+    pub parent_id: Option<i64>,
+    pub color_rgb: i32,
+    pub excluded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UndoMember {
+    pub id: i64,
+    pub name: String,
+    pub is_self: bool,
+    pub color_rgb: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UndoExpenseLink {
+    pub id: i64,
+    pub category: Option<String>,
+    pub member: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UndoVendorRule {
+    pub id: i64,
+    pub vendor_pattern: String,
+    pub category: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UndoSplit {
+    pub id: i64,
+    pub category: String,
+    pub member_name: String,
+    pub percentage: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HouseholdState {
+    pub household_name: String,
+    pub categories: Vec<UndoCategory>,
+    pub members: Vec<UndoMember>,
+    pub expense_links: Vec<UndoExpenseLink>,
+    pub vendor_rules: Vec<UndoVendorRule>,
+    pub splits: Vec<UndoSplit>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SettlementState {
+    pub splits: Vec<UndoSplit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum UndoAction {
+    HouseholdRename {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    MemberAdd {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    MemberDelete {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    MemberRename {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    MemberColor {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    CategoryAdd {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    CategoryDelete {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    CategoryRename {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    CategoryColor {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    CategoryExclusion {
+        before: HouseholdState,
+        after: HouseholdState,
+    },
+    SettlementClear {
+        before: SettlementState,
+        after: SettlementState,
+    },
+    SettlementEqualSplit {
+        before: SettlementState,
+        after: SettlementState,
+    },
+    SettlementPercentage {
+        before: SettlementState,
+        after: SettlementState,
+    },
+}
+
+impl UndoAction {
+    pub fn domain(&self) -> UndoDomain {
+        match self {
+            Self::HouseholdRename { .. }
+            | Self::MemberAdd { .. }
+            | Self::MemberDelete { .. }
+            | Self::MemberRename { .. }
+            | Self::MemberColor { .. }
+            | Self::CategoryAdd { .. }
+            | Self::CategoryDelete { .. }
+            | Self::CategoryRename { .. }
+            | Self::CategoryColor { .. }
+            | Self::CategoryExclusion { .. } => UndoDomain::Household,
+            Self::SettlementClear { .. }
+            | Self::SettlementEqualSplit { .. }
+            | Self::SettlementPercentage { .. } => UndoDomain::Settlements,
+        }
+    }
+
+    pub fn household_states(&self) -> Option<(&HouseholdState, &HouseholdState)> {
+        match self {
+            Self::HouseholdRename { before, after }
+            | Self::MemberAdd { before, after }
+            | Self::MemberDelete { before, after }
+            | Self::MemberRename { before, after }
+            | Self::MemberColor { before, after }
+            | Self::CategoryAdd { before, after }
+            | Self::CategoryDelete { before, after }
+            | Self::CategoryRename { before, after }
+            | Self::CategoryColor { before, after }
+            | Self::CategoryExclusion { before, after } => Some((before, after)),
+            _ => None,
+        }
+    }
+
+    pub fn settlement_states(&self) -> Option<(&SettlementState, &SettlementState)> {
+        match self {
+            Self::SettlementClear { before, after }
+            | Self::SettlementEqualSplit { before, after }
+            | Self::SettlementPercentage { before, after } => Some((before, after)),
+            _ => None,
+        }
+    }
+}
+
 // ---- Excluded categories ----------------------------------------------------
 //
 // any category can be flagged "excluded" in Settings (children
@@ -471,27 +693,18 @@ pub fn excluded_category_labels(categories: &[Category]) -> HashSet<String> {
     }
     out
 }
-
-/// Date window of a budget period, for clamping analytics actuals to
-/// the same span the budget envelope covers. `(start, end)` inclusive.
-/// Was `TwoCentsApp::budget_period_date_range` in main.rs — lifted here so
-/// Period Comparison can build its granularity period lists without an app.
 pub fn budget_period_date_range(
     gran: BudgetGranularity,
     year: i32,
     period: i32,
-) -> (chrono::NaiveDate, chrono::NaiveDate) {
-    use chrono::{Datelike, Duration, NaiveDate};
+) -> (NaiveDate, NaiveDate) {
     match gran {
-        BudgetGranularity::Yearly => (
-            NaiveDate::from_ymd_opt(year, 1, 1).unwrap(),
-            NaiveDate::from_ymd_opt(year, 12, 31).unwrap(),
-        ),
+        BudgetGranularity::Yearly => (year_start(year), year_end(year)),
         BudgetGranularity::Quarterly => {
             let start_month = ((period - 1) * 3 + 1) as u32;
             let end_month = start_month + 2;
             let end = if end_month == 12 {
-                NaiveDate::from_ymd_opt(year, 12, 31).unwrap()
+                year_end(year)
             } else {
                 NaiveDate::from_ymd_opt(year, (end_month + 1) as u32, 1).unwrap()
                     - Duration::days(1)
@@ -500,7 +713,7 @@ pub fn budget_period_date_range(
         }
         BudgetGranularity::Monthly => {
             let end = if period == 12 {
-                NaiveDate::from_ymd_opt(year, 12, 31).unwrap()
+                year_end(year)
             } else {
                 NaiveDate::from_ymd_opt(year, (period + 1) as u32, 1).unwrap() - Duration::days(1)
             };
@@ -509,18 +722,93 @@ pub fn budget_period_date_range(
                 end,
             )
         }
-        BudgetGranularity::Weekly => {
-            // ISO week: Monday..Sunday of the given ISO week/year.
-            let max_week = NaiveDate::from_ymd_opt(year, 12, 28)
-                .unwrap()
-                .iso_week()
-                .week() as i32;
-            let week = period.clamp(1, max_week);
-            let start =
-                NaiveDate::from_isoywd_opt(year, week as u32, chrono::Weekday::Mon).unwrap();
-            (start, start + Duration::days(6))
-        }
+        BudgetGranularity::Weekly => budget_week_range(year, period),
     }
+}
+
+pub fn budget_period_count(gran: BudgetGranularity, year: i32) -> i32 {
+    match gran {
+        BudgetGranularity::Yearly => 1,
+        BudgetGranularity::Quarterly => 4,
+        BudgetGranularity::Monthly => 12,
+        BudgetGranularity::Weekly => budget_week_count(year),
+    }
+}
+
+pub fn budget_period_start(gran: BudgetGranularity, year: i32, period: i32) -> NaiveDate {
+    budget_period_date_range(gran, year, period).0
+}
+
+pub fn budget_period_for_date(gran: BudgetGranularity, year: i32, date: NaiveDate) -> Option<i32> {
+    if date.year() != year {
+        return None;
+    }
+    Some(match gran {
+        BudgetGranularity::Yearly => 1,
+        BudgetGranularity::Quarterly => ((date.month() - 1) / 3 + 1) as i32,
+        BudgetGranularity::Monthly => date.month() as i32,
+        BudgetGranularity::Weekly => budget_week_for_date(year, date),
+    })
+}
+
+pub fn budget_period_code(gran: BudgetGranularity, period: i32) -> i32 {
+    match gran {
+        BudgetGranularity::Yearly => 0,
+        BudgetGranularity::Quarterly => 20 + period,
+        BudgetGranularity::Monthly => period,
+        BudgetGranularity::Weekly => 1000 + period,
+    }
+}
+
+pub fn budget_week_count(year: i32) -> i32 {
+    let first = budget_week_start(year, 1);
+    let last = year_end(year);
+    (((last - first).num_days() / 7) + 1) as i32
+}
+
+pub fn budget_week_start(year: i32, period: i32) -> NaiveDate {
+    let first = year_start(year);
+    let offset = first.weekday().num_days_from_monday() as i64;
+    first - Duration::days(offset) + Duration::days((period.max(1) - 1) as i64 * 7)
+}
+
+pub fn budget_week_for_date(year: i32, date: NaiveDate) -> i32 {
+    let first = budget_week_start(year, 1);
+    (((date - first).num_days() / 7) + 1) as i32
+}
+
+pub fn budget_week_range(year: i32, period: i32) -> (NaiveDate, NaiveDate) {
+    let start = budget_week_start(year, period);
+    let end = (start + Duration::days(6)).min(year_end(year));
+    (start.max(year_start(year)), end)
+}
+
+pub fn normalize_budget_period_code(year: i32, code: i32) -> i32 {
+    if !(100..=153).contains(&code) {
+        return code;
+    }
+    let period = code - 100;
+    let start = NaiveDate::from_isoywd_opt(year, period as u32, chrono::Weekday::Mon)
+        .unwrap_or_else(|| year_start(year));
+    let end = start + Duration::days(6);
+    let clipped_start = start.max(year_start(year));
+    let clipped_end = end.min(year_end(year));
+    if clipped_start > clipped_end {
+        code
+    } else {
+        budget_period_code(
+            BudgetGranularity::Weekly,
+            budget_week_for_date(year, clipped_start),
+        )
+    }
+}
+
+fn year_start(year: i32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, 1, 1).unwrap()
+}
+
+fn year_end(year: i32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, 12, 31).unwrap()
 }
 
 /// Sign for a stored amount given its category label: +1 (income credit),

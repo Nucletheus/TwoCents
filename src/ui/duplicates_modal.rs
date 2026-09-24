@@ -42,6 +42,7 @@ impl TwoCentsApp {
         let win_h = (screen_rect.height() - pad_y * 2.0 - chrome_y).clamp(300.0, 800.0);
 
         egui::Window::new("Possible Duplicates Review")
+      .order(egui::Order::Foreground)
       .title_bar(false)
       .resizable(false)
       .collapsible(false)

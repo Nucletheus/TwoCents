@@ -517,7 +517,6 @@ pub fn grid_text_edit_cell(
     cell_id: Id,
     editing: bool,
 ) -> egui::Response {
-    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
     let output = egui::TextEdit::singleline(value)
         .id(cell_id)
         .interactive(editing)
@@ -1540,7 +1539,17 @@ impl GridState {
 
 #[cfg(test)]
 mod tests {
-    use super::selection_range;
+    use super::{egui, grid_text_edit_cell, selection_range};
+
+    #[test]
+    fn grid_text_edit_restores_item_spacing() {
+        egui::__run_test_ui(|ui| {
+            let spacing = ui.spacing().item_spacing;
+            let mut value = String::new();
+            let _ = grid_text_edit_cell(ui, &mut value, egui::Id::new("test"), false);
+            assert_eq!(ui.spacing().item_spacing, spacing);
+        });
+    }
 
     // The invariant every grid_row_selected/grid_commit_targets binary_search
     // relies on: selection rows ascend, even when the visual (sorted) order
