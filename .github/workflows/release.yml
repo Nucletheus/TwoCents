@@ -23,7 +23,6 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item target/release/twocents-desktop.exe .
-          Copy-Item README.md .
           Compress-Archive -Path twocents-desktop.exe, README.md -DestinationPath twocents-x86_64-pc-windows-msvc.zip -Force
       - name: Extract changelog excerpt for this tag
         shell: pwsh
