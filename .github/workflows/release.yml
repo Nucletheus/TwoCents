@@ -29,7 +29,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $lines = Get-Content CHANGELOG.md
-          $start = ($lines | Select-String -Pattern "^## $tag" | Select-Object -First 1).LineNumber
+          $start = ($lines | Select-String -Pattern "^## \[$tag\]" | Select-Object -First 1).LineNumber
           if (-not $start) { throw "CHANGELOG.md has no section for $tag" }
           $rest = $lines[$start..($lines.Length - 1)]
           $end = ($rest | Select-String -Pattern "^## " | Select-Object -Skip 0 | Where-Object { $_.LineNumber -gt 1 } | Select-Object -First 1)
