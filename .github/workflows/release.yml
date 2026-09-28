@@ -46,7 +46,7 @@ jobs:
             $section | Set-Content release-notes.md
           }
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: twocents-x86_64-pc-windows-msvc.zip
           body_path: release-notes.md
