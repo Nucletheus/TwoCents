@@ -4,6 +4,8 @@ All notable changes to TwoCents are documented here.
 
 ## [Unreleased]
 
+## [v0.1.3] - 2026-09-28
+
 ### Added
 - **Add expense** button and empty-state action that insert a row into the grid on today's date under the default member and open the amount editor ready to type.
 - Income is now part of the seeded category tree, so a fresh install can record credits.
