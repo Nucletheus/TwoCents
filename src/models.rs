@@ -393,6 +393,19 @@ pub struct GridState {
     pub pending_focus_target: Option<(GridColumn, usize)>,
     pub pending_keyboard: Option<GridPendingKeyboard>,
     pub active_cell: Option<(GridColumn, usize)>,
+    /// Arrow delta captured in `raw_input_hook` and applied by whichever
+    /// list is open (the cell's autocomplete list or a chevron menu).
+    /// Captured there because by the time a widget renders, the focused
+    /// TextEdit has already taken the arrow as caret movement.
+    pub pending_nav: i8,
+    /// Enter captured in `raw_input_hook` while a list is open: accept the
+    /// highlighted row and stay in the cell.
+    pub pending_accept: bool,
+    /// The chevron menu of a cell is open, and which cell owns it. Kept in
+    /// state so the raw input hook can route arrows/Enter to it — a chevron
+    /// click focuses the chevron, not the cell, so `active_cell` is not a
+    /// reliable gate.
+    pub picker_menu_cell: Option<(GridColumn, usize)>,
 }
 
 #[allow(dead_code)]

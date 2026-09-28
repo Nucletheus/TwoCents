@@ -13,13 +13,11 @@
 TwoCents is a personal finance desktop app for couples. It tracks shared expenses, splits categories between household members, manages budgets, and calculates who owes whom. It runs fully offline and stores everything in one local SQLite file.
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/platform-Windows-blue" alt="Platform"></a>
-  <a href="#"><img src="https://img.shields.io/badge/made%20with-Rust-orange" alt="Rust"></a>
-  <a href="#"><img src="https://img.shields.io/badge/storage-local%20SQLite-green" alt="Storage"></a>
-  <a href="#"><img src="https://img.shields.io/badge/tracking-none-success" alt="Tracking"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/made%20with-Rust-orange" alt="Rust">
+  <img src="https://img.shields.io/badge/storage-local%20SQLite-green" alt="Storage">
+  <img src="https://img.shields.io/badge/tracking-none-success" alt="Tracking">
 </p>
-
-<!-- TODO: demo video embed goes here -->
 
 ## About this project
 
@@ -30,6 +28,7 @@ This is a personal project and a minimum viable product, built for my own househ
 ### Expenses
 A spreadsheet-style grid shared by the expense sheet and the import review modal:
 
+- **Add expense** drops a new row into the grid on today's date, filed under the default member, and puts the cursor in the description cell.
 - Inline editors for date (with picker), amount, member, category, vendor, description, and account.
 - Autocomplete with suggestions for members, categories, vendors, and descriptions.
 - Multi-row selection: click or drag a column, Shift+drag to pan, copy/paste, and bulk edit. Enter applies an edit to every selected row.
@@ -83,28 +82,33 @@ Three chart views over the same filters (members, vendors, dates):
 
 ## Install
 
-Everything is contained in one folder: the executable and its `data` subfolder (the SQLite database) live side by side. Deleting the folder removes the app and its data. No Rust toolchain needed for the installs below.
+Everything the app owns lives in one folder: the executable and its `data`
+subfolder (the SQLite database plus the saved window state). Nothing is written
+to `%APPDATA%`, `%TEMP%`, or your documents, so deleting the install folder
+removes the app and all its data.
 
-### Current user (default)
+### Current user
 Installs to `%LOCALAPPDATA%\TwoCents` and adds a Start Menu shortcut:
 
 ```powershell
 irm https://raw.githubusercontent.com/Nucletheus/TwoCents/main/install.ps1 | iex
 ```
 
-### Program Files (all users of this PC)
-Installs to `C:\Program Files\TwoCents` with a Start Menu shortcut for every user. Run in an **elevated (Run as Administrator) PowerShell**:
+Close the app before running the installer again; it refuses to update a running
+install. Updates replace only the application files and never touch `data`.
 
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucletheus/TwoCents/main/install.ps1))) -Machine
-```
+> **SmartScreen note:** the Windows binary is not code-signed, so the first launch may show "Windows protected your PC". Click **More info → Run anyway** to proceed, or verify the download against the release artifacts. The installer checks the release asset's SHA-256 digest when GitHub publishes one.
 
-Windows prevents normal users from writing to Program Files, so the installer grants write access to the `data` subfolder only; the executable itself stays read-only as intended.
+### Uninstall
 
-> **SmartScreen note:** the Windows binary is not code-signed, so the first launch may show "Windows protected your PC". Click **More info → Run anyway** to proceed, or verify the download against the release artifacts.
+Close the app, delete `%LOCALAPPDATA%\TwoCents`, and delete the `TwoCents` Start
+Menu shortcut. Back up `<install>\data\twocents.sqlite` first if you want your
+history.
 
 ### Build from source
-Requires the [Rust toolchain](https://rustup.rs/) (stable) and, on Windows, Visual Studio Build Tools (MSVC target).
+Requires the [Rust toolchain](https://rustup.rs/) (1.85+ stable) and, on Windows,
+Visual Studio Build Tools (MSVC target) with a C compiler — `rusqlite` builds
+SQLite from C source.
 
 ```powershell
 git clone https://github.com/Nucletheus/TwoCents.git
@@ -112,19 +116,32 @@ cd TwoCents
 cargo run --release
 ```
 
-On Windows, `restart_app.bat` rebuilds and relaunches in one step. Builds run from `cargo` keep their data in `%APPDATA%\TwoCents` unless a `data` folder exists next to the executable.
+`cargo run` keeps its data in `target\release\data`, since the data folder is
+always resolved next to the executable.
 
 ## Getting Started
 
-1. Launch the app. It creates its database on first run.
-2. Household tab: add household members. This drives splits and balances.
-3. Expenses: add rows manually or import a CSV statement.
-4. Settlements: set split percentages per category.
+1. Launch the app. It creates `%LOCALAPPDATA%\TwoCents\data\twocents.sqlite` on
+   first run, along with a `My Household` household, a default member named
+   `Me`, and a full category tree (housing, groceries, utilities, income, and
+   more) that you can rename, recolor, or delete.
+2. Household tab: rename the household and the default member, then add anyone
+   else. The default member is the one new expenses and CSV imports are filed
+   under.
+3. Expenses: press **Add expense** to type a row straight into the grid (it
+   starts on today's date under the default member), or **Import CSV
+   Statement** to review a bank export before saving it.
+4. Settlements: set split percentages per category once there are two members.
 5. Budgets: pick a timeframe and allocate limits.
-6. Analytics: pick a chart and hover the bars for tooltips.
+6. Analytics: pick a chart and hover the bars for tooltips. Charts start on
+   All Time so a fresh import of older statements still shows up.
 7. Household tab: if TwoCents is useful to you, there is a Buy Me a Coffee link under Support.
 
-All data lives in one file inside the install folder: `<install dir>\data\twocents.sqlite`. Back it up or move it as you like. Updating from an older version that stored data in `%APPDATA%\TwoCents` is automatic: the existing database is imported on first launch.
+All data lives in one file: `<install dir>\data\twocents.sqlite`. Copy that file
+to back it up or move the whole install folder to another machine. Updating from
+an older version that stored data in `%APPDATA%\TwoCents` is automatic: the
+database is snapshotted into the install folder, verified, and the old copy is
+renamed to `twocents.sqlite.migrated.bak`.
 
 ## Tech Stack
 
@@ -146,7 +163,9 @@ src/
 ├── models.rs        # Domain structs and the shared GridRow trait
 ├── db.rs            # SQLite schema, migrations, queries
 └── ui/
+    ├── mod.rs       # Tab dispatch
     ├── theme.rs     # Presets and the derived palette, the single color source
+    ├── theme_tokens.rs # Shared spacing/typography tokens
     ├── components.rs# Chrome builders: cards, buttons, inputs, progress bars
     ├── grid.rs      # The unified spreadsheet engine
     ├── expenses.rs / budgets.rs / settlements.rs / households.rs

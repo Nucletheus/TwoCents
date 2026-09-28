@@ -1,89 +1,113 @@
 use crate::models::*;
 use eframe::egui::{ecolor::Hsva, Color32};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Legacy data location: the roaming AppData folder used before installs
 /// became self-contained.
-fn legacy_db_path() -> PathBuf {
-    let base = env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    base.join("TwoCents").join("twocents.sqlite")
+fn legacy_db_path() -> Option<PathBuf> {
+    env::var("APPDATA")
+        .ok()
+        .map(|base| PathBuf::from(base).join("TwoCents").join("twocents.sqlite"))
 }
 
-/// Data directory for the database. Self-contained installs keep everything
-/// in one folder: when the installer has created a `data` folder next to the
-/// executable, the database lives there. Otherwise (dev builds, legacy
-/// installs) the roaming AppData location is used.
+/// Every app-owned file lives in this directory, always next to the
+/// executable: the SQLite database and its sidecars plus egui's window
+/// state. Deleting the install folder removes the app and all its data.
 pub fn data_dir() -> PathBuf {
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let portable = dir.join("data");
-            if portable.is_dir() {
-                return portable;
-            }
-        }
-    }
-    env::var("APPDATA")
-        .map(|base| PathBuf::from(base).join("TwoCents"))
-        .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    let dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("data")))
+        .unwrap_or_else(|| PathBuf::from("data"));
+    let _ = fs::create_dir_all(&dir);
+    dir
 }
 
 pub fn db_path() -> PathBuf {
     data_dir().join("twocents.sqlite")
 }
 
-/// One-time migration: when the self-contained `data` folder exists but has
-/// no database yet, and a legacy AppData database does, copy it in so
-/// existing users keep their data after updating.
-fn migrate_legacy_db() {
-    let portable = db_path();
-    if portable.is_file() {
-        return;
-    }
-    let legacy = legacy_db_path();
+pub fn window_state_path() -> PathBuf {
+    data_dir().join("app.ron")
+}
+
+fn db_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(std::io::Error::other(message).into())
+}
+
+fn database_is_healthy(path: &Path) -> bool {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|conn| {
+            conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        })
+        .is_ok_and(|result| result == "ok")
+}
+
+/// One-time migration from the old AppData database. Snapshots it through
+/// SQLite (`VACUUM INTO`) so a live journal/WAL cannot produce a torn copy,
+/// verifies the copy, and only then renames the old file aside so a later
+/// reinstall can never re-import stale data. Any failure leaves the legacy
+/// database untouched and aborts startup.
+fn migrate_legacy_db(dest: &Path) -> rusqlite::Result<()> {
+    let Some(legacy) = legacy_db_path() else {
+        return Ok(());
+    };
     if !legacy.is_file() {
-        return;
+        return Ok(());
     }
-    if !portable.parent().is_some_and(|dir| dir.is_dir()) {
-        return;
-    }
-    let _ = fs::copy(&legacy, &portable);
-    for suffix in ["-wal", "-shm"] {
-        let from = legacy.with_file_name(format!(
-            "{}{suffix}",
-            legacy
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-        ));
-        if from.is_file() {
-            let _ = fs::copy(
-                &from,
-                portable.with_file_name(format!(
-                    "{}{suffix}",
-                    portable
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default()
-                )),
-            );
+    if dest.is_file() {
+        if database_is_healthy(dest) {
+            return Ok(());
         }
+        let _ = fs::remove_file(dest);
     }
+
+    let snapshot = (|| {
+        let source = Connection::open_with_flags(&legacy, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        source.execute("VACUUM INTO ?1", params![dest.to_string_lossy().as_ref()])?;
+        drop(source);
+        if database_is_healthy(dest) {
+            Ok(())
+        } else {
+            Err(db_error(format!(
+                "migrated database failed integrity check: {}",
+                dest.display()
+            )))
+        }
+    })();
+    if snapshot.is_err() {
+        let _ = fs::remove_file(dest);
+        return snapshot;
+    }
+    if let Err(err) = fs::rename(
+        &legacy,
+        legacy.with_file_name("twocents.sqlite.migrated.bak"),
+    ) {
+        eprintln!(
+            "[db] copied the old database but could not rename {} aside ({err}); delete it by hand to avoid a stale re-import",
+            legacy.display()
+        );
+    }
+    Ok(())
 }
 
 pub fn open_database() -> rusqlite::Result<Connection> {
-    migrate_legacy_db();
     let path = db_path();
+    migrate_legacy_db(&path)?;
+    open_database_at(&path)
+}
+
+pub fn open_database_at(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
     }
 
     let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "
     CREATE TABLE IF NOT EXISTS households (
@@ -164,7 +188,20 @@ pub fn open_database() -> rusqlite::Result<Connection> {
     [],
   );
 
-    seed_default_categories(&conn, 1)?;
+    match get_setting(&conn, "default_categories_seeded") {
+        Some(_) => {}
+        None => {
+            let existing: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM categories WHERE household_id = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            if existing == 0 {
+                seed_default_categories(&conn, 1)?;
+            }
+            set_setting(&conn, "default_categories_seeded", "1")?;
+        }
+    }
     Ok(conn)
 }
 
@@ -519,7 +556,7 @@ pub fn resolve_or_create_account(
 
 pub fn load_expenses(conn: &Connection, household_id: i64) -> rusqlite::Result<Vec<Expense>> {
     let mut stmt = conn.prepare(
-    "SELECT e.id, e.date, e.amount_cents, COALESCE(e.member, ''), e.category, COALESCE(e.vendor, ''), e.description, COALESCE(e.account_id, 1), COALESCE(a.name, '')
+    "SELECT e.id, e.date, e.amount_cents, COALESCE(e.member, ''), e.category, COALESCE(e.vendor, ''), e.description, COALESCE(e.account_id, 0), COALESCE(a.name, '')
      FROM expenses e
      LEFT JOIN accounts a ON a.id = e.account_id
      WHERE e.household_id = ?1
@@ -1367,15 +1404,38 @@ pub fn insert_default_category_tree(conn: &Connection, household_id: i64) -> rus
                 "Uncategorized",
             ],
         ),
+        (
+            INCOME_PARENT,
+            &["Salary", "Interest", "Gifts Received", "Other Income"],
+        ),
     ];
 
     for (parent_name, subs) in defaults {
-        add_parent_category_db(conn, household_id, parent_name)?;
-        let parent_id: i64 = conn.query_row(
-            "SELECT id FROM categories WHERE household_id = ?1 AND parent_id IS NULL AND name = ?2",
-            params![household_id, parent_name],
-            |row| row.get(0),
-        )?;
+        let parent_id = if parent_name.eq_ignore_ascii_case(INCOME_PARENT) {
+            // Income is reserved for the UI but the seed is the one place that
+            // may create it — without it a fresh install cannot record credits.
+            let parent_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM categories WHERE household_id = ?1 AND parent_id IS NULL",
+                params![household_id],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO categories (household_id, name, parent_id, color_rgb) VALUES (?1, ?2, NULL, ?3)",
+                params![
+                    household_id,
+                    parent_name,
+                    color_to_rgb(category_parent_palette_color(parent_count as usize))
+                ],
+            )?;
+            conn.last_insert_rowid()
+        } else {
+            add_parent_category_db(conn, household_id, parent_name)?;
+            conn.query_row(
+                "SELECT id FROM categories WHERE household_id = ?1 AND parent_id IS NULL AND name = ?2",
+                params![household_id, parent_name],
+                |row| row.get(0),
+            )?
+        };
         for sub_name in *subs {
             add_subcategory_db(conn, household_id, parent_id, sub_name)?;
         }
@@ -1384,6 +1444,31 @@ pub fn insert_default_category_tree(conn: &Connection, household_id: i64) -> rus
     // protected parents — seeding removed; exclusion is now a
     // user-set flag on any category (see migrate_category_exclusion_v12).
     Ok(())
+}
+
+pub fn insert_expense_row(
+    conn: &Connection,
+    household_id: i64,
+    row: &Expense,
+) -> rusqlite::Result<i32> {
+    // account_id 0 means "no account yet" — a fresh install has no accounts
+    // rows, and expenses.account_id is a foreign key.
+    let account_id = (row.account_id > 0).then_some(row.account_id);
+    conn.execute(
+        "INSERT INTO expenses (household_id, account_id, description, vendor, category, member, amount_cents, date)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            household_id,
+            account_id,
+            row.description,
+            row.vendor,
+            row.category,
+            row.member,
+            row.amount_cents,
+            row.date
+        ],
+    )?;
+    Ok(conn.last_insert_rowid() as i32)
 }
 
 pub fn update_expense_row(conn: &Connection, row: &Expense, field: &str) -> rusqlite::Result<()> {
@@ -1401,9 +1486,10 @@ pub fn update_expense_row(conn: &Connection, row: &Expense, field: &str) -> rusq
             )?;
         }
         "account" => {
+            let account_id = (row.account_id > 0).then_some(row.account_id);
             conn.execute(
                 "UPDATE expenses SET account_id = ?1 WHERE id = ?2",
-                params![row.account_id, row.id],
+                params![account_id, row.id],
             )?;
         }
         "category" => {
@@ -3325,5 +3411,127 @@ mod undo_tests {
             .expect("history");
         assert_eq!(value, 75.0);
         assert_eq!(history, 1);
+    }
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP_DB: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDb {
+        dir: PathBuf,
+    }
+
+    impl TempDb {
+        fn new() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let seq = NEXT_TEMP_DB.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "twocents-first-run-{}-{unique}-{seq}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).expect("temp dir");
+            Self { dir }
+        }
+
+        fn path(&self) -> PathBuf {
+            self.dir.join("twocents.sqlite")
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn data_dir_and_window_state_stay_next_to_the_executable() {
+        let dir = data_dir();
+        let exe = env::current_exe().expect("exe path");
+        assert_eq!(dir, exe.parent().expect("exe parent").join("data"));
+        assert_eq!(window_state_path(), dir.join("app.ron"));
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn fresh_database_seeds_one_household_one_default_member_and_categories() {
+        let temp = TempDb::new();
+        let conn = open_database_at(&temp.path()).expect("open fresh database");
+        drop(conn);
+
+        assert!(temp.path().is_file());
+        assert!(!temp.dir.join("twocents.sqlite-journal").exists());
+
+        let conn = open_database_at(&temp.path()).expect("reopen");
+        let (household_id, household_name) = load_active_household(&conn).expect("household");
+        assert_eq!(household_id, 1);
+        assert_eq!(household_name, "My Household");
+
+        let members = load_household_members(&conn, household_id).expect("members");
+        assert_eq!(members.len(), 1);
+        assert!(members[0].is_self);
+        assert_eq!(load_default_member_name(&conn, household_id).unwrap(), "Me");
+
+        let categories = load_categories(&conn, household_id).expect("categories");
+        let parents = categories.iter().filter(|c| c.parent_id.is_none()).count();
+        assert!(
+            parents >= 18,
+            "expected seeded parent categories: {parents}"
+        );
+        assert!(
+            categories.iter().any(|c| c.name == INCOME_PARENT),
+            "income parent must be seeded"
+        );
+        assert!(load_expenses(&conn, household_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_every_category_stays_removed_after_reopen() {
+        let temp = TempDb::new();
+        let conn = open_database_at(&temp.path()).expect("open fresh database");
+        conn.execute("DELETE FROM categories", [])
+            .expect("clear categories");
+        drop(conn);
+
+        let conn = open_database_at(&temp.path()).expect("reopen");
+        assert!(
+            load_categories(&conn, 1).unwrap().is_empty(),
+            "defaults must not be re-seeded once the user clears them"
+        );
+    }
+
+    #[test]
+    fn manual_expense_round_trips_through_the_database() {
+        let temp = TempDb::new();
+        let conn = open_database_at(&temp.path()).expect("open fresh database");
+        let row = Expense {
+            id: 0,
+            date: "2026-09-25".into(),
+            amount_input: "12.50".into(),
+            amount_cents: -1250,
+            member: "Me".into(),
+            category: "Food › Groceries".into(),
+            vendor: "Market".into(),
+            description: "Milk".into(),
+            account_id: 0,
+            account: String::new(),
+        };
+        let id = insert_expense_row(&conn, 1, &row).expect("insert");
+        assert!(id > 0);
+
+        let expenses = load_expenses(&conn, 1).expect("expenses");
+        assert_eq!(expenses.len(), 1);
+        assert_eq!(expenses[0].description, "Milk");
+        assert_eq!(expenses[0].amount_cents, -1250);
+        assert_eq!(expenses[0].member, "Me");
+        assert_eq!(expenses[0].category, "Food › Groceries");
     }
 }

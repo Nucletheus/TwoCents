@@ -23,10 +23,13 @@ impl TwoCentsApp {
             ui.set_max_width(toolbar_width);
             // themed buttons instead of the default egui look. Subtle
             // outlined buttons read cleaner in a toolbar than filled defaults.
+            if styled_button(ui, "Add expense", true).clicked() {
+                self.add_expense_row();
+            }
             if self.csv_import_rx.is_some() {
                 let _ = styled_button(ui, "Importing...", false)
                     .on_hover_text("Waiting for file selection");
-            } else if styled_button(ui, "Import CSV Statement", true).clicked() {
+            } else if styled_button(ui, "Import CSV Statement", false).clicked() {
                 self.import_csv();
             }
             if styled_button(ui, "Duplicates", false).clicked() {
@@ -44,8 +47,18 @@ impl TwoCentsApp {
             crate::ui::components::empty_state(
                 ui,
                 "No expenses yet",
-                "Click Import CSV Statement to load a bank statement, or add an expense manually.",
+                "Add your first expense by hand, or import a bank statement as a CSV.",
             );
+            ui.horizontal_wrapped(|ui| {
+                if styled_button(ui, "Add expense", true).clicked() {
+                    self.add_expense_row();
+                }
+                if self.csv_import_rx.is_none()
+                    && styled_button(ui, "Import CSV Statement", false).clicked()
+                {
+                    self.import_csv();
+                }
+            });
             return;
         }
         // clones guarded on editing — autocomplete only reads these
@@ -72,6 +85,11 @@ impl TwoCentsApp {
         } else {
             Vec::new()
         };
+        let account_candidates = if editing {
+            self.cached_account_candidates.clone()
+        } else {
+            Vec::new()
+        };
         let mut autocomplete_selection = self.autocomplete_selection;
 
         let old_spacing = ui.spacing().item_spacing;
@@ -94,8 +112,10 @@ impl TwoCentsApp {
                 &category_candidates,
                 &member_candidates,
                 &description_candidates,
+                &account_candidates,
                 &self.members,
                 &self.categories,
+                &self.accounts,
                 "expense_cell",
                 true,
             )
@@ -155,6 +175,22 @@ impl TwoCentsApp {
             .append(&mut pending_category_commits);
         self.deferred_member_commits
             .append(&mut pending_member_commits);
+
+        // A committed date changes where the row sorts. Flush right away (that
+        // also normalizes the date string), re-sort, then follow the row: the
+        // editor closes and the selection rides it to its new position.
+        let date_rows: Vec<usize> = self
+            .deferred_field_updates
+            .iter()
+            .filter(|(_, field)| *field == "date")
+            .map(|(index, _)| *index)
+            .collect();
+        if !date_rows.is_empty() {
+            self.flush_deferred_expense_commits();
+            self.rebuild_sorted_expense_indices();
+            self.follow_date_rows(&date_rows);
+        }
+
         let pending_total = self.deferred_field_updates.len()
             + self.deferred_category_commits.len()
             + self.deferred_member_commits.len();
@@ -185,9 +221,77 @@ impl TwoCentsApp {
         let field_updates = std::mem::take(&mut self.deferred_field_updates);
         let category_commits = std::mem::take(&mut self.deferred_category_commits);
         let member_commits = std::mem::take(&mut self.deferred_member_commits);
-        self.flush_expense_grid_commits(&field_updates, &category_commits, &member_commits);
-        self.expense_last_pending_len = 0;
-        self.expense_flush_at = None;
+        if self.flush_expense_grid_commits(&field_updates, &category_commits, &member_commits) {
+            self.expense_last_pending_len = 0;
+            self.expense_flush_at = None;
+        } else {
+            self.deferred_field_updates = field_updates;
+            self.deferred_category_commits = category_commits;
+            self.deferred_member_commits = member_commits;
+            self.set_transient_status("Could not save changes, retrying...");
+        }
+    }
+
+    /// Rows are addressed by data index, so a re-sort needs no remapping —
+    /// the selection rides the row on its own. Only the viewport has to
+    /// follow, and the editor closes so the jump is visible.
+    fn follow_date_rows(&mut self, data_indices: &[usize]) {
+        self.expense_grid_state.edit_original = None;
+        self.expense_grid_state.edit_cell = None;
+        self.expense_grid_state.active_cell = None;
+        let Some(row) = data_indices.first() else {
+            return;
+        };
+        let visual = self
+            .cached_sorted_expense_indices
+            .iter()
+            .position(|&index| index == *row)
+            .unwrap_or(0);
+        self.expense_grid_state.scroll_offset = visual as f32 * GRID_ROW_HEIGHT;
+    }
+
+    pub fn add_expense_row(&mut self) {
+        let member = load_default_member_name(&self.conn, self.household_id).unwrap_or_default();
+        let mut row = Expense {
+            id: 0,
+            date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            amount_input: String::new(),
+            amount_cents: 0,
+            member,
+            category: String::new(),
+            vendor: String::new(),
+            description: String::new(),
+            account_id: self.accounts.first().map_or(0, |account| account.id),
+            account: self
+                .accounts
+                .first()
+                .map_or_else(String::new, |account| account.name.clone()),
+        };
+        match insert_expense_row(&self.conn, self.household_id, &row) {
+            Ok(id) => {
+                row.id = id;
+                // edit_cell/selection address rows by data index, the viewport
+                // by visual position — only the latter needs the sort lookup.
+                let row_index = self.expenses.len();
+                self.expenses.push(row);
+                self.rebuild_sorted_expense_indices();
+                let visual_row = self
+                    .cached_sorted_expense_indices
+                    .iter()
+                    .position(|&index| index == row_index)
+                    .unwrap_or(0);
+                self.expense_grid_state.edit_original = None;
+                self.expense_grid_state.active_cell = None;
+                self.expense_grid_state.edit_cell = Some((GridColumn::Amount, row_index));
+                self.expense_grid_state.selection = Some(GridSelection {
+                    column: GridColumn::Amount,
+                    rows: vec![row_index],
+                });
+                self.expense_grid_state.scroll_offset = visual_row as f32 * GRID_ROW_HEIGHT;
+                self.rebuild_cached_candidates();
+            }
+            Err(err) => self.set_transient_status(format!("Could not add expense: {err}")),
+        }
     }
 
     pub fn flush_expense_grid_commits(
@@ -195,12 +299,12 @@ impl TwoCentsApp {
         pending_updates: &[(usize, &'static str)],
         pending_category_commits: &[usize],
         pending_member_commits: &[usize],
-    ) {
+    ) -> bool {
         if pending_updates.is_empty()
             && pending_category_commits.is_empty()
             && pending_member_commits.is_empty()
         {
-            return;
+            return true;
         }
 
         let categories = self.categories.clone();
@@ -213,7 +317,7 @@ impl TwoCentsApp {
         member_indices.dedup();
 
         if self.conn.execute("BEGIN IMMEDIATE", []).is_err() {
-            return;
+            return false;
         }
 
         let mut ok = true;
@@ -346,19 +450,18 @@ impl TwoCentsApp {
             }
         }
 
-        if ok {
-            if self.conn.execute("COMMIT", []).is_err() {
-                let _ = self.conn.execute("ROLLBACK", []);
-            }
+        if ok && self.conn.execute("COMMIT", []).is_ok() {
+            true
         } else {
             let _ = self.conn.execute("ROLLBACK", []);
+            false
         }
     }
 
     pub fn find_duplicates(&mut self) {
         let results = {
             let mut stmt = match self.conn.prepare(
-        "SELECT e1.id, e1.date, e1.amount_cents, COALESCE(e1.member, ''), e1.category, COALESCE(e1.vendor, ''), e1.description, COALESCE(e1.account_id, 1), COALESCE(a.name, '')
+        "SELECT e1.id, e1.date, e1.amount_cents, COALESCE(e1.member, ''), e1.category, COALESCE(e1.vendor, ''), e1.description, COALESCE(e1.account_id, 0), COALESCE(a.name, '')
          FROM expenses e1
          LEFT JOIN accounts a ON a.id = e1.account_id
          INNER JOIN (

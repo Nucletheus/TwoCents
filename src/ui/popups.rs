@@ -63,10 +63,14 @@ pub fn styled_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::Res
 
 /// Renders the category picker dropdown menu and returns the picked label, if any.
 /// Extracted from TwoCentsApp::ui_category_picker_menu so it can be called without &self.
+/// Only runs while the menu is open, so the keyboard highlight is the caller-owned
+/// index the raw input hook moves with the arrow keys.
 pub fn category_picker_menu_ui(
     ui: &mut egui::Ui,
     categories: &[Category],
-    current: &str,
+    highlight: &mut usize,
+    pending_nav: &mut i8,
+    pending_accept: &mut bool,
 ) -> Option<String> {
     let parents = category_parent_map(categories);
     let mut parent_ids: Vec<i64> = categories
@@ -87,29 +91,67 @@ pub fn category_picker_menu_ui(
             .unwrap_or("");
         na.to_lowercase().cmp(&nb.to_lowercase())
     });
-    let mut picked: Option<String> = None;
     let mut parent_has_children = HashSet::new();
     for category in categories {
         if let Some(pid) = category.parent_id {
             parent_has_children.insert(pid);
         }
     }
+
+    // Selectable rows only: childless parents, then each parent's children in
+    // render order. Counted up front so the arrow keys know the wrap point.
+    let mut row_labels: Vec<String> = Vec::new();
+    for parent_id in &parent_ids {
+        if parent_has_children.contains(parent_id) {
+            let mut sub_ids: Vec<i64> = categories
+                .iter()
+                .filter(|c| c.parent_id == Some(*parent_id))
+                .map(|c| c.id)
+                .collect();
+            sub_ids.sort_by_key(|id| {
+                categories
+                    .iter()
+                    .find(|c| c.id == *id)
+                    .map(|c| c.name.to_lowercase())
+                    .unwrap_or_default()
+            });
+            for sub_id in sub_ids {
+                if let Some(sub) = categories.iter().find(|c| c.id == sub_id) {
+                    row_labels.push(sub.full_label(&parents));
+                }
+            }
+        } else if let Some(parent) = categories.iter().find(|c| c.id == *parent_id) {
+            row_labels.push(parent.name.clone());
+        }
+    }
+    if *pending_nav != 0 {
+        *highlight = crate::ui::widgets::nav_index(*highlight, *pending_nav, row_labels.len());
+        *pending_nav = 0;
+    }
+    if *highlight >= row_labels.len() {
+        *highlight = 0;
+    }
+    if *pending_accept {
+        *pending_accept = false;
+        if let Some(label) = row_labels.get(*highlight).cloned() {
+            ui.close();
+            return Some(label);
+        }
+    }
+
+    let mut picked: Option<String> = None;
+    let mut row = 0usize;
     for parent_id in parent_ids {
         let Some(parent) = categories.iter().find(|c| c.id == parent_id) else {
             continue;
         };
         if !parent_has_children.contains(&parent.id) {
             let label = parent.name.clone();
-            if category_picker_row(
-                ui,
-                &label,
-                parent.color,
-                current.eq_ignore_ascii_case(&label),
-                0.0,
-            ) {
+            if category_picker_row(ui, &label, parent.color, row == *highlight, 0.0) {
                 picked = Some(label);
                 ui.close();
             }
+            row += 1;
         } else {
             category_picker_header_row(ui, &parent.name, parent.color);
             let mut sub_ids: Vec<i64> = categories
@@ -135,15 +177,11 @@ pub fn category_picker_menu_ui(
                     continue;
                 };
                 let label = sub.full_label(&parents);
-                if category_sub_picker_row(
-                    ui,
-                    &sub.name,
-                    current.eq_ignore_ascii_case(&label),
-                    16.0,
-                ) {
+                if category_sub_picker_row(ui, &sub.name, row == *highlight, 16.0) {
                     picked = Some(label);
                     ui.close();
                 }
+                row += 1;
             }
             ui.separator();
         }

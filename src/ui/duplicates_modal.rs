@@ -98,6 +98,7 @@ impl TwoCentsApp {
         let member_candidates = self.cached_member_candidates.clone();
         let vendor_candidates = self.cached_vendor_candidates.clone();
         let description_candidates = self.cached_description_candidates.clone();
+        let account_candidates = self.cached_account_candidates.clone();
         let mut autocomplete_selection = self.autocomplete_selection;
 
         // shared grid_table_frame so the three grids have identical chrome.
@@ -116,8 +117,10 @@ impl TwoCentsApp {
               &category_candidates,
               &member_candidates,
               &description_candidates,
+              &account_candidates,
               &self.members,
               &self.categories,
+              &self.accounts,
               "duplicate_cell",
               true,
             );

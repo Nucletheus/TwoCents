@@ -25,7 +25,7 @@
 use chrono::Datelike;
 use eframe::egui::{self};
 use rusqlite::{params, Connection};
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{collections::HashMap, env, fs};
 
 mod budget;
 mod db;
@@ -108,6 +108,10 @@ struct TwoCentsApp {
     import_rows: Vec<ImportRow>,
     pub show_import_review: bool,
     import_account_name: String,
+    /// The import review's account combo: real state rather than egui temp
+    /// data, so the raw input hook can drive its list with the arrows.
+    import_account_dropdown_open: bool,
+    import_account_selection: usize,
     import_detected_account: String,
     csv_import_rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     pub selected_theme: theme::ThemePreset,
@@ -135,6 +139,7 @@ struct TwoCentsApp {
     cached_member_candidates: Vec<String>,
     cached_vendor_candidates: Vec<String>,
     cached_description_candidates: Vec<String>,
+    cached_account_candidates: Vec<String>,
     cached_sorted_expense_indices: Vec<usize>,
     cached_import_vendor_candidates: Vec<String>,
     cached_import_description_candidates: Vec<String>,
@@ -175,6 +180,11 @@ struct TwoCentsApp {
     expense_last_pending_len: usize,
     expense_flush_at: Option<std::time::Instant>,
     pub analytics_state: crate::ui::analytics::state::AnalyticsState,
+    /// Settlements keeps its own date range (its own filter, its own math),
+    /// persisted through app_settings so it survives restarts.
+    pub settlements_date_preset: crate::ui::analytics::state::DatePreset,
+    pub settlements_date_start: Option<chrono::NaiveDate>,
+    pub settlements_date_end: Option<chrono::NaiveDate>,
 }
 
 static PANIC_LOGS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
@@ -273,11 +283,7 @@ fn main() -> eframe::Result<()> {
     }));
 
     if env::var("TWOCENTS_RESET_WINDOW").as_deref() == Ok("1") {
-        if let Ok(appdata) = env::var("APPDATA") {
-            // eframe 0.34 FileStorage: %APPDATA%\<app_id>\data
-            let path = PathBuf::from(appdata).join("TwoCents").join("data");
-            let _ = fs::remove_dir_all(path);
-        }
+        let _ = fs::remove_file(window_state_path());
     }
 
     let icon = load_icon();
@@ -290,16 +296,33 @@ fn main() -> eframe::Result<()> {
             .with_active(true)
             .with_visible(true)
             .with_icon(icon),
+        persistence_path: Some(window_state_path()),
         // centered is off — with the persistence feature it would
         // stomp the remembered window position on every launch. First launch
         // falls back to the OS default placement.
         ..Default::default()
     };
 
+    let conn = match open_database() {
+        Ok(conn) => conn,
+        Err(err) => {
+            return eframe::run_native(
+                "TwoCents",
+                options,
+                Box::new(move |_cc| {
+                    Ok(Box::new(DatabaseErrorApp {
+                        message: err.to_string(),
+                        path: db_path().display().to_string(),
+                    }))
+                }),
+            );
+        }
+    };
+
     eframe::run_native(
         "TwoCents",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // Debug-only checker that flags virtualized-table rows as "changed id"
             // whenever they scroll out of the row window; it also paints 2px red
             // rects over the grid while scrolling. Virtualized grids legitimately
@@ -317,14 +340,33 @@ fn main() -> eframe::Result<()> {
                 family.insert(1, "Hack".to_owned());
             }
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(TwoCentsApp::new(cc)))
+            Ok(Box::new(TwoCentsApp::new(conn, cc)))
         }),
     )
 }
 
+struct DatabaseErrorApp {
+    message: String,
+    path: String,
+}
+
+impl eframe::App for DatabaseErrorApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.add_space(24.0);
+        ui.heading("TwoCents could not open its database");
+        ui.add_space(8.0);
+        ui.label(&self.message);
+        ui.add_space(8.0);
+        ui.label(format!("Data folder: {}", self.path));
+        ui.add_space(8.0);
+        ui.label(
+            "Close the app, make sure the folder is writable and not locked, then launch it again.",
+        );
+    }
+}
+
 impl TwoCentsApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let conn = open_database().expect("open local SQLite database");
+    fn new(conn: Connection, _cc: &eframe::CreationContext<'_>) -> Self {
         let (household_id, household_name) =
             load_active_household(&conn).expect("load default household");
         // restore last session's theme before the first frame —
@@ -355,6 +397,8 @@ impl TwoCentsApp {
             csv_import_rx: None,
             show_import_review: false,
             import_account_name: String::new(),
+            import_account_dropdown_open: false,
+            import_account_selection: 0,
             import_detected_account: String::new(),
             selected_theme,
             variant_mode,
@@ -382,6 +426,7 @@ impl TwoCentsApp {
             cached_member_candidates: Vec::new(),
             cached_vendor_candidates: Vec::new(),
             cached_description_candidates: Vec::new(),
+            cached_account_candidates: Vec::new(),
             cached_sorted_expense_indices: Vec::new(),
             cached_import_vendor_candidates: Vec::new(),
             cached_import_description_candidates: Vec::new(),
@@ -424,6 +469,9 @@ impl TwoCentsApp {
             expense_last_pending_len: 0,
             expense_flush_at: None,
             analytics_state: crate::ui::analytics::state::AnalyticsState::default(),
+            settlements_date_preset: crate::ui::analytics::state::DatePreset::AllTime,
+            settlements_date_start: None,
+            settlements_date_end: None,
         };
 
         // Load persisted analytics state
@@ -431,8 +479,44 @@ impl TwoCentsApp {
             app.analytics_state = crate::ui::analytics::state::AnalyticsState::from_row(&row);
         }
 
+        if let Some(preset) = get_setting(&app.conn, "settlements_date_preset")
+            .as_deref()
+            .and_then(crate::ui::analytics::state::parse_date_preset)
+        {
+            app.settlements_date_preset = preset;
+            let parse = |key: &str| {
+                get_setting(&app.conn, key)
+                    .and_then(|value| chrono::NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
+            };
+            app.settlements_date_start = parse("settlements_date_start");
+            app.settlements_date_end = parse("settlements_date_end");
+        }
+
         app.reload();
         app
+    }
+
+    pub fn persist_settlements_date_range(&mut self) {
+        use crate::ui::analytics::state::date_preset_to_str;
+        let _ = set_setting(
+            &self.conn,
+            "settlements_date_preset",
+            date_preset_to_str(self.settlements_date_preset),
+        );
+        let format = |date: Option<chrono::NaiveDate>| match date {
+            Some(value) => value.format("%Y-%m-%d").to_string(),
+            None => String::new(),
+        };
+        let _ = set_setting(
+            &self.conn,
+            "settlements_date_start",
+            &format(self.settlements_date_start),
+        );
+        let _ = set_setting(
+            &self.conn,
+            "settlements_date_end",
+            &format(self.settlements_date_end),
+        );
     }
 
     fn reload(&mut self) {
@@ -536,6 +620,8 @@ impl TwoCentsApp {
                 .iter()
                 .map(|expense| expense.description.as_str()),
         );
+        self.cached_account_candidates =
+            unique_nonempty_values(self.accounts.iter().map(|account| account.name.as_str()));
     }
 
     fn reload_categories(&mut self) {
@@ -760,6 +846,7 @@ impl eframe::App for TwoCentsApp {
     }
 
     fn on_exit(&mut self) {
+        self.flush_deferred_expense_commits();
         self.commit_pending_settlement_edits();
     }
 
@@ -768,7 +855,6 @@ impl eframe::App for TwoCentsApp {
         if self.destructive_confirm.is_some()
             || self.show_delete_expense_confirm
             || self.show_delete_import_confirm
-            || self.show_duplicate_review
             || self.category_color_popup.is_some()
             || self.member_color_popup.is_some()
             || self.csv_import_rx.is_some()
@@ -778,6 +864,14 @@ impl eframe::App for TwoCentsApp {
                 ctx.memory_mut(|memory| memory.surrender_focus(id));
             }
             return;
+        }
+        // The duplicates modal used to be surrendered focus every frame, which
+        // left its own grid with no keyboard at all. Clear the expense grid
+        // underneath and let the modal's grid own the keys instead.
+        if self.show_duplicate_review {
+            self.expense_grid_state.edit_cell = None;
+            self.expense_grid_state.active_cell = None;
+            self.expense_grid_state.picker_menu_cell = None;
         }
         if self.show_import_review {
             // The import modal is open. If the expense grid still has an active edit cell
@@ -799,19 +893,52 @@ impl eframe::App for TwoCentsApp {
                 }
             }
 
+            // The account combo's list is driven here too: its ▾ toggle can
+            // open the list with nothing focused, so `handle_raw_input`'s
+            // cell-focus gate can't be relied on for it.
+            if self.import_account_dropdown_open {
+                raw_input.events.retain(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if !modifiers.any() => {
+                        self.import_grid_state.pending_nav = match key {
+                            egui::Key::ArrowDown => 1,
+                            egui::Key::ArrowUp => -1,
+                            _ => return true,
+                        };
+                        false
+                    }
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if !modifiers.any() => {
+                        self.import_grid_state.pending_accept = true;
+                        false
+                    }
+                    _ => true,
+                });
+            }
+
             // handle_raw_input early-returns unless a cell is active;
-            // guard here so the 4 candidate-Vec clones don't happen every frame
+            // guard here so the candidate-Vec clones don't happen every frame
             // with nothing being edited.
             if self.import_grid_state.active_cell.is_some() {
                 let cached_members = self.cached_member_candidates.clone();
                 let cached_categories = self.cached_category_candidates.clone();
                 let cached_vendors = self.cached_import_vendor_candidates.clone();
                 let cached_descriptions = self.cached_import_description_candidates.clone();
+                let cached_accounts = self.cached_account_candidates.clone();
                 let candidates_fn = move |col| match col {
                     GridColumn::Member => cached_members.clone(),
                     GridColumn::Category => cached_categories.clone(),
                     GridColumn::Vendor => cached_vendors.clone(),
                     GridColumn::Description => cached_descriptions.clone(),
+                    GridColumn::Account => cached_accounts.clone(),
                     _ => Vec::new(),
                 };
                 self.import_grid_state.handle_raw_input(
@@ -821,16 +948,45 @@ impl eframe::App for TwoCentsApp {
                     candidates_fn,
                 );
             }
-        } else if self.tab == Tab::Expenses && self.expense_grid_state.active_cell.is_some() {
+        } else if self.show_duplicate_review {
+            if self.duplicate_grid_state.active_cell.is_some() {
+                let cached_members = self.cached_member_candidates.clone();
+                let cached_categories = self.cached_category_candidates.clone();
+                let cached_vendors = self.cached_vendor_candidates.clone();
+                let cached_descriptions = self.cached_description_candidates.clone();
+                let cached_accounts = self.cached_account_candidates.clone();
+                let candidates_fn = move |col| match col {
+                    GridColumn::Member => cached_members.clone(),
+                    GridColumn::Category => cached_categories.clone(),
+                    GridColumn::Vendor => cached_vendors.clone(),
+                    GridColumn::Description => cached_descriptions.clone(),
+                    GridColumn::Account => cached_accounts.clone(),
+                    _ => Vec::new(),
+                };
+                self.duplicate_grid_state.handle_raw_input(
+                    ctx,
+                    raw_input,
+                    &self.duplicate_rows,
+                    candidates_fn,
+                );
+            }
+        } else if self.tab == Tab::Expenses
+            && (self.expense_grid_state.active_cell.is_some()
+                || self.expense_grid_state.edit_cell.is_some()
+                || self.expense_grid_state.selection.is_some()
+                || self.expense_grid_state.picker_menu_cell.is_some())
+        {
             let cached_members = self.cached_member_candidates.clone();
             let cached_categories = self.cached_category_candidates.clone();
             let cached_vendors = self.cached_vendor_candidates.clone();
             let cached_descriptions = self.cached_description_candidates.clone();
+            let cached_accounts = self.cached_account_candidates.clone();
             let candidates_fn = move |col| match col {
                 GridColumn::Member => cached_members.clone(),
                 GridColumn::Category => cached_categories.clone(),
                 GridColumn::Vendor => cached_vendors.clone(),
                 GridColumn::Description => cached_descriptions.clone(),
+                GridColumn::Account => cached_accounts.clone(),
                 _ => Vec::new(),
             };
             self.expense_grid_state

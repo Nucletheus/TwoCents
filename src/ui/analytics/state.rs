@@ -166,11 +166,11 @@ pub struct AnalyticsState {
 
 impl Default for AnalyticsState {
     fn default() -> Self {
-        let (start, end) = DatePreset::Last3Months.date_range();
+        let (start, end) = DatePreset::AllTime.date_range();
         Self {
             date_start: start,
             date_end: end,
-            date_preset: DatePreset::Last3Months,
+            date_preset: DatePreset::AllTime,
             selected_categories: HashSet::new(),
             category_filter_mode: FilterMode::Include,
             selected_members: HashSet::new(),
@@ -212,7 +212,7 @@ impl AnalyticsState {
     }
 
     pub fn from_row(row: &AnalyticsFilterRow) -> Self {
-        let date_preset = str_to_date_preset(&row.date_preset);
+        let date_preset = parse_date_preset(&row.date_preset).unwrap_or(DatePreset::Last3Months);
 
         // rolling presets must be recomputed at load, not
         // restored — a saved "This Month" from Aug 15 reopened in Sep
@@ -259,7 +259,7 @@ impl AnalyticsState {
     }
 }
 
-fn date_preset_to_str(p: DatePreset) -> &'static str {
+pub fn date_preset_to_str(p: DatePreset) -> &'static str {
     match p {
         DatePreset::Custom => "custom",
         DatePreset::ThisMonth => "this_month",
@@ -272,17 +272,17 @@ fn date_preset_to_str(p: DatePreset) -> &'static str {
     }
 }
 
-fn str_to_date_preset(s: &str) -> DatePreset {
+pub fn parse_date_preset(s: &str) -> Option<DatePreset> {
     match s {
-        "custom" => DatePreset::Custom,
-        "this_month" => DatePreset::ThisMonth,
-        "last_month" => DatePreset::LastMonth,
-        "last_3_months" => DatePreset::Last3Months,
-        "last_6_months" => DatePreset::Last6Months,
-        "ytd" => DatePreset::YTD,
-        "last_year" => DatePreset::LastYear,
-        "all_time" => DatePreset::AllTime,
-        _ => DatePreset::Last3Months,
+        "custom" => Some(DatePreset::Custom),
+        "this_month" => Some(DatePreset::ThisMonth),
+        "last_month" => Some(DatePreset::LastMonth),
+        "last_3_months" => Some(DatePreset::Last3Months),
+        "last_6_months" => Some(DatePreset::Last6Months),
+        "ytd" => Some(DatePreset::YTD),
+        "last_year" => Some(DatePreset::LastYear),
+        "all_time" => Some(DatePreset::AllTime),
+        _ => None,
     }
 }
 

@@ -2,6 +2,8 @@
 name = "twocents-desktop"
 version = "0.1.2"
 edition = "2021"
+rust-version = "1.85"
+license-file = "LICENSE"
 description = "Local-first household finance and budgeting for couples. Rust + egui + SQLite, fully offline"
 repository = "https://github.com/Nucletheus/TwoCents"
 default-run = "twocents-desktop"
@@ -19,4 +21,9 @@ log = "0.4"
 resvg = "0.44"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
 

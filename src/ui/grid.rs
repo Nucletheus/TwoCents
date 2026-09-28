@@ -85,9 +85,11 @@ pub fn render_grid<R: GridRow>(
     category_candidates: &[String],
     member_candidates: &[String],
     description_candidates: &[String],
+    account_candidates: &[String],
     // --- People / category data ---
     members: &[HouseholdMember],
     categories: &[Category],
+    accounts: &[Account],
 
     // --- Unique string prefix so expense vs import cells don't share egui IDs ---
     cell_id_prefix: &'static str,
@@ -133,47 +135,12 @@ pub fn render_grid<R: GridRow>(
     }
 
     // ── PENDING KEYBOARD EVENTS COMMITMENTS ──────────────────────────────────
-    // candidate lists were cloned to owned Vecs every frame even with
-    // nothing being edited. The closure is only consumed by editing paths, so
-    // clone lazily inside it.
-    let editing_now = state.edit_cell.is_some();
-    let candidates_fn = move |col| match col {
-        GridColumn::Member => {
-            if editing_now {
-                member_candidates.to_vec()
-            } else {
-                Vec::new()
-            }
-        }
-        GridColumn::Category => {
-            if editing_now {
-                category_candidates.to_vec()
-            } else {
-                Vec::new()
-            }
-        }
-        GridColumn::Vendor => {
-            if editing_now {
-                vendor_candidates.to_vec()
-            } else {
-                Vec::new()
-            }
-        }
-        GridColumn::Description => {
-            if editing_now {
-                description_candidates.to_vec()
-            } else {
-                Vec::new()
-            }
-        }
-        _ => Vec::new(),
-    };
+    // The list highlight lives on the popup/chevron side, which reads the
+    // candidate slices directly — no per-frame clone down here.
 
     let indices_to_use = sorted_indices;
 
-    if let Some((column, _, targets)) =
-        state.apply_pending_keyboard(rows, indices_to_use, *autocomplete_selection, candidates_fn)
-    {
+    if let Some((column, _, targets)) = state.apply_pending_keyboard(rows, indices_to_use) {
         match column {
             GridColumn::Date => result
                 .pending_field_updates
@@ -201,6 +168,9 @@ pub fn render_grid<R: GridRow>(
     let edit_original = &mut state.edit_original;
     let typeahead = &mut state.typeahead;
     let scroll_offset = &mut state.scroll_offset;
+    let pending_nav = &mut state.pending_nav;
+    let pending_accept = &mut state.pending_accept;
+    let picker_menu_cell = &mut state.picker_menu_cell;
 
     // Apply any pending typeahead character before rendering so the first frame
     // shows the typed character in the correct cell.
@@ -256,6 +226,7 @@ pub fn render_grid<R: GridRow>(
         measured
     };
     let member_menu_w = MEMBER_PICKER_MIN_WIDTH;
+    let account_menu_w = 220.0;
     let member_count = members.len();
     let member_scroll = if member_count > 10 {
         Some(member_picker_max_height(member_count))
@@ -452,22 +423,111 @@ pub fn render_grid<R: GridRow>(
                         } else {
                             ui.horizontal(|ui| {
                                 let editing = grid_cell_editing(edit_cell, column, idx);
-                                let response = ui_grid_text_edit(
+                                if editing && edit_original.is_none() {
+                                    *edit_original = Some(rows[idx].row_account().to_string());
+                                }
+                                // Same cell widget as Member/Category, so the
+                                // account gets the chevron and the picker.
+                                let cell = category_cell_ui(
                                     ui,
                                     rows[idx].row_account_mut(),
-                                    edit_original,
-                                    edit_cell,
+                                    Color32::TRANSPARENT,
                                     cell_id_by_visual(column, visual_row_index),
                                     editing,
                                 );
+                                if editing
+                                    && ui.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                    })
+                                {
+                                    if let Some(orig) = edit_original.take() {
+                                        *rows[idx].row_account_mut() = orig;
+                                    }
+                                    *edit_cell = None;
+                                    cell.text.surrender_focus();
+                                }
                                 if editing && cell_has_focus(ui.ctx(), column, idx) {
                                     result.active_cell = Some((column, idx));
                                 }
-                                if response.changed() {
+                                if cell.text.changed() {
                                     result.pending_field_updates.push((idx, "account"));
                                 }
-                                if editing
-                                    && grid_text_field_committed(ui, &response, egui::Rect::NOTHING)
+                                let account_menu_open =
+                                    chevron_popup_is_open(ui.ctx(), &cell.chevron);
+                                *picker_menu_cell = account_menu_open.then_some((column, idx));
+                                if editing && !account_menu_open {
+                                    if let Some(picked) = show_cell_autocomplete_popup(
+                                        ui,
+                                        &cell.text,
+                                        rows[idx].row_account(),
+                                        account_candidates,
+                                        autocomplete_selection,
+                                        pending_nav,
+                                        pending_accept,
+                                    ) {
+                                        *rows[idx].row_account_mut() = picked;
+                                        result.pending_field_updates.push((idx, "account"));
+                                        *edit_cell = None;
+                                        *edit_original = None;
+                                    }
+                                }
+                                // Chevron picker: every known account
+                                let mut account_pick = false;
+                                let mut picked_account: Option<String> = None;
+                                grid_chevron_picker_popup(
+                                    ui,
+                                    &cell.chevron,
+                                    account_menu_w,
+                                    Some(240.0),
+                                    |ui| {
+                                        let row_count = accounts.len();
+                                        if *pending_nav != 0 {
+                                            *autocomplete_selection = nav_index(
+                                                *autocomplete_selection,
+                                                *pending_nav,
+                                                row_count,
+                                            );
+                                            *pending_nav = 0;
+                                        }
+                                        if *autocomplete_selection >= row_count {
+                                            *autocomplete_selection = 0;
+                                        }
+                                        if *pending_accept {
+                                            *pending_accept = false;
+                                            picked_account = accounts
+                                                .get(*autocomplete_selection)
+                                                .map(|account| account.name.clone());
+                                            account_pick = true;
+                                            ui.close();
+                                        }
+                                        for (index, account) in accounts.iter().enumerate() {
+                                            if category_picker_row(
+                                                ui,
+                                                &account.name,
+                                                crate::ui::theme::fg_secondary(),
+                                                index == *autocomplete_selection,
+                                                0.0,
+                                            ) {
+                                                picked_account = Some(account.name.clone());
+                                                account_pick = true;
+                                                ui.close();
+                                            }
+                                        }
+                                    },
+                                );
+                                if account_pick {
+                                    if let Some(value) = picked_account {
+                                        *rows[idx].row_account_mut() = value;
+                                        result.pending_field_updates.push((idx, "account"));
+                                        *edit_cell = None;
+                                        *edit_original = None;
+                                    }
+                                } else if editing
+                                    && grid_text_field_committed(
+                                        ui,
+                                        &cell.text,
+                                        egui::Rect::NOTHING,
+                                    )
                                 {
                                     let targets = grid_commit_targets(selection, column, idx);
                                     let value = rows[idx].row_account().to_string();
@@ -638,13 +698,20 @@ pub fn render_grid<R: GridRow>(
                             if editing && cell_has_focus(ui.ctx(), column, idx) {
                                 result.active_cell = Some((column, idx));
                             }
-                            if editing {
+                            // The chevron menu and the autocomplete list are
+                            // both lists: only let the one that is open take
+                            // the arrows.
+                            let member_menu_open = chevron_popup_is_open(ui.ctx(), &cell.chevron);
+                            *picker_menu_cell = member_menu_open.then_some((column, idx));
+                            if editing && !member_menu_open {
                                 if let Some(picked) = show_cell_autocomplete_popup(
                                     ui,
                                     &cell.text,
                                     rows[idx].row_member(),
                                     member_candidates,
                                     autocomplete_selection,
+                                    pending_nav,
+                                    pending_accept,
                                 ) {
                                     let targets = grid_commit_targets(selection, column, idx);
                                     for &t in &targets {
@@ -660,24 +727,48 @@ pub fn render_grid<R: GridRow>(
                             // Chevron picker
                             let mut member_pick = false;
                             let mut picked_member_value: Option<String> = None;
-                            let current_member = rows[idx].row_member().trim().to_string();
                             grid_chevron_picker_popup(
                                 ui,
                                 &cell.chevron,
                                 member_menu_w,
                                 member_scroll,
                                 |ui| {
-                                    if member_none_row_selectable(ui, current_member.is_empty()) {
+                                    // row 0 is "(none)", then one row per member
+                                    let row_count = members.len() + 1;
+                                    if *pending_nav != 0 {
+                                        *autocomplete_selection = nav_index(
+                                            *autocomplete_selection,
+                                            *pending_nav,
+                                            row_count,
+                                        );
+                                        *pending_nav = 0;
+                                    }
+                                    if *autocomplete_selection >= row_count {
+                                        *autocomplete_selection = 0;
+                                    }
+                                    if *pending_accept {
+                                        *pending_accept = false;
+                                        picked_member_value =
+                                            Some(if *autocomplete_selection == 0 {
+                                                String::new()
+                                            } else {
+                                                members[*autocomplete_selection - 1].name.clone()
+                                            });
+                                        member_pick = true;
+                                        ui.close();
+                                    }
+                                    if member_none_row_selectable(ui, *autocomplete_selection == 0)
+                                    {
                                         picked_member_value = Some(String::new());
                                         member_pick = true;
                                         ui.close();
                                     }
                                     ui.separator();
-                                    for member in members {
+                                    for (index, member) in members.iter().enumerate() {
                                         if member_row_selectable(
                                             ui,
                                             member,
-                                            member.name.eq_ignore_ascii_case(&current_member),
+                                            *autocomplete_selection == index + 1,
                                         ) {
                                             picked_member_value = Some(member.name.clone());
                                             member_pick = true;
@@ -761,14 +852,18 @@ pub fn render_grid<R: GridRow>(
                             if editing && cell_has_focus(ui.ctx(), column, idx) {
                                 result.active_cell = Some((column, idx));
                             }
+                            let category_menu_open = chevron_popup_is_open(ui.ctx(), &cell.chevron);
+                            *picker_menu_cell = category_menu_open.then_some((column, idx));
                             // Typeahead autocomplete
-                            if editing {
+                            if editing && !category_menu_open {
                                 if let Some(picked) = show_cell_autocomplete_popup(
                                     ui,
                                     &cell.text,
                                     rows[idx].row_category(),
                                     category_candidates,
                                     autocomplete_selection,
+                                    pending_nav,
+                                    pending_accept,
                                 ) {
                                     let targets = grid_commit_targets(selection, column, idx);
                                     for &t in &targets {
@@ -814,7 +909,9 @@ pub fn render_grid<R: GridRow>(
                                     if let Some(label) = category_picker_menu_ui(
                                         ui,
                                         categories,
-                                        rows[idx].row_category(),
+                                        autocomplete_selection,
+                                        pending_nav,
+                                        pending_accept,
                                     ) {
                                         picked_category_value = Some(label);
                                         combobox_pick = true;
@@ -889,6 +986,8 @@ pub fn render_grid<R: GridRow>(
                                     rows[idx].row_vendor(),
                                     vendor_candidates,
                                     autocomplete_selection,
+                                    pending_nav,
+                                    pending_accept,
                                 ) {
                                     let targets = grid_commit_targets(selection, column, idx);
                                     for &t in &targets {
@@ -959,6 +1058,8 @@ pub fn render_grid<R: GridRow>(
                                     rows[idx].row_description(),
                                     description_candidates,
                                     autocomplete_selection,
+                                    pending_nav,
+                                    pending_accept,
                                 ) {
                                     let targets = grid_commit_targets(selection, column, idx);
                                     for &t in &targets {

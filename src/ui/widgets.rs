@@ -283,11 +283,14 @@ pub fn paint_grid_cell_highlight(
         ui.painter().rect_filled(cell_rect, 0.0, ghost);
     }
     if editing {
+        // Grid columns clip to the cell rect, so a stroke painted Outside it
+        // is culled whole. Draw the ring inside, shrunk by 1px so it clears
+        // the 1px separators painted after this cell.
         ui.painter().rect_stroke(
-            cell_rect.expand(1.0),
+            cell_rect.shrink(1.0),
             0.0,
             egui::Stroke::new(2.0_f32, sel),
-            egui::StrokeKind::Outside,
+            egui::StrokeKind::Inside,
         );
     } else if selected {
         ui.painter().rect_stroke(
@@ -386,25 +389,6 @@ pub fn grid_cell_active(response: &egui::Response) -> bool {
     response.has_focus() || response.lost_focus()
 }
 
-pub fn autocomplete_accept_key_pressed(ui: &egui::Ui, response: &egui::Response) -> bool {
-    if !grid_cell_active(response) {
-        return false;
-    }
-    ui.input(|input| {
-        input.events.iter().any(|event| {
-            matches!(
-              event,
-              egui::Event::Key {
-                key: egui::Key::Tab | egui::Key::Enter,
-                pressed: true,
-                modifiers,
-                ..
-              } if !modifiers.any()
-            )
-        })
-    })
-}
-
 pub fn grid_shift_pan_id() -> Id {
     Id::new("grid_shift_pan")
 }
@@ -475,6 +459,17 @@ pub fn picker_popup_frame(style: &egui::Style) -> egui::Frame {
         .shadow(egui::Shadow::NONE)
 }
 
+/// The popup id `grid_chevron_picker_popup` opens under. Callers read it to
+/// know whether the menu is open before drawing the cell's autocomplete list,
+/// so arrows only drive one list at a time.
+pub fn chevron_popup_id(chevron: &egui::Response) -> egui::Id {
+    chevron.id.with("popup_anchor")
+}
+
+pub fn chevron_popup_is_open(ctx: &egui::Context, chevron: &egui::Response) -> bool {
+    egui::Popup::is_id_open(ctx, chevron_popup_id(chevron))
+}
+
 pub fn grid_chevron_picker_popup(
     ui: &mut egui::Ui,
     chevron: &egui::Response,
@@ -511,6 +506,16 @@ pub fn grid_chevron_picker_popup(
         });
 }
 
+/// Transparent editor chrome with a small text inset. `Frame::NONE` makes
+/// egui drop the margin, which would leave the text flush against the cell
+/// border painted by `paint_grid_cell_highlight`.
+fn cell_editor_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(Color32::TRANSPARENT)
+        .stroke(egui::Stroke::NONE)
+        .inner_margin(egui::Margin::symmetric(3, 0))
+}
+
 pub fn grid_text_edit_cell(
     ui: &mut egui::Ui,
     value: &mut String,
@@ -521,21 +526,11 @@ pub fn grid_text_edit_cell(
         .id(cell_id)
         .interactive(editing)
         .desired_width(f32::INFINITY)
-        .frame(egui::Frame::NONE)
-        .margin(egui::Margin::same(0))
+        .frame(cell_editor_frame())
         .text_color(crate::ui::theme::fg_primary())
         .background_color(Color32::TRANSPARENT)
         .show(ui);
-    let response = output.response.response.clone();
-    if editing && response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect.expand(2.0),
-            0.0,
-            egui::Stroke::new(2.0_f32, crate::ui::theme::accent()),
-            egui::StrokeKind::Outside,
-        );
-    }
-    response
+    output.response.response.clone()
 }
 
 pub fn autocomplete_suggestions_list(value: &str, candidates: &[String]) -> Vec<String> {
@@ -560,24 +555,29 @@ pub fn show_cell_autocomplete_popup(
     value: &str,
     candidates: &[String],
     selected_index: &mut usize,
+    pending_nav: &mut i8,
+    pending_accept: &mut bool,
 ) -> Option<String> {
     if !grid_cell_active(response) {
+        // Nothing owns the channel this frame; drop it rather than let a
+        // later cell accept a stale key.
+        *selected_index = 0;
+        *pending_nav = 0;
+        *pending_accept = false;
         return None;
     }
 
     let suggestions = autocomplete_suggestions_list(value, candidates);
     if suggestions.is_empty() {
         *selected_index = 0;
+        *pending_nav = 0;
+        *pending_accept = false;
         return None;
     }
 
-    if response.has_focus() {
-        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
-            *selected_index = (*selected_index + 1).min(suggestions.len() - 1);
-        }
-        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
-            *selected_index = (*selected_index).saturating_sub(1);
-        }
+    if *pending_nav != 0 {
+        *selected_index = nav_index(*selected_index, *pending_nav, suggestions.len());
+        *pending_nav = 0;
     }
     if *selected_index >= suggestions.len() {
         *selected_index = 0;
@@ -585,7 +585,8 @@ pub fn show_cell_autocomplete_popup(
 
     let mut picked = None;
 
-    if autocomplete_accept_key_pressed(ui, response) {
+    if *pending_accept {
+        *pending_accept = false;
         picked = Some(suggestions[*selected_index].clone());
     }
 
@@ -616,8 +617,9 @@ pub fn show_cell_autocomplete_popup(
 /// combo-style autocomplete — same interaction as the grid cell
 /// popup, but empty text lists EVERY candidate, typing switches to
 /// contains-search, and `force_open` (a ▾ toggle) shows the list without
-/// focus. Selection index lives in egui temp state, so callers need no
-/// extra field.
+/// focus. The highlight and the arrow/Enter channel are the caller's, so
+/// the raw input hook can drive the list even with nothing focused.
+#[allow(clippy::too_many_arguments)]
 pub fn show_autocomplete_popup(
     ui: &mut egui::Ui,
     response: &egui::Response,
@@ -625,6 +627,9 @@ pub fn show_autocomplete_popup(
     candidates: &[String],
     force_open: bool,
     anchor: &egui::Response,
+    selected_index: &mut usize,
+    pending_nav: &mut i8,
+    pending_accept: &mut bool,
 ) -> Option<String> {
     if !grid_cell_active(response) && !force_open {
         return None;
@@ -654,25 +659,18 @@ pub fn show_autocomplete_popup(
         return None;
     }
 
-    let selection_id = response.id.with("autocomplete_selection");
-    let mut selected_index = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<usize>(selection_id).unwrap_or(0));
-    if selected_index >= suggestions.len() {
-        selected_index = 0;
+    if *pending_nav != 0 {
+        *selected_index = nav_index(*selected_index, *pending_nav, suggestions.len());
+        *pending_nav = 0;
     }
-    if response.has_focus() {
-        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
-            selected_index = (selected_index + 1).min(suggestions.len() - 1);
-        }
-        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
-            selected_index = selected_index.saturating_sub(1);
-        }
+    if *selected_index >= suggestions.len() {
+        *selected_index = 0;
     }
 
     let mut picked = None;
-    if autocomplete_accept_key_pressed(ui, response) {
-        picked = Some(suggestions[selected_index].clone());
+    if *pending_accept {
+        *pending_accept = false;
+        picked = Some(suggestions[*selected_index].clone());
     }
 
     let _ = egui::Popup::from_response(anchor)
@@ -681,18 +679,16 @@ pub fn show_autocomplete_popup(
         .show(|ui| {
             ui.set_min_width(anchor.rect.width().max(140.0));
             for (idx, suggestion) in suggestions.iter().enumerate() {
-                let highlighted = idx == selected_index;
+                let highlighted = idx == *selected_index;
                 let btn = autocomplete_suggestion_button(ui, suggestion, highlighted);
                 if btn.hovered() {
-                    selected_index = idx;
+                    *selected_index = idx;
                 }
                 if btn.clicked() {
                     picked = Some(suggestion.clone());
                 }
             }
         });
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(selection_id, selected_index));
 
     picked
 }
@@ -773,13 +769,7 @@ pub fn category_cell_ui(
             .id(cell_id)
             .interactive(editing)
             .desired_width((cell_rect.width() - chevron_w).max(0.0))
-            .frame(egui::Frame::NONE)
-            .margin(egui::Margin {
-                left: 3,
-                right: 3,
-                top: 0,
-                bottom: 0,
-            })
+            .frame(cell_editor_frame())
             .text_color(crate::ui::theme::fg_primary())
             .background_color(Color32::TRANSPARENT)
             .show(ui);
@@ -816,15 +806,6 @@ pub fn category_cell_ui(
             paint_chevron_down(ui.painter(), chevron_paint, chevron_color);
         }
         let chevron = chevron_resp.on_hover_text("Pick from list (click)");
-
-        if editing && text.has_focus() {
-            ui.painter().rect_stroke(
-                text.rect.expand(1.0),
-                0.0,
-                egui::Stroke::new(2.0_f32, crate::ui::theme::accent()),
-                egui::StrokeKind::Outside,
-            );
-        }
 
         CategoryCellUi { text, chevron }
     })
@@ -1060,6 +1041,30 @@ pub fn ui_grid_text_edit(
     response
 }
 
+/// The themed calendar used by the grid's date cell and by the Custom
+/// date-range fields on the Analytics and Settlements tabs.
+pub fn date_picker_button(
+    ui: &mut egui::Ui,
+    date: &mut jiff::civil::Date,
+    id: Id,
+) -> egui::Response {
+    ui.push_id(id.with("datepicker"), |ui| {
+        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+        ui.style_mut().visuals.widgets.hovered.bg_fill = crate::ui::theme::bg_hover();
+        ui.style_mut().visuals.widgets.active.bg_fill = crate::ui::theme::bg_hover();
+        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        ui.style_mut().visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+        ui.style_mut().spacing.button_padding = egui::vec2(4.0, 0.0);
+
+        ui.style_mut().visuals.widgets.inactive.fg_stroke.color = crate::ui::theme::fg_primary();
+        ui.style_mut().visuals.widgets.hovered.fg_stroke.color = crate::ui::theme::fg_primary();
+        ui.style_mut().spacing.interact_size.y = 18.0;
+        ui.add(egui_extras::DatePickerButton::new(date).highlight_weekends(false))
+    })
+    .inner
+}
+
 pub fn ui_grid_date_edit(
     ui: &mut egui::Ui,
     value: &mut String,
@@ -1081,26 +1086,7 @@ pub fn ui_grid_date_edit(
             .unwrap_or_else(|_| jiff::civil::Date::constant(2025, 1, 1));
         let initial_parsed = parsed_date.clone();
 
-        let response = ui
-            .push_id(cell_id.with("datepicker"), |ui| {
-                ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                ui.style_mut().visuals.widgets.hovered.bg_fill = crate::ui::theme::bg_hover();
-                ui.style_mut().visuals.widgets.active.bg_fill = crate::ui::theme::bg_hover();
-                ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-                ui.style_mut().visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-                ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
-                ui.style_mut().spacing.button_padding = egui::vec2(4.0, 0.0);
-
-                ui.style_mut().visuals.widgets.inactive.fg_stroke.color =
-                    crate::ui::theme::fg_primary();
-                ui.style_mut().visuals.widgets.hovered.fg_stroke.color =
-                    crate::ui::theme::fg_primary();
-                ui.style_mut().spacing.interact_size.y = 18.0;
-                ui.add(
-                    egui_extras::DatePickerButton::new(&mut parsed_date).highlight_weekends(false),
-                )
-            })
-            .inner;
+        let response = date_picker_button(ui, &mut parsed_date, cell_id);
 
         let mut date_changed = false;
         if !just_started && response.changed() && parsed_date != initial_parsed {
@@ -1248,8 +1234,23 @@ pub fn grid_nav_target(
         GridNav::PrevRow => row_pos
             .checked_sub(1)
             .and_then(|pos| sorted_indices.get(pos).map(|&idx| (column, idx))),
-        GridNav::NextCol => grid_column_next(column).map(|col| (col, expense_idx)),
-        GridNav::PrevCol => grid_column_prev(column).map(|col| (col, expense_idx)),
+        // Off the end of a row wraps to the next row's first column, the way a
+        // spreadsheet does; off the last row there is no target and the grid
+        // keeps the Tab.
+        GridNav::NextCol => match grid_column_next(column) {
+            Some(next) => Some((next, expense_idx)),
+            None => sorted_indices
+                .get(row_pos + 1)
+                .map(|&idx| (GridColumn::Date, idx)),
+        },
+        GridNav::PrevCol => match grid_column_prev(column) {
+            Some(prev) => Some((prev, expense_idx)),
+            None => row_pos.checked_sub(1).and_then(|pos| {
+                sorted_indices
+                    .get(pos)
+                    .map(|&idx| (GridColumn::Description, idx))
+            }),
+        },
     }
 }
 
@@ -1413,6 +1414,16 @@ pub fn commit_grid_cell<R: GridRow>(
     targets
 }
 
+/// Move a list highlight by `delta`, wrapping at both ends like an OS combo.
+pub fn nav_index(current: usize, delta: i8, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let len = len as i32;
+    let next = (current as i32 + delta as i32).rem_euclid(len);
+    next as usize
+}
+
 impl GridState {
     pub fn clear_selection(&mut self) {
         self.selection = None;
@@ -1429,32 +1440,65 @@ impl GridState {
         rows: &[R],
         candidates_fn: impl Fn(GridColumn) -> Vec<String>,
     ) {
-        let Some((column, idx)) = self.active_cell else {
+        // A chevron click focuses the chevron, not the cell, and a merely
+        // selected cell has no focused editor, so the anchor is the first of
+        // these that exists: editing cell, selected cell, open menu.
+        let focused = self
+            .active_cell
+            .or(self.edit_cell)
+            .or_else(|| {
+                self.selection
+                    .as_ref()
+                    .filter(|selection| !selection.rows.is_empty())
+                    .map(|selection| (selection.column, selection.rows[0]))
+            })
+            .or(self.picker_menu_cell);
+        let Some((column, idx)) = focused else {
             return;
         };
+        let cell_value: &str = match rows.get(idx) {
+            Some(row) => match column {
+                GridColumn::Member => row.row_member(),
+                GridColumn::Category => row.row_category(),
+                GridColumn::Vendor => row.row_vendor(),
+                GridColumn::Description => row.row_description(),
+                GridColumn::Account => row.row_account(),
+                _ => "",
+            },
+            None => "",
+        };
+        let list_open = self.picker_menu_cell.is_some()
+            || !autocomplete_suggestions_list(cell_value, &candidates_fn(column)).is_empty();
+
         let mut keyboard_action = None;
         raw_input.events.retain(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.any() && matches!(key, egui::Key::ArrowUp | egui::Key::ArrowDown) => {
+                // Only claim the arrows while a list is open: in an empty
+                // Amount/Account cell they must still move the caret.
+                if !list_open {
+                    return true;
+                }
+                self.pending_nav = if *key == egui::Key::ArrowDown { 1 } else { -1 };
+                ctx.request_repaint();
+                false
+            }
             egui::Event::Key {
                 key: egui::Key::Enter,
                 pressed: true,
                 modifiers,
                 ..
             } if !modifiers.any() => {
-                let has_suggestions = if let Some(row) = rows.get(idx) {
-                    let val = match column {
-                        GridColumn::Member => row.row_member(),
-                        GridColumn::Category => row.row_category(),
-                        GridColumn::Vendor => row.row_vendor(),
-                        GridColumn::Description => row.row_description(),
-                        _ => "",
-                    };
-                    !autocomplete_suggestions_list(val, &candidates_fn(column)).is_empty()
-                } else {
-                    false
-                };
-
-                if has_suggestions {
-                    keyboard_action = Some(GridKeyboardAction::Tab { shift: false });
+                if list_open {
+                    // Accept the highlighted row and stay put. The value now
+                    // equals a suggestion, so the list is empty next press and
+                    // Enter falls through to the advance branch below.
+                    self.pending_accept = true;
+                    ctx.request_repaint();
                     false
                 } else if self
                     .selection
@@ -1473,6 +1517,12 @@ impl GridState {
                 modifiers,
                 ..
             } => {
+                // Tab picks the highlighted row too, then walks to the next
+                // cell — the popup or chevron menu applies the pick, the nav
+                // action moves the editor.
+                if list_open {
+                    self.pending_accept = true;
+                }
                 keyboard_action = Some(GridKeyboardAction::Tab {
                     shift: modifiers.shift,
                 });
@@ -1495,36 +1545,18 @@ impl GridState {
         &mut self,
         rows: &mut [R],
         sorted_indices: &[usize],
-        autocomplete_selection: usize,
-        candidates_fn: impl Fn(GridColumn) -> Vec<String>,
     ) -> Option<(GridColumn, usize, Vec<usize>)> {
         let pending = self.pending_keyboard.take()?;
 
-        // 1. If Tab, fill autocomplete
-        if matches!(pending.action, GridKeyboardAction::Tab { .. }) {
-            let candidates = candidates_fn(pending.column);
-            if let Some(row) = rows.get_mut(pending.expense_idx) {
-                let value_mut = match pending.column {
-                    GridColumn::Member => Some(row.row_member_mut()),
-                    GridColumn::Category => Some(row.row_category_mut()),
-                    GridColumn::Vendor => Some(row.row_vendor_mut()),
-                    GridColumn::Description => Some(row.row_description_mut()),
-                    _ => None,
-                };
-                if let Some(val) = value_mut {
-                    let suggestions = autocomplete_suggestions_list(val, &candidates);
-                    if let Some(suggestion) = suggestions.get(autocomplete_selection) {
-                        *val = suggestion.clone();
-                    }
-                }
-            }
-        }
+        // The autocomplete fill lives in the popup/chevron menu, which apply
+        // the live highlight index. Filling here would read the index as it
+        // was at the top of the frame, one arrow behind.
 
-        // 2. Commit the cell in memory
+        // 1. Commit the cell in memory
         let committed_targets =
             commit_grid_cell(rows, &self.selection, pending.column, pending.expense_idx);
 
-        // 3. Set the new focus target
+        // 2. Set the new focus target
         self.pending_focus_target = grid_nav_target(
             sorted_indices,
             pending.expense_idx,
@@ -1539,7 +1571,21 @@ impl GridState {
 
 #[cfg(test)]
 mod tests {
-    use super::{egui, grid_text_edit_cell, selection_range};
+    use super::{egui, grid_text_edit_cell, nav_index, selection_range};
+
+    #[test]
+    fn nav_index_wraps_at_both_ends() {
+        assert_eq!(nav_index(0, 1, 3), 1);
+        assert_eq!(nav_index(2, 1, 3), 0, "past the end wraps to the top");
+        assert_eq!(
+            nav_index(0, -1, 3),
+            2,
+            "above the start wraps to the bottom"
+        );
+        assert_eq!(nav_index(0, 5, 3), 2);
+        assert_eq!(nav_index(0, 0, 3), 0);
+        assert_eq!(nav_index(0, 1, 0), 0, "empty list never indexes");
+    }
 
     #[test]
     fn grid_text_edit_restores_item_spacing() {
@@ -1576,5 +1622,39 @@ mod tests {
     #[test]
     fn selection_range_falls_back_to_anchor_when_outside_sorted() {
         assert_eq!(selection_range(&[2, 0, 1], 99, 0), vec![99]);
+    }
+
+    #[test]
+    fn tab_wraps_to_the_next_row_at_the_row_edges() {
+        use super::{grid_nav_target, GridNav};
+        use crate::models::GridColumn;
+
+        // visual order == data order here, so row_pos == index
+        let rows = [10, 11, 12];
+
+        // Description is the last column: Tab lands on the next row's Date
+        assert_eq!(
+            grid_nav_target(&rows, 10, GridColumn::Description, GridNav::NextCol),
+            Some((GridColumn::Date, 11))
+        );
+        // …and there is no target past the last row
+        assert_eq!(
+            grid_nav_target(&rows, 12, GridColumn::Description, GridNav::NextCol),
+            None
+        );
+        // Date is the first column: Shift+Tab lands on the previous row's last
+        assert_eq!(
+            grid_nav_target(&rows, 11, GridColumn::Date, GridNav::PrevCol),
+            Some((GridColumn::Description, 10))
+        );
+        assert_eq!(
+            grid_nav_target(&rows, 10, GridColumn::Date, GridNav::PrevCol),
+            None
+        );
+        // mid-row stepping is unchanged
+        assert_eq!(
+            grid_nav_target(&rows, 11, GridColumn::Member, GridNav::NextCol),
+            Some((GridColumn::Category, 11))
+        );
     }
 }

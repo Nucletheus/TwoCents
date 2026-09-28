@@ -3,6 +3,101 @@ use std::collections::HashSet;
 
 use super::state::*;
 use crate::models::HouseholdMember;
+use chrono::Datelike;
+
+fn to_picker_date(date: chrono::NaiveDate) -> jiff::civil::Date {
+    jiff::civil::Date::new(date.year() as i16, date.month() as i8, date.day() as i8)
+        .unwrap_or_else(|_| jiff::civil::Date::constant(1970, 1, 1))
+}
+
+fn from_picker_date(date: jiff::civil::Date) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(date.year() as i32, date.month() as u32, date.day() as u32)
+        .unwrap_or_else(|| chrono::Local::now().date_naive())
+}
+
+/// The analytics preset strip, reused verbatim by Settlements. Takes the
+/// three date fields directly so any tab can own its own range. Returns true
+/// when the caller should persist the state.
+pub fn date_range_row(
+    ui: &mut egui::Ui,
+    preset: &mut DatePreset,
+    start: &mut Option<chrono::NaiveDate>,
+    end: &mut Option<chrono::NaiveDate>,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        crate::ui::components::label_strong(ui, "Date Range:");
+
+        let presets = [
+            DatePreset::ThisMonth,
+            DatePreset::LastMonth,
+            DatePreset::Last3Months,
+            DatePreset::Last6Months,
+            DatePreset::YTD,
+            DatePreset::LastYear,
+            DatePreset::AllTime,
+            DatePreset::Custom,
+        ];
+
+        for option in presets {
+            let selected = *preset == option;
+            if crate::ui::components::tab_label_button(ui, selected, option.label()).clicked() {
+                *preset = option;
+                let (new_start, new_end) = option.date_range();
+                *start = new_start;
+                *end = new_end;
+                changed = true;
+            }
+        }
+    });
+
+    // Custom date range (only shown when Custom is selected)
+    if *preset == DatePreset::Custom {
+        // Custom reached with no stored dates (e.g. via
+        // AllTime → Custom) used to leave Start/End unusable — the
+        // fields didn't render. Seed a sane default window instead.
+        if start.is_none() && end.is_none() {
+            let today = chrono::Local::now().date_naive();
+            *start = Some(today - chrono::Duration::days(30));
+            *end = Some(today);
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(crate::ui::theme_tokens::SPACE_2);
+            ui.label("Start:");
+            if let Some(start_value) = start {
+                let mut picked = to_picker_date(*start_value);
+                if crate::ui::widgets::date_picker_button(
+                    ui,
+                    &mut picked,
+                    egui::Id::new("range_start"),
+                )
+                .changed()
+                {
+                    *start_value = from_picker_date(picked);
+                    changed = true;
+                }
+            }
+
+            ui.add_space(crate::ui::theme_tokens::SPACE_2);
+            ui.label("End:");
+            if let Some(end_value) = end {
+                let mut picked = to_picker_date(*end_value);
+                if crate::ui::widgets::date_picker_button(
+                    ui,
+                    &mut picked,
+                    egui::Id::new("range_end"),
+                )
+                .changed()
+                {
+                    *end_value = from_picker_date(picked);
+                    changed = true;
+                }
+            }
+        });
+    }
+    changed
+}
 
 pub fn render_filter_panel(
     ui: &mut egui::Ui,
@@ -18,73 +113,12 @@ pub fn render_filter_panel(
     // reveals a free-form date range below. Hidden on the Period
     // Comparison tab, whose dates come from its own A/B combos.
     if show_date_range {
-        ui.horizontal_wrapped(|ui| {
-            crate::ui::components::label_strong(ui, "Date Range:");
-
-            let presets = [
-                DatePreset::ThisMonth,
-                DatePreset::LastMonth,
-                DatePreset::Last3Months,
-                DatePreset::Last6Months,
-                DatePreset::YTD,
-                DatePreset::LastYear,
-                DatePreset::AllTime,
-                DatePreset::Custom,
-            ];
-
-            for preset in presets {
-                let selected = state.date_preset == preset;
-                if crate::ui::components::tab_label_button(ui, selected, preset.label()).clicked() {
-                    state.date_preset = preset;
-                    let (start, end) = preset.date_range();
-                    state.date_start = start;
-                    state.date_end = end;
-                    changed = true;
-                }
-            }
-        });
-
-        // Custom date range (only shown when Custom is selected)
-        if state.date_preset == DatePreset::Custom {
-            // Custom reached with no stored dates (e.g. via
-            // AllTime → Custom) used to leave Start/End unusable — the
-            // fields didn't render. Seed a sane default window instead.
-            if state.date_start.is_none() && state.date_end.is_none() {
-                let today = chrono::Local::now().date_naive();
-                state.date_start = Some(today - chrono::Duration::days(30));
-                state.date_end = Some(today);
-                changed = true;
-            }
-            ui.horizontal(|ui| {
-                ui.add_space(crate::ui::theme_tokens::SPACE_2);
-                ui.label("Start:");
-                if let Some(ref mut start) = state.date_start {
-                    let mut date_str = start.format("%Y-%m-%d").to_string();
-                    if ui.text_edit_singleline(&mut date_str).changed() {
-                        if let Ok(new_date) =
-                            chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                        {
-                            *start = new_date;
-                            changed = true;
-                        }
-                    }
-                }
-
-                ui.add_space(crate::ui::theme_tokens::SPACE_2);
-                ui.label("End:");
-                if let Some(ref mut end) = state.date_end {
-                    let mut date_str = end.format("%Y-%m-%d").to_string();
-                    if ui.text_edit_singleline(&mut date_str).changed() {
-                        if let Ok(new_date) =
-                            chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                        {
-                            *end = new_date;
-                            changed = true;
-                        }
-                    }
-                }
-            });
-        }
+        changed = date_range_row(
+            ui,
+            &mut state.date_preset,
+            &mut state.date_start,
+            &mut state.date_end,
+        );
     }
 
     // Row 2: filter dropdowns. The Clear button is the only "Clear" in

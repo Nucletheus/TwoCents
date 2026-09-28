@@ -46,7 +46,10 @@ impl TwoCentsApp {
                                 household_panel(ui, "Support", |ui| {
                                     crate::ui::components::label_muted(
                                         ui,
-                                        "TwoCents is a free personal project.",
+                                        &format!(
+                                            "TwoCents {} is a free personal project.",
+                                            env!("CARGO_PKG_VERSION")
+                                        ),
                                     );
                                     ui.hyperlink_to(
                                         "Buy Me a Coffee",
@@ -68,7 +71,7 @@ impl TwoCentsApp {
                             ui.set_min_height(HOUSEHOLD_BODY_CARD_MIN_HEIGHT);
                         }
 
-                        crate::ui::components::section_header(ui, "Active household");
+                        crate::ui::components::section_header(ui, "Household");
                         ui.add_space(crate::ui::theme_tokens::SPACE_2);
                         let name_field = grid_text_edit_cell(
                             ui,
@@ -202,6 +205,11 @@ impl TwoCentsApp {
                                     });
                                 }
                             });
+
+                        crate::ui::components::label_muted(
+                            ui,
+                            "The default member is used for new expenses and CSV imports.",
+                        );
 
                         ui.add_space(crate::ui::theme_tokens::SPACE_3);
                         ui.separator();

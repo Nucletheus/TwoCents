@@ -1,7 +1,95 @@
 use crate::db::*;
 use crate::models::*;
+use crate::ui::analytics::aggregation::parse_expense_date;
 use eframe::egui::{self, Color32, RichText, Stroke};
 use rusqlite::OptionalExtension;
+use std::collections::{HashMap, HashSet};
+
+/// One category's contribution to the settlement math, for the selected range.
+pub struct CategorySettlement {
+    pub category: String,
+    pub spend_cents: i64,
+    pub paid_by: HashMap<String, i64>,
+    pub allocated: HashMap<String, i64>,
+}
+
+#[derive(Default)]
+pub struct SettlementTotals {
+    pub paid: HashMap<String, i64>,
+    pub owed: HashMap<String, i64>,
+    pub categories: Vec<CategorySettlement>,
+}
+
+/// Does this row fall inside the selected range? An unbounded range (All
+/// Time) keeps every row, including one whose date never parsed.
+fn in_date_range(
+    raw: &str,
+    start: Option<chrono::NaiveDate>,
+    end: Option<chrono::NaiveDate>,
+) -> bool {
+    if start.is_none() && end.is_none() {
+        return true;
+    }
+    let Some(date) = parse_expense_date(raw) else {
+        return false;
+    };
+    if start.is_some_and(|start| date < start) || end.is_some_and(|end| date > end) {
+        return false;
+    }
+    true
+}
+
+/// Who-owes-whom and the category breakdown, in one pass. Counts only
+/// split-covered debits inside the range: credits and user-excluded transfer
+/// categories are not household payments, and a category with no non-zero
+/// allocation is skipped entirely.
+pub fn settlement_totals(
+    expenses: &[Expense],
+    split_shares: &HashMap<String, Vec<(String, f64)>>,
+    excluded: &HashSet<String>,
+    start: Option<chrono::NaiveDate>,
+    end: Option<chrono::NaiveDate>,
+) -> SettlementTotals {
+    let mut totals = SettlementTotals::default();
+    let mut by_category: HashMap<String, CategorySettlement> = HashMap::new();
+
+    for exp in expenses {
+        if !in_date_range(&exp.date, start, end) {
+            continue;
+        }
+        if exp.amount_cents >= 0 || excluded.contains(&exp.category) {
+            continue;
+        }
+        let Some(allocations) = split_shares.get(&exp.category) else {
+            continue;
+        };
+        let total = -exp.amount_cents;
+        *totals.paid.entry(exp.member.clone()).or_insert(0) += total;
+        let entry = by_category
+            .entry(exp.category.clone())
+            .or_insert_with(|| CategorySettlement {
+                category: exp.category.clone(),
+                spend_cents: 0,
+                paid_by: HashMap::new(),
+                allocated: HashMap::new(),
+            });
+        entry.spend_cents += total;
+        *entry.paid_by.entry(exp.member.clone()).or_insert(0) += total;
+        for (member_name, percentage) in allocations {
+            let share = (total as f64 * percentage / 100.0).round() as i64;
+            *totals.owed.entry(member_name.clone()).or_insert(0) += share;
+            *entry.allocated.entry(member_name.clone()).or_insert(0) += share;
+        }
+    }
+
+    totals.categories = by_category.into_values().collect();
+    totals.categories.sort_by(|a, b| {
+        b.spend_cents
+            .cmp(&a.spend_cents)
+            .then(a.category.cmp(&b.category))
+    });
+    totals
+}
 
 const NAME_COL_W: f32 = 150.0;
 const BTN_COL_W: f32 = 46.0;
@@ -64,6 +152,32 @@ impl super::super::TwoCentsApp {
             return;
         }
 
+        // Own date range: the analytics preset strip, stored separately so the
+        // two tabs never move each other. Rolling presets are recomputed every
+        // frame so YTD and friends stay current.
+        let mut range_changed = crate::ui::analytics::filters::date_range_row(
+            ui,
+            &mut self.settlements_date_preset,
+            &mut self.settlements_date_start,
+            &mut self.settlements_date_end,
+        );
+        if crate::ui::popups::styled_button(ui, "Reset", false).clicked() {
+            self.settlements_date_preset = crate::ui::analytics::state::DatePreset::AllTime;
+            self.settlements_date_start = None;
+            self.settlements_date_end = None;
+            range_changed = true;
+        }
+        if range_changed {
+            self.persist_settlements_date_range();
+        }
+        let (range_start, range_end) =
+            if self.settlements_date_preset == crate::ui::analytics::state::DatePreset::Custom {
+                (self.settlements_date_start, self.settlements_date_end)
+            } else {
+                self.settlements_date_preset.date_range()
+            };
+        ui.add_space(crate::ui::theme_tokens::SPACE_2);
+
         // === Who Owes Whom (balances + suggested payments side by side) ===
         crate::ui::components::heading_lg(ui, "Who Owes Whom");
         ui.add_space(crate::ui::theme_tokens::SPACE_2);
@@ -72,13 +186,6 @@ impl super::super::TwoCentsApp {
         // magnitude; income (credits) and excluded transfer/payment rows are
         // not household payments and never enter the math.
         let excluded = excluded_category_labels(&categories);
-        let shared_spend = |exp: &Expense| -> i64 {
-            if exp.amount_cents < 0 && !excluded.contains(&exp.category) {
-                -exp.amount_cents
-            } else {
-                0
-            }
-        };
 
         // Who Owes Whom counts ONLY split-covered categories — any
         // category with at least one non-zero allocation. No equal-split
@@ -86,35 +193,20 @@ impl super::super::TwoCentsApp {
         // with one split category configured). Categories whose splits are all
         // zero stay out too. A 100%-one-member split still counts when the
         // OTHER member paid the row (personal spend on the other's card).
-        let mut split_shares: std::collections::HashMap<String, Vec<(&str, f64)>> =
+        let mut split_shares: std::collections::HashMap<String, Vec<(String, f64)>> =
             std::collections::HashMap::new();
         for split in &splits {
             if split.percentage != 0.0 {
                 split_shares
                     .entry(split.category.clone())
                     .or_default()
-                    .push((split.member_name.as_str(), split.percentage));
+                    .push((split.member_name.clone(), split.percentage));
             }
         }
 
-        let mut paid: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        let mut owed: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        for exp in &expenses {
-            let total = shared_spend(exp);
-            if total == 0 {
-                continue;
-            }
-            let Some(allocations) = split_shares.get(&exp.category) else {
-                continue;
-            };
-            *paid.entry(exp.member.clone()).or_insert(0) += total;
-            for (member_name, percentage) in allocations {
-                let share = (total as f64 * percentage / 100.0).round() as i64;
-                *owed.entry((*member_name).to_string()).or_insert(0) += share;
-            }
-        }
+        let totals = settlement_totals(&expenses, &split_shares, &excluded, range_start, range_end);
 
-        if paid.values().all(|&value| value == 0) {
+        if totals.paid.values().all(|&value| value == 0) {
             crate::ui::components::label_muted(
                 ui,
                 "Balances only count categories with split percentages assigned below.",
@@ -124,8 +216,8 @@ impl super::super::TwoCentsApp {
 
         let mut net: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for m in &members {
-            let p = paid.get(&m.name).copied().unwrap_or(0);
-            let o = owed.get(&m.name).copied().unwrap_or(0);
+            let p = totals.paid.get(&m.name).copied().unwrap_or(0);
+            let o = totals.owed.get(&m.name).copied().unwrap_or(0);
             net.insert(m.name.clone(), p - o);
         }
 
@@ -220,6 +312,85 @@ impl super::super::TwoCentsApp {
 
         ui.add_space(crate::ui::theme_tokens::SPACE_2);
 
+        // === Category breakdown for the selected range ===
+        crate::ui::components::heading_lg(ui, "Category Breakdown");
+        ui.add_space(crate::ui::theme_tokens::SPACE_1);
+        crate::ui::components::label_muted(
+            ui,
+            "Shared spend inside the selected range, and each member's net on it.",
+        );
+        ui.add_space(crate::ui::theme_tokens::SPACE_2);
+        if totals.categories.is_empty() {
+            crate::ui::components::label_muted(
+                ui,
+                "No split-covered spending in this range. Widen the date range or assign split percentages below.",
+            );
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("settlements_breakdown")
+                .auto_shrink([false, false])
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    for category in &totals.categories {
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(SWATCH_R * 2.0, SWATCH_R * 2.0),
+                                egui::Sense::hover(),
+                            );
+                            let color = categories
+                                .iter()
+                                .find(|c| c.full_label(&parents) == category.category)
+                                .map_or(crate::ui::theme::fg_secondary(), |c| c.color);
+                            ui.painter().circle_filled(rect.center(), SWATCH_R, color);
+                            ui.label(
+                                RichText::new(&category.category)
+                                    .color(crate::ui::theme::fg_primary()),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    for m in members.iter().rev() {
+                                        let paid =
+                                            category.paid_by.get(&m.name).copied().unwrap_or(0);
+                                        let share =
+                                            category.allocated.get(&m.name).copied().unwrap_or(0);
+                                        if paid == 0 && share == 0 {
+                                            continue;
+                                        }
+                                        let net = paid - share;
+                                        let (sign, color) = if net >= 0 {
+                                            ("+", crate::ui::theme::accent())
+                                        } else {
+                                            ("-", crate::ui::theme::error())
+                                        };
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} {sign}${}",
+                                                m.name,
+                                                format_cents(net)
+                                            ))
+                                            .small()
+                                            .color(color),
+                                        );
+                                        ui.add_space(crate::ui::theme_tokens::SPACE_2);
+                                    }
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "${}",
+                                            format_cents(category.spend_cents)
+                                        ))
+                                        .strong()
+                                        .color(crate::ui::theme::fg_primary()),
+                                    );
+                                },
+                            );
+                        });
+                    }
+                });
+        }
+
+        ui.add_space(crate::ui::theme_tokens::SPACE_2);
+
         let parent_ids = sorted_parent_category_ids(&categories);
         let num_members = members.len();
 
@@ -248,8 +419,7 @@ impl super::super::TwoCentsApp {
 
                 // Build blocks: header (parent) + data rows (subs; the parent itself when childless)
                 // excluded categories (user-flagged) get no block at all —
-                // their rows never enter the math either (shared_spend filters them).
-                let excluded = excluded_category_labels(&categories);
+                // their rows never enter the math either (settlement_totals filters them).
                 let mut blocks: Vec<(BlockRow, Vec<BlockRow>)> = Vec::new();
                 for parent_id in &parent_ids {
                     let Some(parent) = categories.iter().find(|c| c.id == *parent_id) else {
@@ -826,4 +996,89 @@ fn render_category_block(
             );
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expense(date: &str, amount_cents: i64, member: &str, category: &str) -> Expense {
+        Expense {
+            id: 0,
+            date: date.into(),
+            amount_input: String::new(),
+            amount_cents,
+            member: member.into(),
+            category: category.into(),
+            vendor: String::new(),
+            description: String::new(),
+            account_id: 0,
+            account: String::new(),
+        }
+    }
+
+    fn shares() -> HashMap<String, Vec<(String, f64)>> {
+        HashMap::from([(
+            "Food > Groceries".to_string(),
+            vec![("Me".to_string(), 50.0), ("Alex".to_string(), 50.0)],
+        )])
+    }
+
+    #[test]
+    fn settlement_totals_respect_the_date_range_and_exclusions() {
+        let expenses = vec![
+            expense("2026-09-10", -1000, "Me", "Food > Groceries"),
+            expense("2026-09-20", -2000, "Alex", "Food > Groceries"),
+            // out of range
+            expense("2026-01-05", -9999, "Me", "Food > Groceries"),
+            // income: never shared spend
+            expense("2026-09-11", 5000, "Me", "Income > Salary"),
+            // user-excluded transfer category
+            expense(
+                "2026-09-12",
+                -3000,
+                "Me",
+                "Financial > Debt Repayment (Credit Cards)",
+            ),
+        ];
+        let excluded: HashSet<String> = ["Financial > Debt Repayment (Credit Cards)".to_string()]
+            .into_iter()
+            .collect();
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+
+        let totals = settlement_totals(&expenses, &shares(), &excluded, Some(start), None);
+
+        assert_eq!(totals.paid.get("Me"), Some(&1000));
+        assert_eq!(totals.paid.get("Alex"), Some(&2000));
+        assert_eq!(totals.owed.get("Me"), Some(&1500));
+        assert_eq!(totals.owed.get("Alex"), Some(&1500));
+        assert_eq!(totals.categories.len(), 1);
+        let category = &totals.categories[0];
+        assert_eq!(category.category, "Food > Groceries");
+        assert_eq!(category.spend_cents, 3000);
+        assert_eq!(category.paid_by.get("Alex"), Some(&2000));
+        assert_eq!(category.allocated.get("Me"), Some(&1500));
+
+        // All Time keeps the same rows plus the older one.
+        let all_time = settlement_totals(&expenses, &shares(), &excluded, None, None);
+        assert_eq!(all_time.categories[0].spend_cents, 12999);
+    }
+
+    #[test]
+    fn a_row_outside_the_range_leaves_every_total_at_zero() {
+        let expenses = vec![expense("2026-09-10", -1000, "Me", "Food > Groceries")];
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+
+        let totals = settlement_totals(
+            &expenses,
+            &shares(),
+            &HashSet::new(),
+            Some(start),
+            Some(end),
+        );
+
+        assert!(totals.paid.is_empty());
+        assert!(totals.categories.is_empty());
+    }
 }

@@ -12,9 +12,9 @@ use eframe::egui;
 struct AccountComboOut {
     picked: Option<String>,
     focused: bool,
-    toggled: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn account_combo(
     ui: &mut egui::Ui,
     name: &mut String,
@@ -22,6 +22,9 @@ fn account_combo(
     width: f32,
     text_id: egui::Id,
     dropdown_open: &mut bool,
+    selection: &mut usize,
+    pending_nav: &mut i8,
+    pending_accept: &mut bool,
 ) -> AccountComboOut {
     let h = ui.spacing().interact_size.y.max(24.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
@@ -80,20 +83,27 @@ fn account_combo(
     if chevron_zone.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let mut toggled = false;
     if chevron_zone.clicked() {
         *dropdown_open = !*dropdown_open;
-        toggled = true;
         ui.memory_mut(|mem| mem.request_focus(text_id));
     }
-    let picked = show_autocomplete_popup(ui, &response, name, candidates, *dropdown_open, &anchor);
+    let picked = show_autocomplete_popup(
+        ui,
+        &response,
+        name,
+        candidates,
+        *dropdown_open,
+        &anchor,
+        selection,
+        pending_nav,
+        pending_accept,
+    );
     // Enter only confirms the name — importing stays exclusively
     // with the "Save Reviewed Import" button (an earlier Enter-to-save here
     // silently imported every staged row as soon as the name was confirmed).
     AccountComboOut {
         picked,
         focused: response.has_focus(),
-        toggled,
     }
 }
 
@@ -152,8 +162,6 @@ impl TwoCentsApp {
         let mut account_picked: Option<String> = None;
         let mut account_focused = false;
         let account_text_id = egui::Id::new("import_account_text");
-        let dropdown_id = egui::Id::new("import_account_dropdown");
-        let mut dropdown_open = ui.ctx().data_mut(|d| d.get_temp::<bool>(dropdown_id).unwrap_or(false));
         let mut account_own_row = false;
         ui.horizontal(|ui| {
           // heading + secondary text, same hierarchy as the
@@ -190,13 +198,13 @@ impl TwoCentsApp {
                   &account_candidates,
                   available.clamp(200.0, 240.0),
                   account_text_id,
-                  &mut dropdown_open,
+                  &mut self.import_account_dropdown_open,
+                  &mut self.import_account_selection,
+                  &mut self.import_grid_state.pending_nav,
+                  &mut self.import_grid_state.pending_accept,
                 );
                 account_picked = out.picked;
                 account_focused = out.focused;
-                if out.toggled {
-                  ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, dropdown_open));
-                }
                 if self.import_account_name.trim().is_empty() {
                   crate::ui::components::label_muted(ui, "Name the account before saving");
                 }
@@ -223,13 +231,13 @@ impl TwoCentsApp {
                 &account_candidates,
                 width,
                 account_text_id,
-                &mut dropdown_open,
+                &mut self.import_account_dropdown_open,
+                &mut self.import_account_selection,
+                &mut self.import_grid_state.pending_nav,
+                &mut self.import_grid_state.pending_accept,
               );
               account_picked = out.picked;
               account_focused = out.focused;
-              if out.toggled {
-                ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, dropdown_open));
-              }
               if self.import_account_name.trim().is_empty() {
                 crate::ui::components::label_muted(ui, "Name the account before saving");
               }
@@ -239,8 +247,7 @@ impl TwoCentsApp {
         }
         if let Some(picked) = account_picked {
           self.import_account_name = picked;
-          dropdown_open = false;
-          ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, false));
+          self.import_account_dropdown_open = false;
         }
         // the statement picker IS the account assignment — mirror
         // its value into every staged row so the grid's Account column shows
@@ -257,9 +264,9 @@ impl TwoCentsApp {
         // if the account picker is focused, Escape just clears its suggestion list.
         if self.import_grid_state.edit_cell.is_none() {
           if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            if account_focused || dropdown_open {
+            if account_focused || self.import_account_dropdown_open {
               ui.memory_mut(|mem| mem.surrender_focus(account_text_id));
-              ui.ctx().data_mut(|d| d.insert_temp(dropdown_id, false));
+              self.import_account_dropdown_open = false;
             } else if self.import_grid_state.selection.is_some() {
               self.import_grid_state.clear_selection();
             } else {
@@ -298,8 +305,10 @@ impl TwoCentsApp {
               &category_candidates,
               &member_candidates,
               &description_candidates,
+              &account_candidates,
               &self.members,
               &self.categories,
+              &self.accounts,
               "import_cell",
               true,
             );
@@ -450,21 +459,23 @@ impl TwoCentsApp {
 
         self.sync_import_amounts();
         let rows = self.import_rows.clone();
-        let account = resolve_or_create_account(
-            &self.conn,
-            self.household_id,
-            &self.import_detected_account,
-            &self.import_account_name,
-        );
-        match account.and_then(|account_id| {
-            save_import_rows(&self.conn, self.household_id, &rows, account_id)
-        }) {
-            Ok(count) => {
+        let saved = self.conn.unchecked_transaction().and_then(|tx| {
+            let account_id = resolve_or_create_account(
+                &tx,
+                self.household_id,
+                &self.import_detected_account,
+                &self.import_account_name,
+            )?;
+            save_import_rows(&tx, self.household_id, &rows, account_id)?;
+            tx.commit()
+        });
+        match saved {
+            Ok(_) => {
                 self.import_rows.clear();
                 self.show_import_review = false;
                 self.reload();
             }
-            Err(err) => eprintln!("[import] save failed: {err}"),
+            Err(err) => self.set_transient_status(format!("Import failed, nothing saved: {err}")),
         }
     }
 
