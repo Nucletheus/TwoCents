@@ -37,14 +37,18 @@ use crate::models::*;
 use crate::ui::theme;
 use crate::ui::widgets::*;
 
-/// Cached week counts for the current budget year
+/// Cached week layout for the budget year. Week numbers follow the same
+/// Monday-anchored calendar as `models::budget_week_*`: week 1 starts on
+/// the Monday on or before January 1. A week belongs to the month of its
+/// last in-year day, so the per-month and per-quarter week counts always
+/// sum to `total_weeks`.
 #[derive(Clone)]
 struct WeekCountCache {
     year: i32,
     weeks_in_month: [i32; 13],  // index 1-12
     weeks_in_quarter: [i32; 5], // index 1-4
     total_weeks: i32,
-    week_to_month: [i32; 54], // week number → month (1-12)
+    week_to_month: [i32; 54], // week number -> month (1-12)
 }
 
 impl WeekCountCache {
@@ -53,31 +57,14 @@ impl WeekCountCache {
         let mut weeks_in_quarter = [0i32; 5];
         let mut week_to_month = [0i32; 54];
 
-        for month in 1..=12 {
-            let first_day = chrono::NaiveDate::from_ymd_opt(year, month as u32, 1).unwrap();
-            let last_day = if month == 12 {
-                chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap() - chrono::Duration::days(1)
-            } else {
-                chrono::NaiveDate::from_ymd_opt(year, (month + 1) as u32, 1).unwrap()
-                    - chrono::Duration::days(1)
-            };
-
-            let mut weeks = std::collections::HashSet::new();
-            let mut current = first_day;
-            while current <= last_day {
-                let week_num = current.iso_week().week() as i32;
-                weeks.insert(week_num);
-                week_to_month[week_num as usize] = month as i32;
-                current += chrono::Duration::days(1);
-            }
-
-            weeks_in_month[month as usize] = weeks.len() as i32;
-            let quarter = (month - 1) / 3 + 1;
-            weeks_in_quarter[quarter as usize] += weeks.len() as i32;
+        let total_weeks = crate::models::budget_week_count(year);
+        for week in 1..=total_weeks {
+            let (_, week_end) = crate::models::budget_week_range(year, week);
+            let month = week_end.month() as i32;
+            week_to_month[week as usize] = month;
+            weeks_in_month[month as usize] += 1;
+            weeks_in_quarter[((month - 1) / 3 + 1) as usize] += 1;
         }
-
-        let dec31 = chrono::NaiveDate::from_ymd_opt(year, 12, 31).unwrap();
-        let total_weeks = dec31.iso_week().week() as i32;
 
         WeekCountCache {
             year,
@@ -1922,5 +1909,98 @@ mod budget_tests {
         };
         assert_eq!(legacy_cap(2026), 30_000);
         assert_eq!(legacy_cap(2008), 0);
+    }
+
+    fn week_cache(year: i32) -> WeekCountCache {
+        WeekCountCache::build(year)
+    }
+
+    #[test]
+    fn week_cache_agrees_with_budget_week_calendar() {
+        // The cache feeds the weekly snapshots and the propagation math, so it
+        // must use the same Monday-anchored week numbering as models.rs —
+        // never ISO week numbers, which diverge whenever Jan 1 is Fri/Sat/Sun.
+        for year in 2024..=2035 {
+            let cache = week_cache(year);
+            assert_eq!(
+                cache.total_weeks,
+                budget_week_count(year),
+                "total_weeks disagrees with budget_week_count for {year}"
+            );
+
+            let mut month_sum = 0;
+            for month in 1..=12 {
+                month_sum += cache.weeks_in_month[month as usize];
+            }
+            let mut quarter_sum = 0;
+            for q in 1..=4 {
+                quarter_sum += cache.weeks_in_quarter[q as usize];
+            }
+            assert_eq!(
+                month_sum, cache.total_weeks,
+                "month weeks != total ({year})"
+            );
+            assert_eq!(
+                quarter_sum, cache.total_weeks,
+                "quarter weeks != total ({year})"
+            );
+
+            let mut previous_month = 0;
+            for week in 1..=cache.total_weeks {
+                let month = cache.week_to_month[week as usize];
+                assert!(
+                    (1..=12).contains(&month),
+                    "week {week} of {year} mapped to month {month}"
+                );
+                assert!(
+                    month >= previous_month,
+                    "week_to_month went backwards at week {week} of {year}"
+                );
+                previous_month = month;
+
+                // Each numbered week must start on a Monday and its month must
+                // be the month of its last in-year day.
+                let start = budget_week_start(year, week);
+                assert_eq!(
+                    start.weekday().num_days_from_monday(),
+                    0,
+                    "week {week} of {year} does not start on a Monday"
+                );
+                let end = budget_period_date_range(BudgetGranularity::Weekly, year, week).1;
+                assert_eq!(
+                    month,
+                    end.month() as i32,
+                    "week {week} of {year} assigned to the wrong month"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn week_cache_covers_iso_divergent_years() {
+        // Jan 1 falls on a Friday in 2021 and 2027, so the Monday-anchored
+        // calendar has 53 weeks while ISO year-week numbering reports 52.
+        // The old ISO-based cache dropped the final week (which holds Dec 31)
+        // and shifted every week-to-month mapping by one.
+        for year in [2021, 2027] {
+            let dec31 = chrono::NaiveDate::from_ymd_opt(year, 12, 31).unwrap();
+            assert_eq!(dec31.weekday().num_days_from_monday(), 4, "not a Friday");
+
+            let cache = week_cache(year);
+            assert_eq!(cache.total_weeks, 53, "{year} should have 53 weeks");
+            assert_eq!(
+                cache.week_to_month[53], 12,
+                "the last week of {year} must belong to December"
+            );
+            assert_eq!(
+                budget_period_for_date(BudgetGranularity::Weekly, year, dec31),
+                Some(53),
+                "Dec 31 of {year} must land in week 53"
+            );
+            assert_eq!(
+                cache.weeks_in_month[12], 5,
+                "December {year} spans five Monday-anchored weeks"
+            );
+        }
     }
 }

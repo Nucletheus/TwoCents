@@ -22,3 +22,7 @@ yarn-error.log*
 .env.*
 .vscode/
 .idea/
+
+# Beira session artifacts (live transcript + usage metrics)
+session.json
+metrics.jsonl
