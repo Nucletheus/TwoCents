@@ -4,6 +4,9 @@ All notable changes to TwoCents are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Budget week layout now uses the same Monday-anchored calendar as the rest of the budget system. It previously counted ISO weeks, which diverge from the app's week numbering whenever January 1 falls on a Friday, Saturday, or Sunday (first affected year: 2027), leaving the final week of the year without a weekly budget and splitting per-week amounts by the wrong month's week count.
+
 ## [v0.1.3] - 2026-09-28
 
 ### Added
