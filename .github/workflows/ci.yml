@@ -26,3 +26,5 @@ jobs:
         run: cargo clippy --all-targets --locked
       - name: Tests
         run: cargo test --locked
+      - name: Application icon is up to date
+        run: python tools/gen_icon.py --check

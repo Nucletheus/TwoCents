@@ -66,6 +66,7 @@ $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($lnk)
 $shortcut.TargetPath = $exe.FullName
 $shortcut.WorkingDirectory = $exe.DirectoryName
+$shortcut.IconLocation = "$($exe.FullName),0"
 $shortcut.Save()
 
 Write-Host ""
