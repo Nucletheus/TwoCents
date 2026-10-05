@@ -4,6 +4,8 @@ All notable changes to TwoCents are documented here.
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-10-05
+
 ### Added
 - A real application icon: a multi-resolution `assets/twocents.ico` (generated from the in-app balanced icon) is embedded into the executable, so Explorer, a pinned taskbar entry, and the Start Menu shortcut now show the TwoCents icon instead of the generic Windows default.
 - The installer sets the Start Menu shortcut's icon to the installed executable.
