@@ -4,6 +4,9 @@ All notable changes to TwoCents are documented here.
 
 ## [Unreleased]
 
+### Removed
+- Developer-only helper scripts (`cargo_build_msvc.bat`, `restart_app.bat`) that hardcoded a local Visual Studio path; `CONTRIBUTING.md` documents the supported build flow.
+
 ## [v0.1.4] - 2026-10-05
 
 ### Added
